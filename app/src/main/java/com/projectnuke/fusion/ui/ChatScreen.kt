@@ -248,7 +248,8 @@ fun ChatScreen(
                     .fillMaxWidth()
                     .background(BlackBg)
                     .navigationBarsPadding()
-                    .imePadding()
+                    .imePadding(),
+                contentAlignment = Alignment.BottomCenter
             ) {
                 ChatInputBar(
                     value = input,
