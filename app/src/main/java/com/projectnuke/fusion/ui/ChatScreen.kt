@@ -87,6 +87,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.core.content.FileProvider
+import java.net.HttpURLConnection
 private val BlackBg = Color(0xFF000000)
 private val PanelBg = Color(0xFF171717)
 private val MenuBg = Color(0xFF202020)
@@ -318,7 +319,6 @@ fun ChatScreen(
                     pendingAttachments = pendingAttachments,
                     onRemoveAttachment = { attachment ->
                         pendingAttachments.remove(attachment)
-                        File(attachment.localPath).delete()
                     },
                     onPlusClick = {
                         attachmentPickerLauncher.launch(
@@ -342,6 +342,7 @@ fun ChatScreen(
 
                         if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
                             input = ""
+                            pendingAttachments.clear()
                             isGenerating = true
                             generationStatus = if (webSearchEnabled) "웹 검색 중..." else "모델 준비 중..."
 
@@ -381,8 +382,13 @@ fun ChatScreen(
 
                                     dao.updateConversationTime(activeConversationId, now)
 
+                                    val webSearchQuery = buildWebSearchQuery(
+                                        latestUserInput = userInput,
+                                        messages = messages
+                                    )
+
                                     val webSearchResult = if (webSearchEnabled) {
-                                        performSimpleWebSearch(userInput)
+                                        performSimpleWebSearch(webSearchQuery)
                                     } else {
                                         null
                                     }
@@ -2383,104 +2389,221 @@ private suspend fun performSimpleWebSearch(
     query: String
 ): String? {
     return withContext(Dispatchers.IO) {
-        try {
-            val encodedQuery = URLEncoder.encode(query, "UTF-8")
-            val url = URL(
-                "https://api.duckduckgo.com/?q=$encodedQuery&format=json&no_html=1&skip_disambig=1"
-            )
-            val jsonText = url.readText()
-            val json = JSONObject(jsonText)
+        val instantResult = runCatching {
+            performDuckDuckGoInstantSearch(query)
+        }.getOrNull()
 
-            val lines = mutableListOf<String>()
+        if (!instantResult.isNullOrBlank() && !instantResult.contains("검색 결과가 충분하지 않았어")) {
+            return@withContext instantResult
+        }
 
-            val heading = json.optString("Heading")
-            val abstractText = json.optString("AbstractText")
-            val abstractUrl = json.optString("AbstractURL")
-            val answer = json.optString("Answer")
-            val definition = json.optString("Definition")
+        val htmlResult = runCatching {
+            performDuckDuckGoHtmlSearch(query)
+        }.getOrNull()
 
-            if (answer.isNotBlank()) {
-                lines.add("즉답: $answer")
-            }
+        if (!htmlResult.isNullOrBlank()) {
+            return@withContext htmlResult
+        }
 
-            if (definition.isNotBlank()) {
-                lines.add("정의: $definition")
-            }
+        instantResult ?: "검색 결과를 가져오지 못했어. 일반 지식과 추론을 구분해서 답해야 해."
+    }
+}
+private fun performDuckDuckGoInstantSearch(
+    query: String
+): String? {
+    val encodedQuery = URLEncoder.encode(query, "UTF-8")
+    val url = URL(
+        "https://api.duckduckgo.com/?q=$encodedQuery&format=json&no_html=1&skip_disambig=1"
+    )
 
-            if (abstractText.isNotBlank()) {
-                if (heading.isNotBlank()) {
-                    lines.add("주제: $heading")
-                }
+    val jsonText = url.readText()
+    val json = JSONObject(jsonText)
+    val lines = mutableListOf<String>()
 
-                lines.add("요약: $abstractText")
+    val heading = json.optString("Heading")
+    val abstractText = json.optString("AbstractText")
+    val abstractUrl = json.optString("AbstractURL")
+    val answer = json.optString("Answer")
+    val definition = json.optString("Definition")
 
-                if (abstractUrl.isNotBlank()) {
-                    lines.add("출처: $abstractUrl")
-                }
-            }
+    if (answer.isNotBlank()) {
+        lines.add("즉답: $answer")
+    }
 
-            val relatedTopics = json.optJSONArray("RelatedTopics")
+    if (definition.isNotBlank()) {
+        lines.add("정의: $definition")
+    }
 
-            if (relatedTopics != null) {
-                var added = 0
-                var index = 0
-
-                while (index < relatedTopics.length() && added < 3) {
-                    val item = relatedTopics.optJSONObject(index)
-
-                    if (item != null) {
-                        val text = item.optString("Text")
-                        val firstUrl = item.optString("FirstURL")
-
-                        if (text.isNotBlank()) {
-                            lines.add("관련: $text")
-
-                            if (firstUrl.isNotBlank()) {
-                                lines.add("관련 출처: $firstUrl")
-                            }
-
-                            added += 1
-                        } else {
-                            val nestedTopics = item.optJSONArray("Topics")
-
-                            if (nestedTopics != null) {
-                                var nestedIndex = 0
-
-                                while (nestedIndex < nestedTopics.length() && added < 3) {
-                                    val nested = nestedTopics.optJSONObject(nestedIndex)
-                                    val nestedText = nested?.optString("Text").orEmpty()
-                                    val nestedUrl = nested?.optString("FirstURL").orEmpty()
-
-                                    if (nestedText.isNotBlank()) {
-                                        lines.add("관련: $nestedText")
-
-                                        if (nestedUrl.isNotBlank()) {
-                                            lines.add("관련 출처: $nestedUrl")
-                                        }
-
-                                        added += 1
-                                    }
-
-                                    nestedIndex += 1
-                                }
-                            }
-                        }
-                    }
-
-                    index += 1
-                }
-            }
-
-            if (lines.isEmpty()) {
-                "검색 결과가 충분하지 않았어. 이 검색 API는 일반 검색 결과 전체가 아니라 instant answer 중심이라 결과가 비어 있을 수 있어."
-            } else {
-                lines.joinToString("\n")
-            }
-        } catch (e: Exception) {
-            "웹 검색 중 오류가 났어: ${e.message ?: "unknown error"}"
+    if (abstractText.isNotBlank()) {
+        if (heading.isNotBlank()) {
+            lines.add("주제: $heading")
+        }
+        lines.add("요약: $abstractText")
+        if (abstractUrl.isNotBlank()) {
+            lines.add("출처: $abstractUrl")
         }
     }
 
+    val relatedTopics = json.optJSONArray("RelatedTopics")
+    if (relatedTopics != null) {
+        var added = 0
+        var index = 0
+
+        while (index < relatedTopics.length() && added < 3) {
+            val item = relatedTopics.optJSONObject(index)
+
+            if (item != null) {
+                val text = item.optString("Text")
+                val firstUrl = item.optString("FirstURL")
+
+                if (text.isNotBlank()) {
+                    lines.add("관련: $text")
+                    if (firstUrl.isNotBlank()) {
+                        lines.add("관련 출처: $firstUrl")
+                    }
+                    added += 1
+                } else {
+                    val nestedTopics = item.optJSONArray("Topics")
+                    if (nestedTopics != null) {
+                        var nestedIndex = 0
+
+                        while (nestedIndex < nestedTopics.length() && added < 3) {
+                            val nested = nestedTopics.optJSONObject(nestedIndex)
+                            val nestedText = nested?.optString("Text").orEmpty()
+                            val nestedUrl = nested?.optString("FirstURL").orEmpty()
+
+                            if (nestedText.isNotBlank()) {
+                                lines.add("관련: $nestedText")
+                                if (nestedUrl.isNotBlank()) {
+                                    lines.add("관련 출처: $nestedUrl")
+                                }
+                                added += 1
+                            }
+
+                            nestedIndex += 1
+                        }
+                    }
+                }
+            }
+
+            index += 1
+        }
+    }
+
+    return if (lines.isEmpty()) {
+        null
+    } else {
+        lines.joinToString("\n")
+    }
+}
+
+private fun performDuckDuckGoHtmlSearch(
+    query: String
+): String? {
+    val encodedQuery = URLEncoder.encode(query, "UTF-8")
+    val url = URL("https://html.duckduckgo.com/html/?q=$encodedQuery")
+
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 8000
+        readTimeout = 8000
+        setRequestProperty(
+            "User-Agent",
+            "Mozilla/5.0 (Android; Fusion) AppleWebKit/537.36 Chrome Mobile Safari/537.36"
+        )
+    }
+
+    val html = connection.inputStream.bufferedReader().use { it.readText() }
+
+    val resultRegex = Regex(
+        pattern = """(?s)<div class="result results_links.*?</div>\s*</div>"""
+    )
+
+    val titleRegex = Regex(
+        pattern = """(?s)<a rel="nofollow" class="result__a" href="(.*?)">(.*?)</a>"""
+    )
+
+    val snippetRegex = Regex(
+        pattern = """(?s)<a class="result__snippet".*?>(.*?)</a>|<div class="result__snippet".*?>(.*?)</div>"""
+    )
+
+    val results = resultRegex.findAll(html)
+        .mapNotNull { blockMatch ->
+            val block = blockMatch.value
+            val titleMatch = titleRegex.find(block) ?: return@mapNotNull null
+
+            val rawUrl = titleMatch.groupValues[1]
+            val rawTitle = titleMatch.groupValues[2]
+
+            val snippetMatch = snippetRegex.find(block)
+            val rawSnippet = snippetMatch?.groupValues
+                ?.drop(1)
+                ?.firstOrNull { it.isNotBlank() }
+                .orEmpty()
+
+            val title = cleanHtmlText(rawTitle)
+            val snippet = cleanHtmlText(rawSnippet)
+            val link = cleanDuckDuckGoUrl(rawUrl)
+
+            if (title.isBlank()) {
+                null
+            } else {
+                SearchResultText(
+                    title = title,
+                    snippet = snippet,
+                    url = link
+                )
+            }
+        }
+        .take(5)
+        .toList()
+
+    if (results.isEmpty()) return null
+
+    return buildString {
+        appendLine("검색어: $query")
+        appendLine("아래는 DuckDuckGo HTML 검색에서 가져온 참고 결과다.")
+        appendLine()
+
+        results.forEachIndexed { index, result ->
+            appendLine("${index + 1}. ${result.title}")
+            if (result.snippet.isNotBlank()) {
+                appendLine("요약: ${result.snippet}")
+            }
+            if (result.url.isNotBlank()) {
+                appendLine("출처: ${result.url}")
+            }
+            appendLine()
+        }
+    }.trim()
+}
+
+private data class SearchResultText(
+    val title: String,
+    val snippet: String,
+    val url: String
+)
+
+private fun cleanHtmlText(raw: String): String {
+    return raw
+        .replace(Regex("<.*?>"), " ")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+}
+
+private fun cleanDuckDuckGoUrl(raw: String): String {
+    val cleaned = cleanHtmlText(raw)
+
+    return cleaned
+        .replace("&amp;", "&")
+        .trim()
 }
 private fun loadAttachmentThumbnail(
     path: String,
@@ -2561,6 +2684,41 @@ private fun shortModelName(name: String): String {
         else -> name
     }
 }
+private fun buildWebSearchQuery(
+    latestUserInput: String,
+    messages: List<ChatMessage>
+): String {
+    val trimmed = latestUserInput.trim()
+
+    val genericSearchRequest = listOf(
+        "검색해서 알려줘",
+        "검색해줘",
+        "찾아줘",
+        "웹검색해줘",
+        "검색",
+        "알려줘"
+    ).any { keyword ->
+        trimmed == keyword || trimmed.contains(keyword)
+    }
+
+    if (!genericSearchRequest || trimmed.length > 30) {
+        return trimmed
+    }
+
+    val previousUserMessage = messages
+        .asReversed()
+        .firstOrNull { it.role == "user" }
+        ?.content
+        ?.let { parseMessageAttachments(it).body }
+        ?.trim()
+        .orEmpty()
+
+    return if (previousUserMessage.isNotBlank()) {
+        "$previousUserMessage $trimmed"
+    } else {
+        trimmed
+    }
+}
 private fun buildFusionSystemPrompt(
     reasoningEnabled: Boolean,
     webSearchEnabled: Boolean,
@@ -2617,14 +2775,19 @@ Do not output internal tags.
 
     val webRule = if (webSearchEnabled && !webContext.isNullOrBlank()) {
         """
-아래는 웹 검색에서 가져온 참고 정보다.
-검색 결과가 충분하면 반드시 이 정보를 우선 사용해라.
-검색 결과가 부족하거나 오류라면, 그 사실을 짧게 말하고 일반 지식과 추론을 구분해서 답해라.
-검색 결과가 비어 있다고 장황하게 반복하지 마라.
+        아래는 웹 검색에서 가져온 참고 정보다.
 
-웹 검색 참고 정보:
-$webContext
-""".trimIndent()
+        규칙:
+        1. 검색 결과가 충분하면 반드시 이 정보를 우선 사용한다.
+        2. 검색 결과와 일반 지식이 충돌하면 검색 결과를 우선하되, 출처가 불완전할 수 있음을 짧게 말한다.
+        3. 검색 결과가 부족하면 "검색 결과만으로는 부족하다"고 짧게 말하고, 일반 지식과 추론을 구분한다.
+        4. "검색 결과가 비어 있다"는 말을 반복하지 않는다.
+        5. 답변에 원문 URL이 필요하면 검색 결과의 출처를 짧게 언급한다.
+        6. 사용자가 "검색해서 알려줘", "찾아줘"처럼 말하면 직전 대화의 주제를 이어받아 검색 의도로 해석한다. 뭘 검색할지 다시 묻지 않는다.
+
+        웹 검색 참고 정보:
+        $webContext
+    """.trimIndent()
     } else {
         ""
     }
@@ -2662,7 +2825,11 @@ private suspend fun copyUriToAttachmentFile(
                 }
             } ?: return@withContext null
 
-            outputFile
+            if (outputFile.exists() && outputFile.length() > 0L) {
+                outputFile
+            } else {
+                null
+            }
         } catch (_: Exception) {
             null
         }
@@ -2676,13 +2843,19 @@ private fun buildMessageContentWithAttachments(
     if (attachments.isEmpty()) return body
 
     val attachmentTags = attachments.joinToString("\n") { attachment ->
-        """
-        <fusion_attachment>
-        name=${attachment.name}
-        mime=${attachment.mimeType}
-        path=${attachment.localPath}
-        </fusion_attachment>
-        """.trimIndent()
+        val safeName = attachment.name
+            .replace("\\", "\\\\")
+            .replace("|", "\\|")
+
+        val safeMime = attachment.mimeType
+            .replace("\\", "\\\\")
+            .replace("|", "\\|")
+
+        val safePath = attachment.localPath
+            .replace("\\", "\\\\")
+            .replace("|", "\\|")
+
+        "<fusion_attachment_v2>$safeName|$safeMime|$safePath</fusion_attachment_v2>"
     }
 
     return listOf(attachmentTags, body)
@@ -2691,11 +2864,23 @@ private fun buildMessageContentWithAttachments(
 }
 
 private fun parseMessageAttachments(raw: String): ParsedMessageContent {
-    val regex = Regex(
+    val newRegex = Regex(
+        pattern = """<fusion_attachment_v2>(.*?)\|(.*?)\|(.*?)</fusion_attachment_v2>"""
+    )
+
+    val newAttachments = newRegex.findAll(raw).map { match ->
+        LocalAttachment(
+            name = match.groupValues[1].unescapeAttachmentField(),
+            mimeType = match.groupValues[2].unescapeAttachmentField(),
+            localPath = match.groupValues[3].unescapeAttachmentField()
+        )
+    }.toList()
+
+    val oldRegex = Regex(
         pattern = """(?s)<fusion_attachment>\s*name=(.*?)\nmime=(.*?)\npath=(.*?)\s*</fusion_attachment>"""
     )
 
-    val attachments = regex.findAll(raw).map { match ->
+    val oldAttachments = oldRegex.findAll(raw).map { match ->
         LocalAttachment(
             name = match.groupValues[1].trim(),
             mimeType = match.groupValues[2].trim(),
@@ -2703,14 +2888,22 @@ private fun parseMessageAttachments(raw: String): ParsedMessageContent {
         )
     }.toList()
 
-    val body = regex.replace(raw, "").trim()
+    val body = oldRegex
+        .replace(newRegex.replace(raw, ""), "")
+        .trim()
 
     return ParsedMessageContent(
         body = body,
-        attachments = attachments
+        attachments = newAttachments + oldAttachments
     )
 }
 
+private fun String.unescapeAttachmentField(): String {
+    return this
+        .replace("\\|", "|")
+        .replace("\\\\", "\\")
+        .trim()
+}
 private fun buildModelUserContent(
     body: String,
     attachments: List<LocalAttachment>
