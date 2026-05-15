@@ -309,68 +309,34 @@ fun ChatScreen(
                                         null
                                     }
 
-                                    val currentMessages = buildList {
+                                    val fusionSystemPrompt = buildFusionSystemPrompt(
+                                        reasoningEnabled = reasoningEnabled,
+                                        webSearchEnabled = webSearchEnabled,
+                                        webContext = webSearchResult
+                                    )
+
+                                    val currentMessages = buildList<ChatMessage> {
                                         add(
                                             ChatMessage(
                                                 role = "system",
                                                 content = """
-                                                FUSION_GENERATION_SETTINGS
-                                                maxTokens=${generationSettings.maxTokens}
-                                                topK=${generationSettings.topK}
-                                                topP=${generationSettings.topP}
-                                                temperature=${generationSettings.temperature}
-                                                accelerator=${generationSettings.accelerator.name}
-                                                reasoningBudgetTokens=${generationSettings.reasoningBudgetTokens}
-                                            """.trimIndent()
+                FUSION_GENERATION_SETTINGS
+                maxTokens=${generationSettings.maxTokens}
+                topK=${generationSettings.topK}
+                topP=${generationSettings.topP}
+                temperature=${generationSettings.temperature}
+                accelerator=${generationSettings.accelerator.name}
+                reasoningBudgetTokens=${generationSettings.reasoningBudgetTokens}
+            """.trimIndent()
                                             )
                                         )
 
-                                        if (reasoningEnabled) {
-                                            add(
-                                                ChatMessage(
-                                                    role = "system",
-                                                    content = """
-                                                    FUSION_REASONING_MODE=ON
-                                                    이번 답변은 reasoning mode로 작성한다.
-                                                    먼저 짧은 생각 과정을 작성하고, 그 다음 최종 답변을 작성한다.
-                                                    생각 과정은 최대 ${generationSettings.reasoningBudgetTokens} 토큰 안에서 작성한다.
-                                                    출력 형식은 반드시 아래 태그를 사용한다.
-
-                                                    <fusion_thinking>
-                                                    여기에 생각 과정을 쓴다.
-                                                    </fusion_thinking>
-                                                    <fusion_answer>
-                                                    여기에 최종 답변을 쓴다.
-                                                    </fusion_answer>
-                                                """.trimIndent()
-                                                )
+                                        add(
+                                            ChatMessage(
+                                                role = "system",
+                                                content = fusionSystemPrompt
                                             )
-                                        } else {
-                                            add(
-                                                ChatMessage(
-                                                    role = "system",
-                                                    content = """
-                                                    FUSION_REASONING_MODE=OFF
-                                                    생각 과정 태그를 출력하지 말고 바로 최종 답변만 작성한다.
-                                                """.trimIndent()
-                                                )
-                                            )
-                                        }
-
-                                        if (webSearchResult != null) {
-                                            add(
-                                                ChatMessage(
-                                                    role = "system",
-                                                    content = """
-                                                    FUSION_WEB_SEARCH_RESULT
-                                                    아래는 웹 검색에서 가져온 참고 정보다.
-                                                    답변할 때 이 정보를 우선 참고하되, 부족하면 부족하다고 말해라.
-
-                                                    $webSearchResult
-                                                """.trimIndent()
-                                                )
-                                            )
-                                        }
+                                        )
 
                                         selectedModelPath?.let { modelPath ->
                                             add(
@@ -2288,4 +2254,76 @@ private fun shortModelName(name: String): String {
         name.contains("Gemma 4 E4B", ignoreCase = true) -> "Gemma 4 E4B"
         else -> name
     }
+}
+private fun buildFusionSystemPrompt(
+    reasoningEnabled: Boolean,
+    webSearchEnabled: Boolean,
+    webContext: String?
+): String {
+    val basePrompt = """
+You are Fusion, a personal AI friend for the user.
+
+Your default speaking style is friendly and polite Korean.
+For technical questions, answer accurately, calmly, and clearly.
+For casual conversations, respond naturally and lightly.
+If you do not know something, say that you do not know.
+If something is uncertain, clearly label it as an inference.
+Do not repeat the user's question unnecessarily.
+Do not output internal role names or labels such as thought, user, model, assistant.
+Avoid exaggerated headings, excessive emojis, and marketing-like expressions.
+
+한국어 지침:
+너는 Fusion이다.
+사용자와 자연스럽게 대화하는 개인 AI 친구다.
+
+기본 말투는 친근한 존댓말이다.
+기술 질문에는 정확하고 차분하게 답한다.
+일상 대화에는 부담 없이 자연스럽게 반응한다.
+모르는 내용은 모른다고 말한다.
+불확실한 내용은 추론이라고 구분한다.
+사용자의 질문을 그대로 반복하지 않는다.
+thought, user, model, assistant 같은 내부 태그나 역할명을 출력하지 않는다.
+과장된 제목, 과한 이모지, 마케팅식 표현은 피한다.
+""".trimIndent()
+
+    val outputRule = if (reasoningEnabled) {
+        """
+When reasoning mode is enabled, use exactly this format:
+
+<fusion_thinking>
+Briefly write your reasoning process here in Korean.
+</fusion_thinking>
+<fusion_answer>
+Write the final answer here in Korean.
+</fusion_answer>
+
+Do not output role labels such as thought, user, model, or assistant.
+Do not add anything outside these two tags.
+""".trimIndent()
+    } else {
+        """
+Output only the final answer.
+Do not output internal tags.
+최종 답변만 출력한다.
+내부 태그를 출력하지 않는다.
+""".trimIndent()
+    }
+
+    val webRule = if (webSearchEnabled && !webContext.isNullOrBlank()) {
+        """
+아래는 웹 검색에서 가져온 참고 정보다.
+검색 결과가 충분하면 반드시 이 정보를 우선 사용해라.
+검색 결과가 부족하거나 오류라면, 그 사실을 짧게 말하고 일반 지식과 추론을 구분해서 답해라.
+검색 결과가 비어 있다고 장황하게 반복하지 마라.
+
+웹 검색 참고 정보:
+$webContext
+""".trimIndent()
+    } else {
+        ""
+    }
+
+    return listOf(basePrompt, outputRule, webRule)
+        .filter { it.isNotBlank() }
+        .joinToString("\n\n")
 }
