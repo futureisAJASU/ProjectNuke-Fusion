@@ -81,6 +81,12 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import android.content.ActivityNotFoundException
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.core.content.FileProvider
 private val BlackBg = Color(0xFF000000)
 private val PanelBg = Color(0xFF171717)
 private val MenuBg = Color(0xFF202020)
@@ -99,6 +105,16 @@ private data class LocalModel(
 private data class ParsedAssistantOutput(
     val thinking: String?,
     val answer: String
+)
+private data class LocalAttachment(
+    val name: String,
+    val mimeType: String,
+    val localPath: String
+)
+
+private data class ParsedMessageContent(
+    val body: String,
+    val attachments: List<LocalAttachment>
 )
 @Composable
 fun ChatScreen(
@@ -121,6 +137,7 @@ fun ChatScreen(
     var reasoningEnabled by remember { mutableStateOf(false) }
 
     var generationSettings by remember { mutableStateOf(GenerationSettings()) }
+    val pendingAttachments = remember { mutableStateListOf<LocalAttachment>() }
 
     val builtInModels = remember {
         listOf(
@@ -195,6 +212,48 @@ fun ChatScreen(
         }
     }
 
+    val attachmentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+
+        Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
+
+        scope.launch {
+            uris.take(5).forEach { uri ->
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: SecurityException) {
+                }
+
+                val displayName = getDisplayNameFromUri(context, uri)
+                val mimeType = context.contentResolver.getType(uri)
+                    ?: "application/octet-stream"
+
+                val copiedFile = copyUriToAttachmentFile(
+                    context = context,
+                    uri = uri,
+                    displayName = displayName
+                )
+
+                if (copiedFile != null) {
+                    pendingAttachments.add(
+                        LocalAttachment(
+                            name = displayName,
+                            mimeType = mimeType,
+                            localPath = copiedFile.absolutePath
+                        )
+                    )
+                }
+            }
+
+            Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     val messageFlow = remember(conversationId) {
         if (conversationId == 0L) {
             flowOf(emptyList<MessageEntity>())
@@ -256,8 +315,20 @@ fun ChatScreen(
                     onValueChange = { input = it },
                     enabled = !isGenerating,
                     isGenerating = isGenerating,
+                    pendingAttachments = pendingAttachments,
+                    onRemoveAttachment = { attachment ->
+                        pendingAttachments.remove(attachment)
+                        File(attachment.localPath).delete()
+                    },
                     onPlusClick = {
-                        Toast.makeText(context, "첨부 기능은 나중에 붙이자", Toast.LENGTH_SHORT).show()
+                        attachmentPickerLauncher.launch(
+                            arrayOf(
+                                "image/*",
+                                "application/pdf",
+                                "text/*",
+                                "application/octet-stream"
+                            )
+                        )
                     },
                     onMicClick = {
                         Toast.makeText(context, "음성 입력은 나중에 붙이자", Toast.LENGTH_SHORT).show()
@@ -267,11 +338,17 @@ fun ChatScreen(
                     },
                     onSendClick = {
                         val userInput = input.trim()
+                        val attachmentsToSend = pendingAttachments.toList()
 
-                        if (userInput.isNotEmpty()) {
+                        if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
                             input = ""
                             isGenerating = true
                             generationStatus = if (webSearchEnabled) "웹 검색 중..." else "모델 준비 중..."
+
+                            val userMessageContent = buildMessageContentWithAttachments(
+                                body = userInput,
+                                attachments = attachmentsToSend
+                            )
 
                             scope.launch {
                                 var activeConversationId = conversationId
@@ -297,7 +374,7 @@ fun ChatScreen(
                                         MessageEntity(
                                             conversationId = activeConversationId,
                                             role = "user",
-                                            content = userInput,
+                                            content = userMessageContent,
                                             createdAt = now
                                         )
                                     )
@@ -353,7 +430,10 @@ fun ChatScreen(
                                         add(
                                             ChatMessage(
                                                 role = "user",
-                                                content = userInput
+                                                content = buildModelUserContent(
+                                                    body = userInput,
+                                                    attachments = attachmentsToSend
+                                                )
                                             )
                                         )
                                     }
@@ -409,6 +489,7 @@ fun ChatScreen(
                                         activeConversationId,
                                         System.currentTimeMillis()
                                     )
+                                    pendingAttachments.clear()
                                 } catch (e: Exception) {
                                     if (activeConversationId != 0L) {
                                         dao.insertMessage(
@@ -1051,21 +1132,40 @@ private fun ActionIcon(
 private fun UserMessageBubble(
     content: String
 ) {
-    Row(
+    val parsed = remember(content) {
+        parseMessageAttachments(content)
+    }
+
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End
+        horizontalAlignment = Alignment.End
     ) {
-        Surface(
-            shape = RoundedCornerShape(28.dp),
-            color = BubbleBg
-        ) {
-            Text(
-                text = content,
-                color = TextPrimary,
-                fontSize = 18.sp,
-                lineHeight = 26.sp,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp)
-            )
+        parsed.attachments.forEach { attachment ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.82f)
+                    .padding(bottom = 6.dp)
+            ) {
+                AttachmentCard(
+                    attachment = attachment,
+                    onRemove = null
+                )
+            }
+        }
+
+        if (parsed.body.isNotBlank()) {
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = BubbleBg
+            ) {
+                Text(
+                    text = parsed.body,
+                    color = TextPrimary,
+                    fontSize = 18.sp,
+                    lineHeight = 26.sp,
+                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp)
+                )
+            }
         }
     }
 }
@@ -1078,7 +1178,9 @@ private fun ChatInputBar(
     onPlusClick: () -> Unit,
     onMicClick: () -> Unit,
     onVoiceModeClick: () -> Unit,
-    onSendClick: () -> Unit
+    onSendClick: () -> Unit,
+    pendingAttachments: List<LocalAttachment>,
+    onRemoveAttachment: (LocalAttachment) -> Unit,
 ) {
     Surface(color = BlackBg) {
         Column {
@@ -1088,6 +1190,12 @@ private fun ChatInputBar(
                     .height(1.dp)
                     .background(LineColor)
             )
+            if (pendingAttachments.isNotEmpty()) {
+                PendingAttachmentTray(
+                    attachments = pendingAttachments,
+                    onRemove = onRemoveAttachment
+                )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1139,7 +1247,7 @@ private fun ChatInputBar(
 
                         Spacer(modifier = Modifier.width(8.dp))
 
-                        if (value.isBlank()) {
+                        if (value.isBlank() && pendingAttachments.isEmpty()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -1219,6 +1327,131 @@ private fun CircleTextButton(
             color = TextPrimary,
             fontSize = 24.sp
         )
+    }
+}
+@Composable
+private fun PendingAttachmentTray(
+    attachments: List<LocalAttachment>,
+    onRemove: (LocalAttachment) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        attachments.forEach { attachment ->
+            AttachmentCard(
+                attachment = attachment,
+                onRemove = { onRemove(attachment) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttachmentCard(
+    attachment: LocalAttachment,
+    onRemove: (() -> Unit)? = null
+) {
+    val context = LocalContext.current
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                openAttachmentFile(context, attachment)
+            },
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFF202020)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            AttachmentPreview(attachment = attachment)
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = attachment.name,
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = attachment.mimeType,
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            if (onRemove != null) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "×",
+                    color = TextSecondary,
+                    fontSize = 22.sp,
+                    modifier = Modifier
+                        .clip(CircleShape)
+                        .clickable { onRemove() }
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+private fun attachmentIcon(mimeType: String): String {
+    return when {
+        mimeType.startsWith("image/") -> "🖼"
+        mimeType == "application/pdf" -> "📄"
+        mimeType.startsWith("text/") -> "📝"
+        else -> "📎"
+    }
+}
+@Composable
+private fun AttachmentPreview(
+    attachment: LocalAttachment
+) {
+    val bitmap = remember(attachment.localPath, attachment.mimeType) {
+        if (attachment.mimeType.startsWith("image/")) {
+            loadAttachmentThumbnail(attachment.localPath)
+        } else {
+            null
+        }
+    }
+
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = attachment.name,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(46.dp)
+                .clip(RoundedCornerShape(8.dp))
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(46.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF2B2B2B)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = attachmentIcon(attachment.mimeType),
+                color = TextPrimary,
+                fontSize = 22.sp
+            )
+        }
     }
 }
 @Composable
@@ -2249,6 +2482,78 @@ private suspend fun performSimpleWebSearch(
     }
 
 }
+private fun loadAttachmentThumbnail(
+    path: String,
+    targetSize: Int = 160
+): android.graphics.Bitmap? {
+    return try {
+        val boundsOptions = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+
+        BitmapFactory.decodeFile(path, boundsOptions)
+
+        val originalWidth = boundsOptions.outWidth
+        val originalHeight = boundsOptions.outHeight
+
+        if (originalWidth <= 0 || originalHeight <= 0) {
+            return null
+        }
+
+        var sampleSize = 1
+        while (
+            originalWidth / sampleSize > targetSize * 2 ||
+            originalHeight / sampleSize > targetSize * 2
+        ) {
+            sampleSize *= 2
+        }
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+        }
+
+        BitmapFactory.decodeFile(path, decodeOptions)
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun openAttachmentFile(
+    context: Context,
+    attachment: LocalAttachment
+) {
+    val file = File(attachment.localPath)
+
+    if (!file.exists()) {
+        Toast.makeText(context, "파일을 찾을 수 없습니다", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    try {
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file
+        )
+
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, attachment.mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        context.startActivity(
+            Intent.createChooser(intent, "파일 열기")
+        )
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "이 파일을 열 앱이 없어", Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        Toast.makeText(
+            context,
+            "파일 열기 실패: ${e.message ?: e::class.java.simpleName}",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+}
 private fun shortModelName(name: String): String {
     return when {
         name.contains("Gemma 4 E2B", ignoreCase = true) -> "Gemma 4 E2B"
@@ -2327,4 +2632,106 @@ $webContext
     return listOf(basePrompt, outputRule, webRule)
         .filter { it.isNotBlank() }
         .joinToString("\n\n")
+}
+private fun getAttachmentDirectory(context: Context): File {
+    val baseDir = context.getExternalFilesDir(null) ?: context.filesDir
+    return File(baseDir, "attachments").apply {
+        if (!exists()) mkdirs()
+    }
+}
+
+private suspend fun copyUriToAttachmentFile(
+    context: Context,
+    uri: Uri,
+    displayName: String
+): File? {
+    return withContext(Dispatchers.IO) {
+        try {
+            val safeName = displayName
+                .replace(Regex("""[\\/:*?"<>|]"""), "_")
+                .ifBlank { "attachment" }
+
+            val outputFile = File(
+                getAttachmentDirectory(context),
+                "${System.currentTimeMillis()}_$safeName"
+            )
+
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                outputFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            } ?: return@withContext null
+
+            outputFile
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+private fun buildMessageContentWithAttachments(
+    body: String,
+    attachments: List<LocalAttachment>
+): String {
+    if (attachments.isEmpty()) return body
+
+    val attachmentTags = attachments.joinToString("\n") { attachment ->
+        """
+        <fusion_attachment>
+        name=${attachment.name}
+        mime=${attachment.mimeType}
+        path=${attachment.localPath}
+        </fusion_attachment>
+        """.trimIndent()
+    }
+
+    return listOf(attachmentTags, body)
+        .filter { it.isNotBlank() }
+        .joinToString("\n\n")
+}
+
+private fun parseMessageAttachments(raw: String): ParsedMessageContent {
+    val regex = Regex(
+        pattern = """(?s)<fusion_attachment>\s*name=(.*?)\nmime=(.*?)\npath=(.*?)\s*</fusion_attachment>"""
+    )
+
+    val attachments = regex.findAll(raw).map { match ->
+        LocalAttachment(
+            name = match.groupValues[1].trim(),
+            mimeType = match.groupValues[2].trim(),
+            localPath = match.groupValues[3].trim()
+        )
+    }.toList()
+
+    val body = regex.replace(raw, "").trim()
+
+    return ParsedMessageContent(
+        body = body,
+        attachments = attachments
+    )
+}
+
+private fun buildModelUserContent(
+    body: String,
+    attachments: List<LocalAttachment>
+): String {
+    if (attachments.isEmpty()) return body
+
+    val attachmentText = attachments.joinToString("\n") { attachment ->
+        "- ${attachment.name} (${attachment.mimeType})"
+    }
+
+    return """
+        사용자가 파일을 첨부했다.
+
+        첨부 파일:
+        $attachmentText
+
+        참고:
+        현재 연결된 텍스트 모델은 파일 내용을 직접 읽지 못할 수 있다.
+        이미지/파일 내용을 실제로 분석하려면 멀티모달 모델 또는 파일 파서 연결이 필요하다.
+
+        사용자 메시지:
+        ${body.ifBlank { "첨부 파일을 보냈다." }}
+    """.trimIndent()
 }
