@@ -1,6 +1,7 @@
 package com.projectnuke.fusion.ui
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.SystemClock
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -13,6 +14,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -126,6 +128,19 @@ private data class FusionMetricsSplit(
     val content: String,
     val metricsLine: String?
 )
+
+private const val FusionPrefsName = "fusion_chat_settings"
+private const val PrefMaxTokens = "max_tokens"
+private const val PrefTopK = "top_k"
+private const val PrefTopP = "top_p"
+private const val PrefTemperature = "temperature"
+private const val PrefReasoningBudget = "reasoning_budget_tokens"
+private const val PrefAccelerator = "accelerator"
+private const val PrefReasoningEnabled = "reasoning_enabled"
+private const val PrefWebSearchEnabled = "web_search_enabled"
+private const val PrefSelectedModel = "selected_model"
+private const val PrefSelectedModelPath = "selected_model_path"
+private const val PrefSpeculativeDecoding = "speculative_decoding_enabled"
 @Composable
 fun ChatScreen(
     conversationId: Long,
@@ -134,6 +149,9 @@ fun ChatScreen(
     onNewChat: () -> Unit
 ) {
     val context = LocalContext.current
+    val settingsPrefs = remember {
+        context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
+    }
     val db = remember { AppDatabase.getInstance(context) }
     val dao = remember { db.chatDao() }
     var input by remember { mutableStateOf("") }
@@ -144,11 +162,14 @@ fun ChatScreen(
     var chatMenuExpanded by remember { mutableStateOf(false) }
     var showModelDialog by remember { mutableStateOf(false) }
     var showAdvancedSettingsDialog by remember { mutableStateOf(false) }
+    var showDeleteChatDialog by remember { mutableStateOf(false) }
+    var inChatSearchMode by remember { mutableStateOf(false) }
+    var inChatSearchQuery by remember { mutableStateOf("") }
 
-    var webSearchEnabled by remember { mutableStateOf(false) }
-    var reasoningEnabled by remember { mutableStateOf(false) }
+    var webSearchEnabled by remember { mutableStateOf(settingsPrefs.getBoolean(PrefWebSearchEnabled, false)) }
+    var reasoningEnabled by remember { mutableStateOf(settingsPrefs.getBoolean(PrefReasoningEnabled, false)) }
 
-    var generationSettings by remember { mutableStateOf(GenerationSettings()) }
+    var generationSettings by remember { mutableStateOf(loadSavedGenerationSettings(settingsPrefs)) }
     val pendingAttachments = remember { mutableStateListOf<LocalAttachment>() }
 
     val builtInModels = remember {
@@ -168,8 +189,12 @@ fun ChatScreen(
 
     val customModels = remember { mutableStateListOf<LocalModel>() }
 
-    var selectedModel by remember { mutableStateOf("Gemma 4 E2B-it") }
-    var selectedModelPath by remember { mutableStateOf<String?>(null) }
+    var selectedModel by remember {
+        mutableStateOf(settingsPrefs.getString(PrefSelectedModel, "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it")
+    }
+    var selectedModelPath by remember {
+        mutableStateOf(settingsPrefs.getString(PrefSelectedModelPath, null))
+    }
 
     var pendingDownloadModel by remember { mutableStateOf<LocalModel?>(null) }
     var downloadingModelName by remember { mutableStateOf<String?>(null) }
@@ -178,6 +203,315 @@ fun ChatScreen(
 
     val scope = rememberCoroutineScope()
     val engine = remember { LiteRtLlmEngine(context.applicationContext) }
+
+    val messageFlow = remember(conversationId) {
+        if (conversationId == 0L) {
+            flowOf(emptyList<MessageEntity>())
+        } else {
+            dao.observeMessages(conversationId)
+        }
+    }
+
+    val messageEntities by messageFlow.collectAsState(initial = emptyList())
+
+    val messages = messageEntities.map {
+        ChatMessage(
+            role = it.role,
+            content = it.content
+        )
+    }
+    val listState = rememberLazyListState()
+    val inChatSearchResults = remember(messageEntities, inChatSearchQuery) {
+        val query = inChatSearchQuery.trim()
+        if (query.isBlank()) {
+            emptyList()
+        } else {
+            messageEntities.filter { message ->
+                visibleSearchText(message.content).contains(query, ignoreCase = true)
+            }
+        }
+    }
+
+    fun startRegenerateLatestResponse() {
+        if (isGenerating) return
+
+        val latestAssistantIndex = messageEntities.indexOfLast { it.role != "user" }
+        if (latestAssistantIndex <= 0) {
+            Toast.makeText(context, "다시 생성할 답변이 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val latestAssistant = messageEntities[latestAssistantIndex]
+        val previousUser = messageEntities[latestAssistantIndex - 1]
+        if (previousUser.role != "user") {
+            Toast.makeText(context, "이전 사용자 메시지를 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val parsedUserMessage = parseMessageAttachments(previousUser.content)
+        val userInput = parsedUserMessage.body.trim()
+        val attachmentsToSend = parsedUserMessage.attachments
+        val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
+        val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
+        val userInstruction = if (imageAttachments.isNotEmpty()) {
+            buildImageUserInstruction(userInput)
+        } else {
+            userInput
+        }
+        val historyBeforeUser = messageEntities
+            .take(latestAssistantIndex - 1)
+            .map { ChatMessage(role = it.role, content = it.content) }
+        val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
+
+        isGenerating = true
+        streamingAssistantText = null
+        streamingMetricsLine = null
+        generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
+
+        scope.launch {
+            val activeConversationId = latestAssistant.conversationId
+
+            try {
+                dao.deleteMessageById(latestAssistant.id)
+                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+
+                val previousUserMessage = historyBeforeUser
+                    .asReversed()
+                    .firstOrNull { it.role == "user" }
+                    ?.content
+                    ?.let { parseMessageAttachments(it).body }
+                    ?.trim()
+                    .orEmpty()
+
+                val webSearchResult = if (shouldUseWebSearch) {
+                    generationStatus = "인터넷 검색 중..."
+                    val searchIntent = FusionWebSearch.detectIntent(userInput)
+                    generationStatus = when (searchIntent) {
+                        SearchIntent.NEWS -> "뉴스 검색 중..."
+                        else -> "인터넷 검색 중..."
+                    }
+
+                    val response = FusionWebSearch.search(
+                        userInput = userInput,
+                        previousUserMessage = previousUserMessage
+                    )
+
+                    generationStatus = "검색 결과 정리 중..."
+                    response.toStructuredContext()
+                } else {
+                    null
+                }
+
+                if (shouldUseWebSearch) {
+                    generationStatus = if (reasoningEnabled) "더 깊게 생각하는 중..." else "답변 생성 중..."
+                }
+
+                val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
+                    modelName = selectedModel,
+                    settings = generationSettings
+                )
+                val requestSettings = generationSettings.copy(
+                    speculativeDecodingEnabled = mtpEnabledForRequest
+                )
+
+                val fusionSystemPrompt = buildFusionSystemPrompt(
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = shouldUseWebSearch,
+                    webContext = webSearchResult
+                )
+
+                val currentMessages = buildList<ChatMessage> {
+                    add(
+                        ChatMessage(
+                            role = "system",
+                            content = """
+                                FUSION_GENERATION_SETTINGS
+                                maxTokens=${requestSettings.maxTokens}
+                                topK=${requestSettings.topK}
+                                topP=${requestSettings.topP}
+                                temperature=${requestSettings.temperature}
+                                accelerator=${requestSettings.accelerator.name}
+                                reasoningBudgetTokens=${requestSettings.reasoningBudgetTokens}
+                                speculativeDecoding=${requestSettings.speculativeDecodingEnabled == true}
+                            """.trimIndent()
+                        )
+                    )
+
+                    add(ChatMessage(role = "system", content = fusionSystemPrompt))
+
+                    selectedModelPath?.let { modelPath ->
+                        add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+                    }
+
+                    addAll(historyBeforeUser)
+
+                    add(
+                        ChatMessage(
+                            role = "user",
+                            content = buildFinalUserContent(
+                                body = userInstruction,
+                                attachments = if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend,
+                                webSearchEnabled = shouldUseWebSearch,
+                                webSearchResult = webSearchResult
+                            )
+                        )
+                    )
+                }
+
+                val activeModelPath = selectedModelPath?.takeIf { File(it).exists() }
+                    ?: builtInModels
+                        .firstOrNull {
+                            it.name == selectedModel && isModelDownloaded(context, it)
+                        }
+                        ?.let { getModelFile(context, it).absolutePath }
+
+                if (activeModelPath == null) {
+                    dao.insertMessage(
+                        MessageEntity(
+                            conversationId = activeConversationId,
+                            role = "assistant",
+                            content = "아직 사용할 모델이 없습니다. 모델 탭에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.",
+                            createdAt = System.currentTimeMillis()
+                        )
+                    )
+                    dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                    return@launch
+                }
+
+                val missingImage = imageAttachments.firstOrNull { !File(it.localPath).exists() }
+                if (missingImage != null) {
+                    Toast.makeText(context, "이미지 파일을 찾을 수 없습니다: ${missingImage.localPath}", Toast.LENGTH_LONG).show()
+                    dao.insertMessage(
+                        MessageEntity(
+                            conversationId = activeConversationId,
+                            role = "assistant",
+                            content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n${missingImage.localPath}",
+                            createdAt = System.currentTimeMillis()
+                        )
+                    )
+                    dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                    return@launch
+                }
+
+                val useMultimodalImages = imageAttachments.isNotEmpty()
+                if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath)) {
+                    dao.insertMessage(
+                        MessageEntity(
+                            conversationId = activeConversationId,
+                            role = "assistant",
+                            content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.",
+                            createdAt = System.currentTimeMillis()
+                        )
+                    )
+                    dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                    return@launch
+                }
+
+                generationStatus = "모델 로딩 중..."
+
+                val generationStartMs = SystemClock.elapsedRealtime()
+                var firstTokenLatencyMs: Long? = null
+
+                val rawReply = if (useMultimodalImages) {
+                    generationStatus = "이미지 분석 준비 중..."
+                    val streamedOutput = StringBuilder()
+                    if (!reasoningEnabled) {
+                        streamingAssistantText = ""
+                    }
+                    generationStatus = "이미지 분석 중..."
+
+                    engine.generateMultimodalStreaming(
+                        messages = currentMessages,
+                        modelPath = activeModelPath,
+                        settings = requestSettings,
+                        imagePaths = imageAttachments.map { it.localPath },
+                        onToken = { token ->
+                            if (firstTokenLatencyMs == null && token.isNotEmpty()) {
+                                firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                            }
+                            streamedOutput.append(token)
+                            if (!reasoningEnabled) {
+                                val visibleText = streamedOutput.toString()
+                                scope.launch {
+                                    if (isGenerating) {
+                                        streamingAssistantText = visibleText
+                                    }
+                                }
+                            }
+                        }
+                    )
+                } else if (reasoningEnabled) {
+                    generationStatus = "더 깊게 생각하는 중..."
+                    engine.generate(
+                        messages = currentMessages,
+                        modelPath = activeModelPath,
+                        settings = requestSettings
+                    )
+                } else {
+                    val streamedOutput = StringBuilder()
+                    streamingAssistantText = ""
+                    generationStatus = "답변 생성 중..."
+
+                    engine.generateStreaming(
+                        messages = currentMessages,
+                        modelPath = activeModelPath,
+                        settings = requestSettings,
+                        onToken = { token ->
+                            if (firstTokenLatencyMs == null && token.isNotEmpty()) {
+                                firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                            }
+                            streamedOutput.append(token)
+                            val visibleText = streamedOutput.toString()
+                            scope.launch {
+                                if (isGenerating) {
+                                    streamingAssistantText = visibleText
+                                }
+                            }
+                        }
+                    )
+                }
+
+                val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
+                val metricsLine = buildFusionMetricsLine(
+                    modelName = shortModelName(selectedModel),
+                    acceleratorName = buildAcceleratorLabel(
+                        acceleratorName = requestSettings.accelerator.name,
+                        speculativeDecodingEnabled = mtpEnabledForRequest
+                    ),
+                    generatedText = rawReply,
+                    totalGenerationMs = totalGenerationMs,
+                    firstTokenLatencyMs = firstTokenLatencyMs,
+                    settingsLine = buildFusionSettingsMetricsLine(requestSettings)
+                )
+
+                generationStatus = "답변 저장 중..."
+
+                dao.insertMessage(
+                    MessageEntity(
+                        conversationId = activeConversationId,
+                        role = "assistant",
+                        content = appendFusionMetrics(rawReply, metricsLine),
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
+                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+            } catch (e: Exception) {
+                dao.insertMessage(
+                    MessageEntity(
+                        conversationId = activeConversationId,
+                        role = "assistant",
+                        content = "오류가 발생했습니다:\n${e.message ?: e::class.java.simpleName}",
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
+            } finally {
+                generationStatus = null
+                isGenerating = false
+                streamingAssistantText = null
+                streamingMetricsLine = null
+            }
+        }
+    }
 
     val modelPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -218,6 +552,14 @@ fun ChatScreen(
 
                 selectedModel = model.name
                 selectedModelPath = copiedFile.absolutePath
+                saveFusionSettings(
+                    prefs = settingsPrefs,
+                    settings = generationSettings,
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = webSearchEnabled,
+                    selectedModel = selectedModel,
+                    selectedModelPath = selectedModelPath
+                )
 
                 Toast.makeText(context, "커스텀 모델 등록: $displayName", Toast.LENGTH_SHORT).show()
             }
@@ -266,23 +608,6 @@ fun ChatScreen(
         }
     }
 
-    val messageFlow = remember(conversationId) {
-        if (conversationId == 0L) {
-            flowOf(emptyList<MessageEntity>())
-        } else {
-            dao.observeMessages(conversationId)
-        }
-    }
-
-    val messageEntities by messageFlow.collectAsState(initial = emptyList())
-
-    val messages = messageEntities.map {
-        ChatMessage(
-            role = it.role,
-            content = it.content
-        )
-    }
-
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = BlackBg,
@@ -306,9 +631,17 @@ fun ChatScreen(
                     onModelPillClick = {
                         showModelDialog = true
                     },
+                    onDeleteChat = {
+                        chatMenuExpanded = false
+                        showDeleteChatDialog = true
+                    },
                     onChatOption = { option ->
                         chatMenuExpanded = false
-                        Toast.makeText(context, "$option 기능은 나중에 연결할게", Toast.LENGTH_SHORT).show()
+                        if (option == "대화 내 검색") {
+                            inChatSearchMode = true
+                        } else {
+                            Toast.makeText(context, "$option 기능은 나중에 연결할게", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 )
             }
@@ -350,6 +683,13 @@ fun ChatScreen(
                     onSendClick = {
                         val userInput = input.trim()
                         val attachmentsToSend = pendingAttachments.toList()
+                        val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
+                        val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
+                        val userInstruction = if (imageAttachments.isNotEmpty()) {
+                            buildImageUserInstruction(userInput)
+                        } else {
+                            userInput
+                        }
                         val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
 
                         if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
@@ -358,7 +698,7 @@ fun ChatScreen(
                             isGenerating = true
                             streamingAssistantText = null
                             streamingMetricsLine = null
-                            generationStatus = if (shouldUseWebSearch) "웹 검색 중..." else "모델 준비 중..."
+                            generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
 
                             val userMessageContent = buildMessageContentWithAttachments(
                                 body = userInput,
@@ -405,11 +745,11 @@ fun ChatScreen(
                                         .orEmpty()
 
                                     val webSearchResult = if (shouldUseWebSearch) {
-                                        generationStatus = "검색 의도 분석 중..."
+                                        generationStatus = "인터넷 검색 중..."
                                         val searchIntent = FusionWebSearch.detectIntent(userInput)
                                         generationStatus = when (searchIntent) {
                                             SearchIntent.NEWS -> "뉴스 검색 중..."
-                                            else -> "웹 검색 중..."
+                                            else -> "인터넷 검색 중..."
                                         }
 
                                         val response = FusionWebSearch.search(
@@ -417,14 +757,14 @@ fun ChatScreen(
                                             previousUserMessage = previousUserMessage
                                         )
 
-                                        generationStatus = "검색 결과 ${response.results.size}개 정리 중..."
+                                        generationStatus = "검색 결과 정리 중..."
                                         response.toStructuredContext()
                                     } else {
                                         null
                                     }
 
                                     if (shouldUseWebSearch) {
-                                        generationStatus = "검색 결과를 바탕으로 답변 생성 중..."
+                                        generationStatus = if (reasoningEnabled) "더 깊게 생각하는 중..." else "답변 생성 중..."
                                     }
 
                                     val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
@@ -477,8 +817,8 @@ fun ChatScreen(
                                         addAll(messages)
 
                                         val finalUserContent = buildFinalUserContent(
-                                            body = userInput,
-                                            attachments = attachmentsToSend,
+                                            body = userInstruction,
+                                            attachments = if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend,
                                             webSearchEnabled = shouldUseWebSearch,
                                             webSearchResult = webSearchResult
                                         )
@@ -519,19 +859,80 @@ fun ChatScreen(
                                         return@launch
                                     }
 
-                                    generationStatus = if (mtpEnabledForRequest) {
-                                        "MTP 가속 활성화됨"
-                                    } else {
-                                        "MTP 미지원 모델/런타임"
+                                    val missingImage = imageAttachments.firstOrNull { !File(it.localPath).exists() }
+                                    if (missingImage != null) {
+                                        Toast.makeText(
+                                            context,
+                                            "이미지 파일을 찾을 수 없습니다: ${missingImage.localPath}",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                        dao.insertMessage(
+                                            MessageEntity(
+                                                conversationId = activeConversationId,
+                                                role = "assistant",
+                                                content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n${missingImage.localPath}",
+                                                createdAt = System.currentTimeMillis()
+                                            )
+                                        )
+                                        dao.updateConversationTime(
+                                            activeConversationId,
+                                            System.currentTimeMillis()
+                                        )
+                                        return@launch
                                     }
 
-                                    kotlinx.coroutines.delay(250)
-                                    generationStatus = "모델 응답 생성 중..."
+                                    val useMultimodalImages = imageAttachments.isNotEmpty()
+                                    if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath)) {
+                                        dao.insertMessage(
+                                            MessageEntity(
+                                                conversationId = activeConversationId,
+                                                role = "assistant",
+                                                content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.",
+                                                createdAt = System.currentTimeMillis()
+                                            )
+                                        )
+                                        dao.updateConversationTime(
+                                            activeConversationId,
+                                            System.currentTimeMillis()
+                                        )
+                                        return@launch
+                                    }
+
+                                    generationStatus = "모델 로딩 중..."
 
                                     val generationStartMs = SystemClock.elapsedRealtime()
                                     var firstTokenLatencyMs: Long? = null
 
-                                    val rawReply = if (reasoningEnabled) {
+                                    val rawReply = if (useMultimodalImages) {
+                                        generationStatus = "이미지 분석 준비 중..."
+                                        val streamedOutput = StringBuilder()
+                                        if (!reasoningEnabled) {
+                                            streamingAssistantText = ""
+                                        }
+                                        generationStatus = "이미지 분석 중..."
+
+                                        engine.generateMultimodalStreaming(
+                                            messages = currentMessages,
+                                            modelPath = activeModelPath,
+                                            settings = requestSettings,
+                                            imagePaths = imageAttachments.map { it.localPath },
+                                            onToken = { token ->
+                                                if (firstTokenLatencyMs == null && token.isNotEmpty()) {
+                                                    firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                                                }
+                                                streamedOutput.append(token)
+                                                if (!reasoningEnabled) {
+                                                    val visibleText = streamedOutput.toString()
+                                                    scope.launch {
+                                                        if (isGenerating) {
+                                                            streamingAssistantText = visibleText
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        )
+                                    } else if (reasoningEnabled) {
+                                        generationStatus = "더 깊게 생각하는 중..."
                                         engine.generate(
                                             messages = currentMessages,
                                             modelPath = activeModelPath,
@@ -540,7 +941,7 @@ fun ChatScreen(
                                     } else {
                                         val streamedOutput = StringBuilder()
                                         streamingAssistantText = ""
-                                        generationStatus = "응답 생성 중..."
+                                        generationStatus = "답변 생성 중..."
 
                                         engine.generateStreaming(
                                             messages = currentMessages,
@@ -570,7 +971,8 @@ fun ChatScreen(
                                         ),
                                         generatedText = rawReply,
                                         totalGenerationMs = totalGenerationMs,
-                                        firstTokenLatencyMs = firstTokenLatencyMs
+                                        firstTokenLatencyMs = firstTokenLatencyMs,
+                                        settingsLine = buildFusionSettingsMetricsLine(requestSettings)
                                     )
                                     streamingMetricsLine = metricsLine
 
@@ -621,13 +1023,65 @@ fun ChatScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
+            if (inChatSearchMode) {
+                InChatSearchBar(
+                    query = inChatSearchQuery,
+                    onQueryChange = { inChatSearchQuery = it },
+                    onClose = {
+                        inChatSearchMode = false
+                        inChatSearchQuery = ""
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "검색 결과",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
             if (messageEntities.isEmpty() && !isGenerating) {
                 EmptyChatBody()
+            } else if (inChatSearchMode) {
+                if (inChatSearchQuery.trim().isNotEmpty() && inChatSearchResults.isEmpty()) {
+                    EmptyInChatSearchResults()
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        contentPadding = PaddingValues(vertical = 6.dp)
+                    ) {
+                        items(
+                            items = inChatSearchResults,
+                            key = { it.id }
+                        ) { result ->
+                            InChatSearchResultRow(
+                                role = if (result.role == "user") "사용자" else "Fusion",
+                                preview = visibleSearchText(result.content),
+                                onClick = {
+                                    scope.launch {
+                                        val idx = messageEntities.indexOfFirst { it.id == result.id }
+                                        if (idx >= 0) {
+                                            listState.animateScrollToItem(idx)
+                                            inChatSearchMode = false
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
+                    state = listState,
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     contentPadding = PaddingValues(vertical = 12.dp)
                 ) {
@@ -643,13 +1097,7 @@ fun ChatScreen(
                                 selectedModel = selectedModel,
                                 webSearchEnabled = webSearchEnabled,
                                 reasoningEnabled = reasoningEnabled,
-                                onRetry = {
-                                    Toast.makeText(
-                                        context,
-                                        "재시도 기능은 다음 단계에서 연결할게",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                },
+                                onRetry = { startRegenerateLatestResponse() },
                                 onBranch = {
                                     Toast.makeText(
                                         context,
@@ -659,6 +1107,14 @@ fun ChatScreen(
                                 },
                                 onToggleWebSearch = {
                                     webSearchEnabled = !webSearchEnabled
+                                    saveFusionSettings(
+                                        prefs = settingsPrefs,
+                                        settings = generationSettings,
+                                        reasoningEnabled = reasoningEnabled,
+                                        webSearchEnabled = webSearchEnabled,
+                                        selectedModel = selectedModel,
+                                        selectedModelPath = selectedModelPath
+                                    )
                                 }
                             )
                         }
@@ -676,13 +1132,14 @@ fun ChatScreen(
                                     selectedModel = selectedModel,
                                     webSearchEnabled = webSearchEnabled,
                                     reasoningEnabled = false,
+                                    showActions = false,
                                     onRetry = {},
                                     onBranch = {},
                                     onToggleWebSearch = {}
                                 )
                             } else {
                                 ModelLoadingBubble(
-                                    status = generationStatus ?: "모델 준비 중..."
+                                    status = generationStatus ?: "모델 로딩 중..."
                                 )
                             }
                         }
@@ -709,20 +1166,42 @@ fun ChatScreen(
                 showModelDialog = false
             },
             onSelect = { model ->
+                var didSelectModel = false
                 when {
                     model.customPath != null && File(model.customPath).exists() -> {
                         selectedModel = model.name
                         selectedModelPath = model.customPath
+                        didSelectModel = true
                     }
 
                     isModelDownloaded(context, model) -> {
                         selectedModel = model.name
                         selectedModelPath = getModelFile(context, model).absolutePath
+                        saveFusionSettings(
+                            prefs = settingsPrefs,
+                            settings = generationSettings,
+                            reasoningEnabled = reasoningEnabled,
+                            webSearchEnabled = webSearchEnabled,
+                            selectedModel = selectedModel,
+                            selectedModelPath = selectedModelPath
+                        )
+                        didSelectModel = true
                     }
 
                     else -> {
                         pendingDownloadModel = model
                     }
+                }
+
+                if (didSelectModel) {
+                    saveFusionSettings(
+                        prefs = settingsPrefs,
+                        settings = generationSettings,
+                        reasoningEnabled = reasoningEnabled,
+                        webSearchEnabled = webSearchEnabled,
+                        selectedModel = selectedModel,
+                        selectedModelPath = selectedModelPath
+                    )
                 }
             },
             onUploadCustomModel = {
@@ -733,9 +1212,25 @@ fun ChatScreen(
             },
             onToggleReasoning = {
                 reasoningEnabled = !reasoningEnabled
+                saveFusionSettings(
+                    prefs = settingsPrefs,
+                    settings = generationSettings,
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = webSearchEnabled,
+                    selectedModel = selectedModel,
+                    selectedModelPath = selectedModelPath
+                )
             },
             onToggleWebSearch = {
                 webSearchEnabled = !webSearchEnabled
+                saveFusionSettings(
+                    prefs = settingsPrefs,
+                    settings = generationSettings,
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = webSearchEnabled,
+                    selectedModel = selectedModel,
+                    selectedModelPath = selectedModelPath
+                )
             }
         )
     }
@@ -776,6 +1271,14 @@ fun ChatScreen(
                     if (success) {
                         selectedModel = model.name
                         selectedModelPath = getModelFile(context, model).absolutePath
+                        saveFusionSettings(
+                            prefs = settingsPrefs,
+                            settings = generationSettings,
+                            reasoningEnabled = reasoningEnabled,
+                            webSearchEnabled = webSearchEnabled,
+                            selectedModel = selectedModel,
+                            selectedModelPath = selectedModelPath
+                        )
                         Toast.makeText(context, "${model.name} 다운로드 완료", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(context, "${model.name} 다운로드 실패", Toast.LENGTH_SHORT).show()
@@ -794,6 +1297,14 @@ fun ChatScreen(
             },
             onApply = { newSettings ->
                 generationSettings = newSettings
+                saveFusionSettings(
+                    prefs = settingsPrefs,
+                    settings = newSettings,
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = webSearchEnabled,
+                    selectedModel = selectedModel,
+                    selectedModelPath = selectedModelPath
+                )
                 showAdvancedSettingsDialog = false
 
                 Toast.makeText(
@@ -802,6 +1313,46 @@ fun ChatScreen(
                     Toast.LENGTH_SHORT
                 ).show()
             }
+        )
+    }
+
+    if (showDeleteChatDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeleteChatDialog = false },
+            title = {
+                Text("채팅 삭제")
+            },
+            text = {
+                Text("이 채팅을 삭제할까요?")
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteChatDialog = false }) {
+                    Text("취소")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteChatDialog = false
+                        scope.launch {
+                            if (conversationId != 0L) {
+                                dao.deleteConversation(conversationId)
+                            }
+                            input = ""
+                            pendingAttachments.clear()
+                            streamingAssistantText = null
+                            streamingMetricsLine = null
+                            generationStatus = null
+                            onNewChat()
+                        }
+                    }
+                ) {
+                    Text("삭제", color = DangerRed)
+                }
+            },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
         )
     }
 
@@ -817,6 +1368,7 @@ private fun ChatTopBar(
     reasoningEnabled: Boolean,
     webSearchEnabled: Boolean,
     onModelPillClick: () -> Unit,
+    onDeleteChat: () -> Unit,
     onChatOption: (String) -> Unit
 ) {
     Surface(color = BlackBg) {
@@ -887,7 +1439,11 @@ private fun ChatTopBar(
                     )
                     DropdownMenuItem(
                         text = { Text("삭제", color = DangerRed) },
-                        onClick = { onChatOption("삭제") }
+                        onClick = { onChatOption("대화 내 검색") }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("??젣", color = DangerRed) },
+                        onClick = onDeleteChat
                     )
                 }
             }
@@ -971,6 +1527,98 @@ private fun EmptyChatBody() {
     }
 
 }
+
+@Composable
+private fun InChatSearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = PanelBg
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "대화 내 검색",
+                color = TextPrimary,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            BasicTextField(
+                value = query,
+                onValueChange = onQueryChange,
+                modifier = Modifier.weight(1f),
+                singleLine = true,
+                textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp),
+                decorationBox = { inner ->
+                    if (query.isBlank()) {
+                        Text("메시지를 검색합니다.", color = TextSecondary, fontSize = 14.sp)
+                    }
+                    inner()
+                }
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Text(
+                text = "닫기",
+                color = AccentBlue,
+                fontSize = 13.sp,
+                modifier = Modifier.clickable { onClose() }
+            )
+        }
+    }
+}
+
+@Composable
+private fun InChatSearchResultRow(
+    role: String,
+    preview: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() },
+        shape = RoundedCornerShape(14.dp),
+        color = PanelBg
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Text(text = role, color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = preview.ifBlank { "(내용 없음)" },
+                color = TextPrimary,
+                fontSize = 14.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun EmptyInChatSearchResults() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "검색 결과가 없습니다.",
+            color = TextPrimary,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
 @Composable
 private fun ModelLoadingBubble(
     status: String
@@ -996,20 +1644,12 @@ private fun ModelLoadingBubble(
                 )
                 Spacer(modifier = Modifier.width(10.dp))
 
-                Column {
-                    Text(
-                        text = status,
-                        color = TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-
-                    Text(
-                        text = "처음 로딩은 오래 걸릴 수 있어.",
-                        color = TextSecondary,
-                        fontSize = 12.sp
-                    )
-                }
+                Text(
+                    text = status,
+                    color = TextPrimary,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium
+                )
             }
         }
     }
@@ -1022,6 +1662,7 @@ private fun AssistantMessage(
     selectedModel: String,
     webSearchEnabled: Boolean,
     reasoningEnabled: Boolean,
+    showActions: Boolean = true,
     onRetry: () -> Unit,
     onBranch: () -> Unit,
     onToggleWebSearch: () -> Unit
@@ -1051,6 +1692,7 @@ private fun AssistantMessage(
             lineHeight = 29.sp
         )
 
+        if (showActions) {
         metricsSplit.metricsLine?.let { metricsLine ->
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -1113,6 +1755,7 @@ private fun AssistantMessage(
                     }
                 )
             }
+        }
         }
     }
 
@@ -1549,6 +2192,27 @@ private fun attachmentIcon(mimeType: String): String {
         mimeType == "application/pdf" -> "📄"
         mimeType.startsWith("text/") -> "📝"
         else -> "📎"
+    }
+}
+
+private fun isImageAttachment(
+    attachment: LocalAttachment
+): Boolean {
+    val name = attachment.name.lowercase(Locale.ROOT)
+    return attachment.mimeType.startsWith("image/") ||
+        name.endsWith(".png") ||
+        name.endsWith(".jpg") ||
+        name.endsWith(".jpeg") ||
+        name.endsWith(".webp") ||
+        name.endsWith(".gif") ||
+        name.endsWith(".bmp")
+}
+
+private fun buildImageUserInstruction(
+    userInput: String
+): String {
+    return userInput.trim().ifBlank {
+        "이 이미지를 자세히 설명해줘."
     }
 }
 @Composable
@@ -2511,25 +3175,63 @@ private fun buildFusionMetricsLine(
     acceleratorName: String,
     generatedText: String,
     totalGenerationMs: Long,
-    firstTokenLatencyMs: Long?
+    firstTokenLatencyMs: Long? = null,
+    settingsLine: String? = null
 ): String {
-    val outputTokens = estimateOutputTokens(generatedText)
-    val totalSeconds = totalGenerationMs.coerceAtLeast(1L) / 1000.0
-    val tokensPerSecond = outputTokens / totalSeconds
-    val base = "${modelName} · ${acceleratorName} · ${String.format(Locale.US, "%.1fs", totalSeconds)} · 약 ${
-        String.format(Locale.US, "%.1f", tokensPerSecond)
-    } tok/s · 약 ${outputTokens} tokens"
+    val seconds = (totalGenerationMs / 1000.0).coerceAtLeast(0.1)
+    val estimatedTokens = estimateOutputTokens(generatedText)
+    val tokensPerSecond = estimatedTokens / seconds
 
-    return firstTokenLatencyMs?.let {
-        "$base · first ${String.format(Locale.US, "%.1fs", it / 1000.0)}"
-    } ?: base
+    val totalSecondsText = String.format(Locale.US, "%.1f", seconds)
+    val tokensPerSecondText = String.format(Locale.US, "%.1f", tokensPerSecond)
+
+    val mainLine = buildString {
+        append(modelName)
+        append(" · ")
+        append(acceleratorName)
+        append(" · ")
+        append("${totalSecondsText}s")
+        append(" · ")
+        append("약 ${tokensPerSecondText} tok/s")
+
+        if (firstTokenLatencyMs != null && firstTokenLatencyMs > 0L) {
+            val firstTokenSeconds = firstTokenLatencyMs / 1000.0
+            val firstTokenText = String.format(Locale.US, "%.1f", firstTokenSeconds)
+            append(" · 첫 토큰 ${firstTokenText}s")
+        }
+    }
+
+    return listOf(
+        mainLine,
+        settingsLine?.trim()?.takeIf { it.isNotBlank() }
+    )
+        .filterNotNull()
+        .joinToString("\n")
 }
 
 private fun appendFusionMetrics(
-    content: String,
-    metricsLine: String
+    body: String,
+    metrics: String,
+    settingsLine: String? = null
 ): String {
-    return "${splitFusionMetrics(content).content.trimEnd()}\n\n<fusion_metrics>$metricsLine</fusion_metrics>"
+    val metricsBlock = listOf(
+        metrics,
+        settingsLine
+    )
+        .mapNotNull { it?.trim()?.takeIf { line -> line.isNotBlank() } }
+        .joinToString("\n")
+
+    if (metricsBlock.isBlank()) {
+        return body
+    }
+
+    return body.trimEnd() + "\n\n<fusion_metrics>$metricsBlock</fusion_metrics>"
+}
+
+private fun buildFusionSettingsMetricsLine(
+    settings: GenerationSettings
+): String {
+    return "설정 · max ${settings.maxTokens} · temp ${settings.temperature} · topK ${settings.topK} · topP ${settings.topP} · ${settings.accelerator.name}"
 }
 
 private fun splitFusionMetrics(
@@ -2989,6 +3691,66 @@ private fun shortModelName(name: String): String {
     }
 }
 
+private fun loadSavedGenerationSettings(
+    prefs: SharedPreferences
+): GenerationSettings {
+    val accelerator = runCatching {
+        AcceleratorMode.valueOf(
+            prefs.getString(PrefAccelerator, AcceleratorMode.GPU.name) ?: AcceleratorMode.GPU.name
+        )
+    }.getOrDefault(AcceleratorMode.GPU)
+
+    val speculativeDecodingEnabled = if (prefs.contains(PrefSpeculativeDecoding)) {
+        prefs.getBoolean(PrefSpeculativeDecoding, false)
+    } else {
+        null
+    }
+
+    return GenerationSettings(
+        maxTokens = prefs.getInt(PrefMaxTokens, 4000).coerceIn(2000, 32000),
+        topK = prefs.getInt(PrefTopK, 64).coerceIn(5, 100),
+        topP = prefs.getFloat(PrefTopP, 0.95f).coerceIn(0f, 1f),
+        temperature = prefs.getFloat(PrefTemperature, 1.0f).coerceIn(0f, 2f),
+        accelerator = accelerator,
+        reasoningBudgetTokens = prefs.getInt(PrefReasoningBudget, 512).coerceIn(128, 8192),
+        speculativeDecodingEnabled = speculativeDecodingEnabled
+    )
+}
+
+private fun saveFusionSettings(
+    prefs: SharedPreferences,
+    settings: GenerationSettings,
+    reasoningEnabled: Boolean,
+    webSearchEnabled: Boolean,
+    selectedModel: String,
+    selectedModelPath: String?
+) {
+    prefs.edit()
+        .putInt(PrefMaxTokens, settings.maxTokens)
+        .putInt(PrefTopK, settings.topK)
+        .putFloat(PrefTopP, settings.topP)
+        .putFloat(PrefTemperature, settings.temperature)
+        .putInt(PrefReasoningBudget, settings.reasoningBudgetTokens)
+        .putString(PrefAccelerator, settings.accelerator.name)
+        .putBoolean(PrefReasoningEnabled, reasoningEnabled)
+        .putBoolean(PrefWebSearchEnabled, webSearchEnabled)
+        .putString(PrefSelectedModel, selectedModel)
+        .apply {
+            if (selectedModelPath.isNullOrBlank()) {
+                remove(PrefSelectedModelPath)
+            } else {
+                putString(PrefSelectedModelPath, selectedModelPath)
+            }
+
+            if (settings.speculativeDecodingEnabled == null) {
+                remove(PrefSpeculativeDecoding)
+            } else {
+                putBoolean(PrefSpeculativeDecoding, settings.speculativeDecodingEnabled)
+            }
+        }
+        .apply()
+}
+
 private fun isGemma4Model(modelName: String): Boolean {
     return modelName.contains("Gemma 4", ignoreCase = true) ||
         modelName.contains("gemma-4", ignoreCase = true)
@@ -3002,6 +3764,17 @@ private fun isGemma4E4BModel(modelName: String): Boolean {
 private fun isGemma4E2BModel(modelName: String): Boolean {
     return modelName.contains("E2B", ignoreCase = true) ||
         modelName.contains("e2b", ignoreCase = true)
+}
+
+private fun isMultimodalCapableModel(
+    modelName: String,
+    modelPath: String
+): Boolean {
+    val combined = "$modelName $modelPath".lowercase(Locale.ROOT)
+    return combined.contains("gemma 4") ||
+        combined.contains("gemma-4") ||
+        combined.contains("multimodal") ||
+        combined.contains("vision")
 }
 
 private fun defaultSpeculativeDecodingEnabled(
@@ -3320,6 +4093,17 @@ private fun parseMessageAttachments(raw: String): ParsedMessageContent {
         body = body,
         attachments = newAttachments + oldAttachments
     )
+}
+
+private fun visibleSearchText(rawMessageContent: String): String {
+    val withoutAttachments = parseMessageAttachments(rawMessageContent).body
+    val withoutMetrics = splitFusionMetrics(withoutAttachments).content
+    return withoutMetrics
+        .replace(Regex("""(?is)<fusion_thinking>.*?</fusion_thinking>"""), "")
+        .replace(Regex("""(?is)<fusion_answer>(.*?)</fusion_answer>"""), "$1")
+        .replace(Regex("""(?is)</?fusion_(?:thinking|answer)>"""), "")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
 }
 
 private fun String.unescapeAttachmentField(): String {

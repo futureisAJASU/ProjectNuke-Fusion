@@ -40,5 +40,24 @@ class FakeLlmEngine : LlmEngine {
         return output
     }
 
+    override suspend fun generateMultimodalStreaming(
+        messages: List<ChatMessage>,
+        modelPath: String,
+        settings: GenerationSettings,
+        imagePaths: List<String>,
+        onToken: (String) -> Unit
+    ): String {
+        val output = buildString {
+            appendLine("FakeLlmEngine image test response.")
+            appendLine("Images: ${imagePaths.joinToString()}")
+            appendLine("Model: $modelPath")
+        }
+        output.split(" ").forEach { token ->
+            onToken("$token ")
+            delay(35)
+        }
+        return output
+    }
+
     override fun unload() {}
 }

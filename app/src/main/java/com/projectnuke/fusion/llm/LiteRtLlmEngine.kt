@@ -3,6 +3,7 @@ package com.projectnuke.fusion.llm
 import android.content.Context
 import android.util.Log
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
@@ -55,7 +56,13 @@ class LiteRtLlmEngine(
 
             val engine = getOrCreateEngine(
                 modelPath = modelFile.absolutePath,
-                settings = settings
+                settings = settings,
+                enableVisionBackend = false
+            )
+            logGenerationSettings(
+                modelPath = modelFile.absolutePath,
+                settings = settings,
+                enableVisionBackend = false
             )
 
             val systemText = buildSystemInstruction(messages, settings)
@@ -97,10 +104,93 @@ class LiteRtLlmEngine(
         }
     }
 
+    override suspend fun generateMultimodalStreaming(
+        messages: List<ChatMessage>,
+        modelPath: String,
+        settings: GenerationSettings,
+        imagePaths: List<String>,
+        onToken: (String) -> Unit
+    ): String {
+        return withContext(Dispatchers.IO) {
+            val modelFile = File(modelPath)
+
+            if (!modelFile.exists()) {
+                return@withContext "이미지 입력 처리 실패: 모델 파일을 찾을 수 없습니다.\n$modelPath"
+            }
+
+            val missingImage = imagePaths.firstOrNull { !File(it).exists() }
+            if (missingImage != null) {
+                return@withContext "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n$missingImage"
+            }
+
+            try {
+                val engine = getOrCreateEngine(
+                    modelPath = modelFile.absolutePath,
+                    settings = settings,
+                    enableVisionBackend = true
+                )
+                logGenerationSettings(
+                    modelPath = modelFile.absolutePath,
+                    settings = settings,
+                    enableVisionBackend = true
+                )
+
+                val systemText = buildSystemInstruction(messages, settings)
+                val promptText = buildPrompt(messages)
+
+                val conversationConfig = ConversationConfig(
+                    systemInstruction = Contents.of(systemText),
+                    samplerConfig = SamplerConfig(
+                        topK = settings.topK.coerceAtLeast(1),
+                        topP = settings.topP.coerceIn(0f, 1f).toDouble(),
+                        temperature = settings.temperature.coerceAtLeast(0f).toDouble()
+                    )
+                )
+
+                val contentParts = buildList<Content> {
+                    imagePaths.forEach { imagePath ->
+                        add(Content.ImageFile(imagePath))
+                    }
+                    add(Content.Text(promptText))
+                }
+
+                val output = StringBuilder()
+
+                engine.createConversation(conversationConfig).use { conversation ->
+                    conversation
+                        .sendMessageAsync(Contents.of(contentParts))
+                        .catch { throwable ->
+                            output.append(
+                                "\n\n이미지 입력 처리 실패: ${throwable.message ?: throwable::class.java.simpleName}"
+                            )
+                        }
+                        .collect { chunk ->
+                            val token = chunk.toString()
+                            output.append(token)
+                            onToken(token)
+                        }
+                }
+
+                output.toString().ifBlank {
+                    "이미지 입력 처리 실패: 모델 응답이 비어 있습니다."
+                }
+            } catch (e: Throwable) {
+                "이미지 입력 처리 실패: ${e.message ?: e::class.java.simpleName}"
+            }
+        }
+    }
+
     private fun getOrCreateEngine(
         modelPath: String,
-        settings: GenerationSettings
+        settings: GenerationSettings,
+        enableVisionBackend: Boolean
     ): Engine {
+        val mtpRequested = settings.speculativeDecodingEnabled == true
+        val backendName = when (settings.accelerator) {
+            AcceleratorMode.CPU -> "CPU"
+            AcceleratorMode.GPU,
+            AcceleratorMode.AUTO -> "GPU"
+        }
         val key = buildString {
             append(modelPath)
             append("|")
@@ -108,43 +198,92 @@ class LiteRtLlmEngine(
             append("|")
             append(settings.maxTokens)
             append("|")
-            append(settings.speculativeDecodingEnabled == true)
+            append(mtpRequested)
+            append("|vision=")
+            append(enableVisionBackend)
         }
 
         val currentEngine = engine
         if (currentEngine != null && loadedKey == key) {
+            Log.i("FusionLiteRT", "MTP requested: $mtpRequested (cached engine reused)")
+            Log.i("FusionLiteRT", "Backend: $backendName")
+            Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
+            Log.i("FusionLiteRT", "Model path: $modelPath")
             return currentEngine
         }
 
         unload()
 
         Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-        ExperimentalFlags.enableSpeculativeDecoding = settings.speculativeDecodingEnabled == true
-        Log.d(
-            "FusionLiteRT",
-            "Speculative decoding enabled=${settings.speculativeDecodingEnabled == true}"
-        )
-
         val backend = when (settings.accelerator) {
             AcceleratorMode.CPU -> Backend.CPU()
             AcceleratorMode.GPU -> Backend.GPU()
             AcceleratorMode.AUTO -> Backend.GPU()
         }
 
-        val config = EngineConfig(
-            modelPath = modelPath,
-            backend = backend,
-            maxNumTokens = settings.maxTokens.coerceAtLeast(512),
-            cacheDir = context.cacheDir.absolutePath
+        Log.i("FusionLiteRT", "MTP requested: $mtpRequested")
+        Log.i("FusionLiteRT", "Backend: $backendName")
+        Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
+        Log.i("FusionLiteRT", "Model path: $modelPath")
+        ExperimentalFlags.enableSpeculativeDecoding = mtpRequested
+        Log.i(
+            "FusionLiteRT",
+            if (mtpRequested) {
+                "MTP enabled before engine init"
+            } else {
+                "MTP disabled before engine init"
+            }
         )
 
-        val newEngine = Engine(config)
-        newEngine.initialize()
+        val newEngine = createEngine(
+            modelPath = modelPath,
+            backend = backend,
+            visionBackend = if (enableVisionBackend) backend else null,
+            maxNumTokens = settings.maxTokens.coerceAtLeast(1)
+        ).getOrElse { throwable ->
+            if (enableVisionBackend && backendName == "GPU") {
+                Log.w(
+                    "FusionLiteRT",
+                    "GPU vision backend failed, retrying CPU vision backend",
+                    throwable
+                )
+                createEngine(
+                    modelPath = modelPath,
+                    backend = backend,
+                    visionBackend = Backend.CPU(),
+                    maxNumTokens = settings.maxTokens.coerceAtLeast(1)
+                ).getOrThrow()
+            } else {
+                throw throwable
+            }
+        }
 
         engine = newEngine
         loadedKey = key
 
         return newEngine
+    }
+
+    private fun createEngine(
+        modelPath: String,
+        backend: Backend,
+        visionBackend: Backend?,
+        maxNumTokens: Int
+    ): Result<Engine> {
+        return runCatching {
+            val config = EngineConfig(
+                modelPath = modelPath,
+                backend = backend,
+                visionBackend = visionBackend,
+                maxNumTokens = maxNumTokens,
+                maxNumImages = if (visionBackend != null) 8 else null,
+                cacheDir = context.cacheDir.absolutePath
+            )
+
+            Engine(config).also { engine ->
+                engine.initialize()
+            }
+        }
     }
 
     private fun buildSystemInstruction(
@@ -167,12 +306,35 @@ class LiteRtLlmEngine(
             appendLine("temperature=${settings.temperature}")
             appendLine("accelerator=${settings.accelerator.name}")
             appendLine("speculativeDecoding=${settings.speculativeDecodingEnabled == true}")
+            appendLine("reasoningBudgetTokens=${settings.reasoningBudgetTokens} (prompt-only; LiteRT-LM API does not expose a reasoning budget config here)")
 
             if (systemMessages.isNotBlank()) {
                 appendLine()
                 appendLine(systemMessages)
             }
         }
+    }
+
+    private fun logGenerationSettings(
+        modelPath: String,
+        settings: GenerationSettings,
+        enableVisionBackend: Boolean
+    ) {
+        Log.i(
+            "FusionLiteRT",
+            buildString {
+                appendLine("Generation settings before request")
+                appendLine("modelPath=$modelPath")
+                appendLine("accelerator=${settings.accelerator.name} (runtime EngineConfig.backend)")
+                appendLine("maxTokens=${settings.maxTokens} (runtime EngineConfig.maxNumTokens)")
+                appendLine("topK=${settings.topK} (runtime SamplerConfig.topK)")
+                appendLine("topP=${settings.topP} (runtime SamplerConfig.topP)")
+                appendLine("temperature=${settings.temperature} (runtime SamplerConfig.temperature)")
+                appendLine("reasoningBudgetTokens=${settings.reasoningBudgetTokens} (prompt-only unsupported by current LiteRT-LM API)")
+                appendLine("MTP requested=${settings.speculativeDecodingEnabled == true} (runtime ExperimentalFlags.enableSpeculativeDecoding)")
+                appendLine("visionBackend=$enableVisionBackend (runtime EngineConfig.visionBackend when true)")
+            }.trimEnd()
+        )
     }
 
     private fun buildPrompt(

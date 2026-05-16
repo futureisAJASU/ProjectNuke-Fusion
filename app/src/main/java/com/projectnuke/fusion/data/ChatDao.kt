@@ -14,15 +14,62 @@ interface ChatDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: MessageEntity): Long
 
-    @Query("SELECT * FROM conversations ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM conversations WHERE isArchived = 0 ORDER BY isPinned DESC, updatedAt DESC")
     fun observeConversations(): Flow<List<ConversationEntity>>
+
+    @Query("SELECT * FROM conversations WHERE isArchived = 1 ORDER BY isPinned DESC, updatedAt DESC")
+    fun observeArchivedConversations(): Flow<List<ConversationEntity>>
+
+    @Query(
+        """
+        SELECT DISTINCT conversationId
+        FROM messages
+        WHERE
+            CASE
+                WHEN instr(content, '<fusion_metrics>') > 0 THEN substr(content, 1, instr(content, '<fusion_metrics>') - 1)
+                WHEN instr(content, '<fusion_thinking>') > 0 THEN substr(content, 1, instr(content, '<fusion_thinking>') - 1)
+                WHEN instr(content, '<fusion_attachment_v2>') > 0 THEN substr(content, 1, instr(content, '<fusion_attachment_v2>') - 1)
+                WHEN instr(content, '<fusion_attachment>') > 0 THEN substr(content, 1, instr(content, '<fusion_attachment>') - 1)
+                ELSE content
+            END
+            LIKE '%' || :query || '%'
+        """
+    )
+    fun observeConversationIdsMatchingMessages(query: String): Flow<List<Long>>
 
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     fun observeMessages(conversationId: Long): Flow<List<MessageEntity>>
 
-    @Query("SELECT * FROM conversations ORDER BY updatedAt DESC LIMIT 1")
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
+    suspend fun getMessagesForConversation(conversationId: Long): List<MessageEntity>
+
+    @Query("SELECT * FROM conversations WHERE id = :conversationId LIMIT 1")
+    suspend fun getConversationById(conversationId: Long): ConversationEntity?
+
+    @Query("SELECT * FROM conversations WHERE isArchived = 0 ORDER BY isPinned DESC, updatedAt DESC LIMIT 1")
     suspend fun getLatestConversation(): ConversationEntity?
 
     @Query("UPDATE conversations SET updatedAt = :updatedAt WHERE id = :conversationId")
     suspend fun updateConversationTime(conversationId: Long, updatedAt: Long)
+
+    @Query("UPDATE conversations SET isPinned = :isPinned WHERE id = :conversationId")
+    suspend fun updateConversationPinned(conversationId: Long, isPinned: Boolean)
+
+    @Query("UPDATE conversations SET title = :title WHERE id = :conversationId")
+    suspend fun updateConversationTitle(conversationId: Long, title: String)
+
+    @Query("UPDATE conversations SET isArchived = 1 WHERE id = :conversationId")
+    suspend fun archiveConversation(conversationId: Long)
+
+    @Query("UPDATE conversations SET isArchived = :archived WHERE id = :conversationId")
+    suspend fun setConversationArchived(conversationId: Long, archived: Boolean)
+
+    @Query("DELETE FROM conversations WHERE id = :conversationId")
+    suspend fun deleteConversation(conversationId: Long)
+
+    @Query("DELETE FROM messages WHERE conversationId = :conversationId")
+    suspend fun deleteMessagesForConversation(conversationId: Long)
+
+    @Query("DELETE FROM messages WHERE id = :messageId")
+    suspend fun deleteMessageById(messageId: Long)
 }
