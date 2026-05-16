@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -141,6 +142,13 @@ private const val PrefWebSearchEnabled = "web_search_enabled"
 private const val PrefSelectedModel = "selected_model"
 private const val PrefSelectedModelPath = "selected_model_path"
 private const val PrefSpeculativeDecoding = "speculative_decoding_enabled"
+private val QuickPromptPresets = listOf(
+    "자세히 설명해 주세요.",
+    "핵심만 요약해 주세요.",
+    "문제점을 분석해 주세요.",
+    "표로 정리해 주세요.",
+    "반박해 주세요."
+)
 @Composable
 fun ChatScreen(
     conversationId: Long,
@@ -663,6 +671,9 @@ fun ChatScreen(
                     pendingAttachments = pendingAttachments,
                     onRemoveAttachment = { attachment ->
                         pendingAttachments.remove(attachment)
+                    },
+                    onAppendQuickPrompt = { preset ->
+                        input = appendQuickPrompt(input, preset)
                     },
                     onPlusClick = {
                         attachmentPickerLauncher.launch(
@@ -1958,7 +1969,9 @@ private fun ChatInputBar(
     onSendClick: () -> Unit,
     pendingAttachments: List<LocalAttachment>,
     onRemoveAttachment: (LocalAttachment) -> Unit,
+    onAppendQuickPrompt: (String) -> Unit,
 ) {
+    var quickPromptExpanded by remember { mutableStateOf(false) }
     Surface(color = BlackBg) {
         Column {
             Box(
@@ -1971,6 +1984,31 @@ private fun ChatInputBar(
                 PendingAttachmentTray(
                     attachments = pendingAttachments,
                     onRemove = onRemoveAttachment
+                )
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = PanelBg,
+                    modifier = Modifier.clickable { quickPromptExpanded = !quickPromptExpanded }
+                ) {
+                    Text(
+                        text = if (quickPromptExpanded) "빠른 입력 닫기" else "빠른 입력",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+            if (quickPromptExpanded) {
+                QuickPromptChips(
+                    presets = QuickPromptPresets,
+                    onChipClick = onAppendQuickPrompt
                 )
             }
             Row(
@@ -2086,6 +2124,43 @@ private fun ChatInputBar(
     }
 
 }
+@Composable
+private fun QuickPromptChips(
+    presets: List<String>,
+    onChipClick: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        presets.forEach { preset ->
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = PanelBg,
+                modifier = Modifier.clickable { onChipClick(preset) }
+            ) {
+                Text(
+                    text = preset,
+                    color = TextPrimary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                )
+            }
+        }
+    }
+}
+
+private fun appendQuickPrompt(currentInput: String, preset: String): String {
+    val trimmed = currentInput.trimEnd()
+    if (trimmed.isEmpty()) return preset
+    val separator = if (trimmed.endsWith(".") || trimmed.endsWith("?") || trimmed.endsWith("!")) "\n" else " "
+    return trimmed + separator + preset
+}
+
 @Composable
 private fun CircleTextButton(
     text: String,

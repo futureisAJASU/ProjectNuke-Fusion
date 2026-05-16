@@ -1,6 +1,7 @@
 package com.projectnuke.fusion.ui
 
 import android.content.Intent
+import android.os.Build
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -49,6 +50,9 @@ import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
+import com.projectnuke.fusion.util.AttachmentStorageManager
+import com.projectnuke.fusion.util.AttachmentStorageStats
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -90,6 +94,9 @@ fun ConversationListScreenV2(
     var renameConversation by remember { mutableStateOf<ConversationEntity?>(null) }
     var renameTitle by remember { mutableStateOf("") }
     var deleteConversation by remember { mutableStateOf<ConversationEntity?>(null) }
+    var showAttachmentStorageDialog by remember { mutableStateOf(false) }
+    var attachmentStorageStats by remember { mutableStateOf<AttachmentStorageStats?>(null) }
+    var attachmentStorageLoading by remember { mutableStateOf(false) }
 
     var reasoningEnabled by remember { mutableStateOf(prefs.getBoolean("reasoning_enabled", false)) }
     var webSearchEnabled by remember { mutableStateOf(prefs.getBoolean("web_search_enabled", false)) }
@@ -356,7 +363,18 @@ fun ConversationListScreenV2(
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("데이터") }
                     item { DrawerSettingActionRow("아카이브", "보관한 채팅을 확인하고 복원합니다.") { page = SidebarPage.ARCHIVE } }
-                    item { DrawerSettingActionRow("첨부파일 저장공간", "이미지와 파일 캐시를 관리합니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
+                    item {
+                        DrawerSettingActionRow("첨부파일 저장공간", "이미지와 파일 캐시를 관리합니다.") {
+                            showAttachmentStorageDialog = true
+                            attachmentStorageLoading = true
+                            scope.launch {
+                                attachmentStorageStats = runCatching {
+                                    AttachmentStorageManager.calculateAttachmentStorageStats(context, dao)
+                                }.getOrNull()
+                                attachmentStorageLoading = false
+                            }
+                        }
+                    }
                     item {
                         DrawerSettingActionRow("채팅 내보내기", "현재 채팅을 Markdown 텍스트로 공유합니다.") {
                             if (currentConversationId == 0L) {
@@ -394,23 +412,90 @@ fun ConversationListScreenV2(
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("앱 정보") }
                     item { DrawerSettingInfoRow("Fusion", "패키지: ${context.packageName}") }
                     item {
-                        DrawerSettingActionRow("디버그 정보 복사", "모델, 설정, 최근 상태 정보를 클립보드에 복사합니다.") {
-                            val debugText = buildString {
-                                appendLine("model=$modelName")
-                                appendLine("modelPath=${modelPath ?: "none"}")
-                                appendLine("accelerator=$accelerator")
-                                appendLine("reasoning=$reasoningEnabled")
-                                appendLine("webSearch=$webSearchEnabled")
-                                appendLine("mtp=$speculativeEnabled")
-                                appendLine("maxTokens=$maxTokens topK=$topK topP=$topP temperature=$temperature")
+                        DrawerSettingActionRow("디버그 정보 복사", "모델, 설정, 기기, 최근 상태 정보를 클립보드에 복사합니다.") {
+                            scope.launch {
+                                try {
+                                    val debugText = buildFusionDebugInfo(
+                                        context = context,
+                                        dao = dao,
+                                        currentConversationId = currentConversationId,
+                                        modelName = modelName,
+                                        modelPath = modelPath,
+                                        accelerator = accelerator,
+                                        maxTokens = maxTokens,
+                                        topK = topK,
+                                        topP = topP,
+                                        temperature = temperature,
+                                        reasoningBudgetTokens = prefs.getInt("reasoning_budget_tokens", 0),
+                                        reasoningEnabled = reasoningEnabled,
+                                        webSearchEnabled = webSearchEnabled,
+                                        speculativeEnabled = speculativeEnabled
+                                    )
+                                    clipboard.setText(AnnotatedString(debugText))
+                                    Toast.makeText(context, "디버그 정보를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                                } catch (_: Exception) {
+                                    Toast.makeText(context, "디버그 정보 복사 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+                                }
                             }
-                            clipboard.setText(AnnotatedString(debugText))
-                            Toast.makeText(context, "디버그 정보를 복사했습니다.", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
             }
         }
+    }
+
+    if (showAttachmentStorageDialog) {
+        AlertDialog(
+            onDismissRequest = { showAttachmentStorageDialog = false },
+            title = { Text("첨부파일 저장공간") },
+            text = {
+                val stats = attachmentStorageStats
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (attachmentStorageLoading) {
+                        Text("저장공간 정보를 계산하고 있습니다.", color = DrawerTextSecondary, fontSize = 13.sp)
+                    } else if (stats != null) {
+                        Text("총 용량: ${formatBytes(stats.totalBytes)}", color = DrawerTextPrimary, fontSize = 14.sp)
+                        Text("파일 수: ${stats.totalFiles}", color = DrawerTextPrimary, fontSize = 14.sp)
+                        Text("참조 중인 파일: ${stats.referencedFiles}", color = DrawerTextPrimary, fontSize = 14.sp)
+                        Text("미참조 파일: ${stats.unreferencedFiles}", color = DrawerTextPrimary, fontSize = 14.sp)
+                    } else {
+                        Text("저장공간 정보를 불러오지 못했습니다.", color = DrawerTextSecondary, fontSize = 13.sp)
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAttachmentStorageDialog = false }) {
+                    Text("닫기")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (attachmentStorageLoading) return@TextButton
+                        scope.launch {
+                            try {
+                                val result = AttachmentStorageManager.cleanupUnreferencedAttachments(context, dao)
+                                if (result.deletedFiles > 0) {
+                                    Toast.makeText(context, "사용하지 않는 첨부파일을 정리했습니다.", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "정리할 첨부파일이 없습니다.", Toast.LENGTH_SHORT).show()
+                                }
+                                attachmentStorageLoading = true
+                                attachmentStorageStats = AttachmentStorageManager.calculateAttachmentStorageStats(context, dao)
+                                attachmentStorageLoading = false
+                            } catch (_: Exception) {
+                                Toast.makeText(context, "첨부파일 정리 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                ) {
+                    Text("사용하지 않는 첨부파일 정리", color = Color(0xFFFF7A7A))
+                }
+            },
+            containerColor = DrawerPanelBg,
+            titleContentColor = DrawerTextPrimary,
+            textContentColor = DrawerTextPrimary
+        )
     }
 
     renameConversation?.let { conversation ->
@@ -781,11 +866,151 @@ private fun buildChatExportMarkdown(
 }
 
 private fun stripHiddenFusionBlocks(content: String): String {
-    return content
+    val withAttachmentPlaceholders = replaceAttachmentTagsWithPlaceholders(content)
+    return withAttachmentPlaceholders
         .replace(Regex("""(?is)<fusion_metrics>.*?</fusion_metrics>"""), "")
         .replace(Regex("""(?is)<fusion_thinking>.*?</fusion_thinking>"""), "")
-        .replace(Regex("""(?is)<fusion_attachment_v2>.*?</fusion_attachment_v2>"""), "")
-        .replace(Regex("""(?is)<fusion_attachment>.*?</fusion_attachment>"""), "")
         .replace(Regex("""\n{3,}"""), "\n\n")
         .trim()
+}
+
+private fun replaceAttachmentTagsWithPlaceholders(content: String): String {
+    val v2Regex = Regex("""(?is)<fusion_attachment_v2>(.*?)\|(.*?)\|(.*?)</fusion_attachment_v2>""")
+    val legacyRegex = Regex("""(?is)<fusion_attachment>(.*?)</fusion_attachment>""")
+
+    var replaced = v2Regex.replace(content) { match ->
+        val rawName = match.groupValues.getOrNull(1).orEmpty().trim()
+        val fileName = if (rawName.isNotBlank()) rawName else "파일"
+        "\n[첨부파일: $fileName]\n"
+    }
+
+    replaced = legacyRegex.replace(replaced) { match ->
+        val payload = match.groupValues.getOrNull(1).orEmpty()
+        val nameFromField = Regex("""(?i)(?:^|[|,\s])(?:name|filename)\s*=\s*([^|,\n]+)""")
+            .find(payload)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+        val pathFromField = Regex("""(?i)(?:^|[|,\s])path\s*=\s*([^|,\n]+)""")
+            .find(payload)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+        val fileName = when {
+            !nameFromField.isNullOrBlank() -> nameFromField
+            !pathFromField.isNullOrBlank() -> pathFromField.substringAfterLast('/').substringAfterLast('\\')
+            else -> "파일"
+        }
+        "\n[첨부파일: $fileName]\n"
+    }
+
+    return replaced
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val kb = 1024.0
+    val mb = kb * 1024.0
+    val gb = mb * 1024.0
+    return when {
+        bytes >= gb -> String.format(Locale.US, "%.2f GB", bytes / gb)
+        bytes >= mb -> String.format(Locale.US, "%.2f MB", bytes / mb)
+        bytes >= kb -> String.format(Locale.US, "%.2f KB", bytes / kb)
+        else -> "$bytes B"
+    }
+}
+
+private suspend fun buildFusionDebugInfo(
+    context: android.content.Context,
+    dao: com.projectnuke.fusion.data.ChatDao,
+    currentConversationId: Long,
+    modelName: String,
+    modelPath: String?,
+    accelerator: String,
+    maxTokens: Int,
+    topK: Int,
+    topP: Float,
+    temperature: Float,
+    reasoningBudgetTokens: Int,
+    reasoningEnabled: Boolean,
+    webSearchEnabled: Boolean,
+    speculativeEnabled: Boolean
+): String {
+    val packageInfo = runCatching {
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.packageManager.getPackageInfo(
+                context.packageName,
+                android.content.pm.PackageManager.PackageInfoFlags.of(0)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+    }.getOrNull()
+
+    val versionName = packageInfo?.versionName ?: "unknown"
+    val versionCode = if (packageInfo != null) {
+        if (Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode.toString()
+        else @Suppress("DEPRECATION") packageInfo.versionCode.toString()
+    } else {
+        "unknown"
+    }
+
+    val modelFile = modelPath?.let { File(it) }
+    val modelExists = modelFile?.exists() == true
+    val modelSize = if (modelExists) formatBytes(modelFile?.length() ?: 0L) else "unknown"
+
+    val attachmentDir = AttachmentStorageManager.getAttachmentDirectory(context)
+    val attachmentStats = runCatching {
+        AttachmentStorageManager.calculateAttachmentStorageStats(context, dao)
+    }.getOrNull()
+
+    val messageCount = if (currentConversationId > 0L) {
+        runCatching { dao.getMessageCountForConversation(currentConversationId) }.getOrNull()
+    } else null
+    val totalConversations = runCatching { dao.getConversationCount() }.getOrNull()
+    val archivedConversations = runCatching { dao.getArchivedConversationCount() }.getOrNull()
+
+    return buildString {
+        appendLine("Fusion Debug Info")
+        appendLine("-----------------")
+        appendLine("Package: ${context.packageName}")
+        appendLine("App version: $versionName ($versionCode)")
+        appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+        appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
+        appendLine()
+        appendLine("Model")
+        appendLine("- Name: $modelName")
+        appendLine("- Path: ${modelPath ?: "none"}")
+        appendLine("- Exists: $modelExists")
+        appendLine("- Size: $modelSize")
+        appendLine()
+        appendLine("Generation Settings")
+        appendLine("- Accelerator: $accelerator")
+        appendLine("- Max tokens: $maxTokens")
+        appendLine("- TopK: $topK")
+        appendLine("- TopP: $topP")
+        appendLine("- Temperature: $temperature")
+        appendLine("- Reasoning budget tokens: $reasoningBudgetTokens")
+        appendLine("- Reasoning enabled: $reasoningEnabled")
+        appendLine("- Web search enabled: $webSearchEnabled")
+        appendLine("- MTP enabled/requested: $speculativeEnabled")
+        appendLine()
+        appendLine("Runtime")
+        appendLine("- Latest status: unavailable")
+        appendLine("- Latest metrics: unavailable")
+        appendLine("- Streaming state: unavailable")
+        appendLine("- Web search pipeline: enabled")
+        appendLine()
+        appendLine("Storage")
+        appendLine("- Attachment dir: ${attachmentDir.absolutePath}")
+        appendLine("- Attachment files: ${attachmentStats?.totalFiles ?: "unknown"}")
+        appendLine("- Attachment total size: ${attachmentStats?.let { formatBytes(it.totalBytes) } ?: "unknown"}")
+        appendLine()
+        appendLine("Database")
+        appendLine("- Current conversation id: $currentConversationId")
+        appendLine("- Messages in current conversation: ${messageCount ?: "unknown"}")
+        appendLine("- Total conversations: ${totalConversations ?: "unknown"}")
+        appendLine("- Archived conversations: ${archivedConversations ?: "unknown"}")
+    }.trimEnd()
 }

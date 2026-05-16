@@ -43,11 +43,23 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     suspend fun getMessagesForConversation(conversationId: Long): List<MessageEntity>
 
+    @Query("SELECT content FROM messages")
+    suspend fun getAllMessageContents(): List<String>
+
     @Query("SELECT * FROM conversations WHERE id = :conversationId LIMIT 1")
     suspend fun getConversationById(conversationId: Long): ConversationEntity?
 
     @Query("SELECT * FROM conversations WHERE isArchived = 0 ORDER BY isPinned DESC, updatedAt DESC LIMIT 1")
     suspend fun getLatestConversation(): ConversationEntity?
+
+    @Query("SELECT COUNT(*) FROM conversations")
+    suspend fun getConversationCount(): Int
+
+    @Query("SELECT COUNT(*) FROM conversations WHERE isArchived = 1")
+    suspend fun getArchivedConversationCount(): Int
+
+    @Query("SELECT COUNT(*) FROM messages WHERE conversationId = :conversationId")
+    suspend fun getMessageCountForConversation(conversationId: Long): Int
 
     @Query("UPDATE conversations SET updatedAt = :updatedAt WHERE id = :conversationId")
     suspend fun updateConversationTime(conversationId: Long, updatedAt: Long)
