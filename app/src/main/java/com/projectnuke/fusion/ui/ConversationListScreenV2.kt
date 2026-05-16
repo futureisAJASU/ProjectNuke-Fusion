@@ -1,7 +1,10 @@
 package com.projectnuke.fusion.ui
 
 import android.content.Intent
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
+import android.os.CancellationSignal
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -59,6 +62,8 @@ import java.util.Locale
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
+private const val PrefArchiveLockEnabled = "archive_lock_enabled"
+
 private val DrawerBlackBg = Color(0xFF000000)
 private val DrawerPanelBg = Color(0xFF171717)
 private val DrawerCardBg = Color(0xFF111111)
@@ -99,6 +104,8 @@ fun ConversationListScreenV2(
     var showAttachmentStorageDialog by remember { mutableStateOf(false) }
     var attachmentStorageStats by remember { mutableStateOf<AttachmentStorageStats?>(null) }
     var attachmentStorageLoading by remember { mutableStateOf(false) }
+    var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
+    var archiveUnlockedForSession by remember { mutableStateOf(false) }
 
     var reasoningEnabled by remember { mutableStateOf(prefs.getBoolean("reasoning_enabled", false)) }
     var webSearchEnabled by remember { mutableStateOf(prefs.getBoolean("web_search_enabled", false)) }
@@ -130,6 +137,33 @@ fun ConversationListScreenV2(
             .putBoolean("speculative_decoding_enabled", speculativeEnabled)
             .apply()
         Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+    }
+
+    fun openArchiveWithAuth() {
+        if (!archiveLockEnabled || archiveUnlockedForSession) {
+            page = SidebarPage.ARCHIVE
+            return
+        }
+
+        if (!isArchiveAuthenticationAvailable(context)) {
+            Toast.makeText(context, "이 기기에서는 아카이브 잠금을 사용할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        authenticateArchiveAccess(
+            context = context,
+            onSuccess = {
+                archiveUnlockedForSession = true
+                page = SidebarPage.ARCHIVE
+                Toast.makeText(context, "인증이 완료되었습니다.", Toast.LENGTH_SHORT).show()
+            },
+            onCanceled = {
+                Toast.makeText(context, "인증이 취소되었습니다.", Toast.LENGTH_SHORT).show()
+            },
+            onError = {
+                Toast.makeText(context, "아카이브를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+            }
+        )
     }
 
     LazyColumn(
@@ -266,7 +300,7 @@ fun ConversationListScreenV2(
                             title = "아카이브",
                             subtitle = "보관한 채팅을 확인하고 복원합니다.",
                             leading = "A"
-                        ) { page = SidebarPage.ARCHIVE }
+                        ) { openArchiveWithAuth() }
                     }
                     item {
                         DrawerBottomNavRow(
@@ -374,7 +408,27 @@ fun ConversationListScreenV2(
                     }
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("데이터") }
-                    item { DrawerSettingActionRow("아카이브", "보관한 채팅을 확인하고 복원합니다.") { page = SidebarPage.ARCHIVE } }
+                    item { DrawerSettingActionRow("아카이브", "보관한 채팅을 확인하고 복원합니다.") { openArchiveWithAuth() } }
+                    item {
+                        DrawerSettingToggleRow(
+                            title = "아카이브 잠금",
+                            subtitle = "보관된 채팅을 열 때 생체 인증 또는 기기 잠금 인증을 요구합니다.",
+                            checked = archiveLockEnabled,
+                            onToggle = { enabled ->
+                                if (enabled && !isArchiveAuthenticationAvailable(context)) {
+                                    archiveLockEnabled = false
+                                    archiveUnlockedForSession = false
+                                    prefs.edit().putBoolean(PrefArchiveLockEnabled, false).apply()
+                                    Toast.makeText(context, "이 기기에서는 아카이브 잠금을 사용할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    archiveLockEnabled = enabled
+                                    archiveUnlockedForSession = false
+                                    prefs.edit().putBoolean(PrefArchiveLockEnabled, enabled).apply()
+                                    Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+                    }
                     item {
                         DrawerSettingActionRow("첨부파일 저장공간", "이미지와 파일 캐시를 관리합니다.") {
                             showAttachmentStorageDialog = true
@@ -930,6 +984,55 @@ private fun formatBytes(bytes: Long): String {
         bytes >= kb -> String.format(Locale.US, "%.2f KB", bytes / kb)
         else -> "$bytes B"
     }
+}
+
+private fun archiveAuthenticators(): Int {
+    return BiometricManager.Authenticators.BIOMETRIC_STRONG or
+        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+}
+
+private fun isArchiveAuthenticationAvailable(context: android.content.Context): Boolean {
+    val biometricManager = context.getSystemService(BiometricManager::class.java) ?: return false
+    return biometricManager.canAuthenticate(archiveAuthenticators()) == BiometricManager.BIOMETRIC_SUCCESS
+}
+
+private fun authenticateArchiveAccess(
+    context: android.content.Context,
+    onSuccess: () -> Unit,
+    onCanceled: () -> Unit,
+    onError: () -> Unit
+) {
+    val cancellationSignal = CancellationSignal()
+    val prompt = BiometricPrompt.Builder(context)
+        .setTitle("본인 인증")
+        .setSubtitle("아카이브를 열려면 인증이 필요합니다.")
+        .setAllowedAuthenticators(archiveAuthenticators())
+        .build()
+
+    prompt.authenticate(
+        cancellationSignal,
+        context.mainExecutor,
+        object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
+                onSuccess()
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
+                if (
+                    errorCode == BiometricPrompt.BIOMETRIC_ERROR_CANCELED ||
+                    errorCode == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED
+                ) {
+                    onCanceled()
+                } else {
+                    onError()
+                }
+            }
+
+            override fun onAuthenticationFailed() {
+                onError()
+            }
+        }
+    )
 }
 
 private suspend fun buildFusionDebugInfo(
