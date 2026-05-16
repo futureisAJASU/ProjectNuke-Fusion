@@ -366,7 +366,8 @@ fun ChatScreen(
                 val fusionSystemPrompt = buildFusionSystemPrompt(
                     reasoningEnabled = reasoningEnabled,
                     webSearchEnabled = shouldUseWebSearch,
-                    webContext = webSearchResult
+                    webContext = webSearchResult,
+                    promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
                 )
 
                 val currentMessages = buildList<ChatMessage> {
@@ -830,7 +831,8 @@ fun ChatScreen(
                                     val fusionSystemPrompt = buildFusionSystemPrompt(
                                         reasoningEnabled = reasoningEnabled,
                                         webSearchEnabled = shouldUseWebSearch,
-                                        webContext = webSearchResult
+                                        webContext = webSearchResult,
+                                        promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
                                     )
 
                                     val currentMessages = buildList<ChatMessage> {
@@ -4032,7 +4034,8 @@ private fun buildFinalUserContent(
 private fun buildFusionSystemPrompt(
     reasoningEnabled: Boolean,
     webSearchEnabled: Boolean,
-    webContext: String?
+    webContext: String?,
+    promptLabInstruction: String?
 ): String {
     val basePrompt = """
 You are Fusion, a personal AI friend for the user.
@@ -4106,7 +4109,7 @@ Do not output hidden reasoning.
         ""
     }
 
-    return listOf(basePrompt, outputRule, webRule)
+    return listOf(basePrompt, promptLabInstruction.orEmpty(), outputRule, webRule)
         .filter { it.isNotBlank() }
         .joinToString("\n\n")
 }

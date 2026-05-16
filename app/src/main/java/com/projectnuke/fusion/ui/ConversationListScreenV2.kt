@@ -79,7 +79,8 @@ private val DrawerAccentBlue = Color(0xFF9FD0FF)
 private enum class SidebarPage {
     HOME,
     SETTINGS,
-    ARCHIVE
+    ARCHIVE,
+    PROMPT_LAB
 }
 
 @Composable
@@ -205,6 +206,7 @@ fun ConversationListScreenV2(
                     SidebarPage.HOME -> DrawerTopBar(onClose = { closeDrawer() }, onNewChat = onNewChat)
                     SidebarPage.SETTINGS -> DrawerPageTopBar("설정", onBack = { leaveArchive() })
                     SidebarPage.ARCHIVE -> DrawerPageTopBar("아카이브", onBack = { leaveArchive() })
+                    SidebarPage.PROMPT_LAB -> DrawerPageTopBar("Prompt Lab", onBack = { leaveArchive() })
                 }
             }
         }
@@ -281,7 +283,7 @@ fun ConversationListScreenV2(
                     item { Spacer(modifier = Modifier.height(8.dp)); DrawerSectionTitle("실험실") }
                     item { DrawerActionRow("모델 라이브러리", "Gemma, Fusion, 커스텀 모델을 관리합니다.", "M") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
                     item { DrawerActionRow("벤치마크", "TTFT, 토큰 속도, 메모리 사용량을 측정합니다.", "B") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
-                    item { DrawerActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.", "L") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
+                    item { DrawerActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.", "L") { page = SidebarPage.PROMPT_LAB } }
                     item { DrawerActionRow("에이전트 모드", "기기 제어 실험 기능입니다.", "A") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
                     item { Spacer(modifier = Modifier.height(8.dp)); DrawerSectionTitle("대화") }
                     if (filteredConversations.isEmpty()) {
@@ -523,7 +525,7 @@ fun ConversationListScreenV2(
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("실험실") }
                     item { DrawerSettingActionRow("벤치마크", "TTFT, 토큰 속도, 메모리 사용량을 측정합니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
-                    item { DrawerSettingActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
+                    item { DrawerSettingActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.") { page = SidebarPage.PROMPT_LAB } }
                     item { DrawerSettingActionRow("에이전트 모드", "기기 제어 실험 기능입니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("앱 정보") }
@@ -555,6 +557,11 @@ fun ConversationListScreenV2(
                                 }
                             }
                         }
+                    }
+                }
+                SidebarPage.PROMPT_LAB -> {
+                    item {
+                        PromptLabScreen(onBack = { leaveArchive() })
                     }
                 }
             }
