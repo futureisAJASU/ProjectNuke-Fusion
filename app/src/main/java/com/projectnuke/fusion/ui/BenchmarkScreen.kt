@@ -13,9 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,6 +41,118 @@ import java.util.Locale
 import kotlinx.coroutines.launch
 
 private const val BenchmarkPrompt = "반도체 공정과 메모리 계층 구조를 1000자 정도로 설명해 주세요. 핵심 개념, 성능 병목, 전력 효율 관점까지 포함해 주세요."
+private const val SafeBenchmarkPrompt = "반도체 공정과 메모리 계층 구조를 1000자 정도로 설명해 주세요. 핵심 개념, 성능 병목, 전력 효율 관점까지 포함해 주세요."
+
+@Composable
+fun SafeBenchmarkScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+    val prefs = remember { context.getSharedPreferences("fusion_chat_settings", Context.MODE_PRIVATE) }
+    val engine = remember { LiteRtLlmEngine(context.applicationContext) }
+
+    val selectedModel = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
+    val selectedModelPath = prefs.getString("selected_model_path", null)
+    val settings = remember { loadSettingsFromPrefs(prefs) }
+    val resolvedModelPath = remember(selectedModel, selectedModelPath) {
+        resolveModelPath(context, selectedModel, selectedModelPath)
+    }
+    var isRunning by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    var result by remember { mutableStateOf<String?>(null) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth().background(Color(0xFF000000)).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("뒤로", color = Color(0xFFF5F5F5)) }
+            Column {
+                Text("벤치마크", color = Color(0xFFF5F5F5), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text("선택한 모델의 응답 속도와 생성 성능을 측정합니다.", color = Color(0xFF9E9E9E), fontSize = 12.sp)
+            }
+        }
+
+        CardBlock {
+            Text("모델: $selectedModel", color = Color(0xFFF5F5F5))
+            Text("경로: ${resolvedModelPath ?: "없음"}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
+            Text("가속기: ${settings.accelerator.name}", color = Color(0xFFF5F5F5))
+            Text("MTP 가속: ${if (settings.speculativeDecodingEnabled == true) "사용" else "해제"}", color = Color(0xFFF5F5F5))
+            Text("maxTokens=${settings.maxTokens} / temp=${settings.temperature} / topK=${settings.topK} / topP=${settings.topP}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF171717)) {
+                TextButton(
+                    enabled = !isRunning,
+                    onClick = {
+                        val modelPath = resolvedModelPath
+                        if (modelPath.isNullOrBlank() || !File(modelPath).exists()) {
+                            Toast.makeText(context, "선택된 모델이 없습니다.", Toast.LENGTH_SHORT).show()
+                            return@TextButton
+                        }
+                        isRunning = true
+                        status = "모델 성능을 측정하는 중입니다."
+                        result = null
+                        scope.launch {
+                            try {
+                                val start = SystemClock.elapsedRealtime()
+                                var firstTokenMs: Long? = null
+                                val output = StringBuilder()
+                                engine.generateStreaming(
+                                    messages = listOf(ChatMessage("user", SafeBenchmarkPrompt)),
+                                    modelPath = modelPath,
+                                    settings = settings,
+                                    onToken = { token ->
+                                        if (firstTokenMs == null && token.isNotEmpty()) {
+                                            firstTokenMs = SystemClock.elapsedRealtime() - start
+                                        }
+                                        output.append(token)
+                                    }
+                                )
+                                val totalMs = SystemClock.elapsedRealtime() - start
+                                val text = output.toString().replace(Regex("""</?fusion_(thinking|answer|metrics)>"""), "").trim()
+                                val estTokens = estimateTokens(text)
+                                val tps = if (totalMs > 0) (estTokens * 1000.0 / totalMs) else 0.0
+                                result = buildString {
+                                    appendLine("모델 로딩 시간: 측정 불가")
+                                    appendLine("첫 토큰 시간: ${firstTokenMs?.let { "${it}ms" } ?: "측정 불가"}")
+                                    appendLine("총 생성 시간: ${"%.2f".format(Locale.US, totalMs / 1000.0)}s")
+                                    appendLine("추정 출력 토큰 수: $estTokens")
+                                    appendLine("추정 토큰 속도: ${"%.1f".format(Locale.US, tps)} tok/s")
+                                    appendLine("가속기: ${settings.accelerator.name}")
+                                    appendLine("MTP 가속: ${if (settings.speculativeDecodingEnabled == true) "사용" else "해제"}")
+                                }.trim()
+                                status = null
+                            } catch (_: Exception) {
+                                status = null
+                                Toast.makeText(context, "벤치마크 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                isRunning = false
+                            }
+                        }
+                    }
+                ) { Text("벤치마크 시작", color = Color(0xFFF5F5F5)) }
+            }
+            Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF171717)) {
+                TextButton(
+                    enabled = !result.isNullOrBlank(),
+                    onClick = {
+                        clipboard.setText(AnnotatedString(result.orEmpty()))
+                        Toast.makeText(context, "벤치마크 결과를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                    }
+                ) { Text("결과 복사", color = Color(0xFFF5F5F5)) }
+            }
+        }
+
+        if (!status.isNullOrBlank()) {
+            CardBlock { Text(status!!, color = Color(0xFFF5F5F5)) }
+        }
+        if (!result.isNullOrBlank()) {
+            CardBlock { Text(result!!, color = Color(0xFFF5F5F5), fontSize = 13.sp) }
+        }
+    }
+}
 
 @Composable
 fun BenchmarkScreen(onBack: () -> Unit) {
@@ -63,7 +173,7 @@ fun BenchmarkScreen(onBack: () -> Unit) {
     var result by remember { mutableStateOf<String?>(null) }
 
     Column(
-        modifier = Modifier.fillMaxSize().background(Color(0xFF000000)).padding(12.dp).verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxSize().background(Color(0xFF000000)).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

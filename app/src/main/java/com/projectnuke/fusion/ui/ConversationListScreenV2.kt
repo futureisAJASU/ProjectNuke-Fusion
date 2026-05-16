@@ -168,6 +168,25 @@ fun ConversationListScreenV2(
         onOpenConversation(conversationId)
     }
 
+    fun regenerateConversationTitle(conversation: ConversationEntity) {
+        menuConversation = null
+        scope.launch {
+            runCatching {
+                val messages = dao.getMessagesForConversation(conversation.id)
+                val newTitle = buildSafeConversationTitleFromMessages(messages)
+                val currentTitle = conversation.title.ifBlank { "새 대화" }
+                if (newTitle == currentTitle) {
+                    Toast.makeText(context, "이미 적절한 제목입니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    dao.updateConversationTitle(conversation.id, newTitle)
+                    Toast.makeText(context, "채팅 제목을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
+                }
+            }.onFailure {
+                Toast.makeText(context, "채팅 제목을 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     fun openArchiveWithAuth() {
         if (!archiveLockEnabled) {
             page = SidebarPage.ARCHIVE
@@ -262,17 +281,7 @@ fun ConversationListScreenV2(
                             renameTitle = conversation.title
                         },
                         onRegenerateTitle = {
-                            menuConversation = null
-                            scope.launch {
-                                runCatching {
-                                    val messages = dao.getMessagesForConversation(conversation.id)
-                                    val newTitle = buildConversationTitleFromMessages(messages)
-                                    dao.updateConversationTitle(conversation.id, newTitle)
-                                    Toast.makeText(context, "채팅 제목을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
-                                }.onFailure {
-                                    Toast.makeText(context, "채팅 제목을 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
-                                }
-                            }
+                            regenerateConversationTitle(conversation)
                         },
                         onArchive = {
                             menuConversation = null
@@ -340,17 +349,7 @@ fun ConversationListScreenV2(
                                     renameTitle = conversation.title
                                 },
                                 onRegenerateTitle = {
-                                    menuConversation = null
-                                    scope.launch {
-                                        runCatching {
-                                            val messages = dao.getMessagesForConversation(conversation.id)
-                                            val newTitle = buildConversationTitleFromMessages(messages)
-                                            dao.updateConversationTitle(conversation.id, newTitle)
-                                            Toast.makeText(context, "채팅 제목을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
-                                        }.onFailure {
-                                            Toast.makeText(context, "채팅 제목을 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
+                                    regenerateConversationTitle(conversation)
                                 },
                                 onArchive = {
                                     menuConversation = null
@@ -411,17 +410,7 @@ fun ConversationListScreenV2(
                                     renameTitle = conversation.title
                                 },
                                 onRegenerateTitle = {
-                                    menuConversation = null
-                                    scope.launch {
-                                        runCatching {
-                                            val messages = dao.getMessagesForConversation(conversation.id)
-                                            val newTitle = buildConversationTitleFromMessages(messages)
-                                            dao.updateConversationTitle(conversation.id, newTitle)
-                                            Toast.makeText(context, "채팅 제목을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
-                                        }.onFailure {
-                                            Toast.makeText(context, "채팅 제목을 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
+                                    regenerateConversationTitle(conversation)
                                 },
                                 onArchive = {
                                     menuConversation = null
@@ -626,7 +615,7 @@ fun ConversationListScreenV2(
                 }
                 SidebarPage.BENCHMARK -> {
                     item {
-                        BenchmarkScreen(onBack = { leaveArchive() })
+                        SafeBenchmarkScreen(onBack = { leaveArchive() })
                     }
                 }
             }
@@ -1029,6 +1018,34 @@ private fun DrawerCircleButton(text: String, onClick: () -> Unit) {
     ) {
         Text(text = text, color = DrawerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Medium)
     }
+}
+
+private fun buildSafeConversationTitleFromMessages(messages: List<MessageEntity>): String {
+    val userCandidates = messages
+        .asSequence()
+        .filter { it.role == "user" }
+        .map { stripHiddenForTitle(it.content) }
+        .filter { it.isNotBlank() && it.length >= 2 }
+        .toList()
+
+    val assistantCandidates = messages
+        .asSequence()
+        .filter { it.role != "user" }
+        .map { stripHiddenForTitle(it.content) }
+        .filter { it.isNotBlank() && it.length >= 2 }
+        .toList()
+
+    val base = (userCandidates + assistantCandidates).firstOrNull().orEmpty()
+    if (base.isBlank()) return "새 대화"
+    return truncateSafeTitle(base)
+}
+
+private fun truncateSafeTitle(text: String): String {
+    val normalized = text.replace('\n', ' ').trim()
+    if (normalized.isBlank()) return "새 대화"
+    val hasNonAscii = normalized.any { it.code > 127 }
+    val limit = if (hasNonAscii) 18 else 28
+    return if (normalized.length <= limit) normalized else normalized.take(limit).trimEnd() + "…"
 }
 
 private fun buildConversationTitleFromMessages(messages: List<MessageEntity>): String {
