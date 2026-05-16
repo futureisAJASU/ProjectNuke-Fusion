@@ -26,5 +26,19 @@ class FakeLlmEngine : LlmEngine {
         }
     }
 
+    override suspend fun generateStreaming(
+        messages: List<ChatMessage>,
+        modelPath: String,
+        settings: GenerationSettings,
+        onToken: (String) -> Unit
+    ): String {
+        val output = generate(messages, modelPath, settings)
+        output.split(" ").forEach { token ->
+            onToken("$token ")
+            delay(35)
+        }
+        return output
+    }
+
     override fun unload() {}
 }

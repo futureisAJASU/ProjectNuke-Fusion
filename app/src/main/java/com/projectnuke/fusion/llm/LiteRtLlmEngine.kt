@@ -1,11 +1,14 @@
 package com.projectnuke.fusion.llm
 
 import android.content.Context
+import android.util.Log
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.LogSeverity
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.projectnuke.fusion.model.AcceleratorMode
@@ -16,6 +19,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+@OptIn(ExperimentalApi::class)
 class LiteRtLlmEngine(
     private val context: Context
 ) : LlmEngine {
@@ -27,6 +31,20 @@ class LiteRtLlmEngine(
         messages: List<ChatMessage>,
         modelPath: String,
         settings: GenerationSettings
+    ): String {
+        return generateStreaming(
+            messages = messages,
+            modelPath = modelPath,
+            settings = settings,
+            onToken = {}
+        )
+    }
+
+    override suspend fun generateStreaming(
+        messages: List<ChatMessage>,
+        modelPath: String,
+        settings: GenerationSettings,
+        onToken: (String) -> Unit
     ): String {
         return withContext(Dispatchers.IO) {
             val modelFile = File(modelPath)
@@ -64,7 +82,9 @@ class LiteRtLlmEngine(
                             )
                         }
                         .collect { chunk ->
-                            output.append(chunk.toString())
+                            val token = chunk.toString()
+                            output.append(token)
+                            onToken(token)
                         }
                 }
 
@@ -87,6 +107,8 @@ class LiteRtLlmEngine(
             append(settings.accelerator.name)
             append("|")
             append(settings.maxTokens)
+            append("|")
+            append(settings.speculativeDecodingEnabled == true)
         }
 
         val currentEngine = engine
@@ -97,6 +119,11 @@ class LiteRtLlmEngine(
         unload()
 
         Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
+        ExperimentalFlags.enableSpeculativeDecoding = settings.speculativeDecodingEnabled == true
+        Log.d(
+            "FusionLiteRT",
+            "Speculative decoding enabled=${settings.speculativeDecodingEnabled == true}"
+        )
 
         val backend = when (settings.accelerator) {
             AcceleratorMode.CPU -> Backend.CPU()
@@ -139,6 +166,7 @@ class LiteRtLlmEngine(
             appendLine("topP=${settings.topP}")
             appendLine("temperature=${settings.temperature}")
             appendLine("accelerator=${settings.accelerator.name}")
+            appendLine("speculativeDecoding=${settings.speculativeDecodingEnabled == true}")
 
             if (systemMessages.isNotBlank()) {
                 appendLine()

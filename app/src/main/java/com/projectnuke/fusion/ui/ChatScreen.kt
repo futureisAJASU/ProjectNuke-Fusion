@@ -1,6 +1,7 @@
 package com.projectnuke.fusion.ui
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
@@ -69,6 +70,9 @@ import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.search.FusionWebSearch
+import com.projectnuke.fusion.search.SearchIntent
+import com.projectnuke.fusion.search.toStructuredContext
 import java.io.File
 import java.net.URL
 import java.net.URLEncoder
@@ -117,6 +121,11 @@ private data class ParsedMessageContent(
     val body: String,
     val attachments: List<LocalAttachment>
 )
+
+private data class FusionMetricsSplit(
+    val content: String,
+    val metricsLine: String?
+)
 @Composable
 fun ChatScreen(
     conversationId: Long,
@@ -129,6 +138,8 @@ fun ChatScreen(
     val dao = remember { db.chatDao() }
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
+    var streamingAssistantText by remember { mutableStateOf<String?>(null) }
+    var streamingMetricsLine by remember { mutableStateOf<String?>(null) }
 
     var chatMenuExpanded by remember { mutableStateOf(false) }
     var showModelDialog by remember { mutableStateOf(false) }
@@ -339,12 +350,15 @@ fun ChatScreen(
                     onSendClick = {
                         val userInput = input.trim()
                         val attachmentsToSend = pendingAttachments.toList()
+                        val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
 
                         if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
                             input = ""
                             pendingAttachments.clear()
                             isGenerating = true
-                            generationStatus = if (webSearchEnabled) "웹 검색 중..." else "모델 준비 중..."
+                            streamingAssistantText = null
+                            streamingMetricsLine = null
+                            generationStatus = if (shouldUseWebSearch) "웹 검색 중..." else "모델 준비 중..."
 
                             val userMessageContent = buildMessageContentWithAttachments(
                                 body = userInput,
@@ -382,20 +396,48 @@ fun ChatScreen(
 
                                     dao.updateConversationTime(activeConversationId, now)
 
-                                    val webSearchQuery = buildWebSearchQuery(
-                                        latestUserInput = userInput,
-                                        messages = messages
-                                    )
+                                    val previousUserMessage = messages
+                                        .asReversed()
+                                        .firstOrNull { it.role == "user" }
+                                        ?.content
+                                        ?.let { parseMessageAttachments(it).body }
+                                        ?.trim()
+                                        .orEmpty()
 
-                                    val webSearchResult = if (webSearchEnabled) {
-                                        performSimpleWebSearch(webSearchQuery)
+                                    val webSearchResult = if (shouldUseWebSearch) {
+                                        generationStatus = "검색 의도 분석 중..."
+                                        val searchIntent = FusionWebSearch.detectIntent(userInput)
+                                        generationStatus = when (searchIntent) {
+                                            SearchIntent.NEWS -> "뉴스 검색 중..."
+                                            else -> "웹 검색 중..."
+                                        }
+
+                                        val response = FusionWebSearch.search(
+                                            userInput = userInput,
+                                            previousUserMessage = previousUserMessage
+                                        )
+
+                                        generationStatus = "검색 결과 ${response.results.size}개 정리 중..."
+                                        response.toStructuredContext()
                                     } else {
                                         null
                                     }
 
+                                    if (shouldUseWebSearch) {
+                                        generationStatus = "검색 결과를 바탕으로 답변 생성 중..."
+                                    }
+
+                                    val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
+                                        modelName = selectedModel,
+                                        settings = generationSettings
+                                    )
+                                    val requestSettings = generationSettings.copy(
+                                        speculativeDecodingEnabled = mtpEnabledForRequest
+                                    )
+
                                     val fusionSystemPrompt = buildFusionSystemPrompt(
                                         reasoningEnabled = reasoningEnabled,
-                                        webSearchEnabled = webSearchEnabled,
+                                        webSearchEnabled = shouldUseWebSearch,
                                         webContext = webSearchResult
                                     )
 
@@ -405,12 +447,13 @@ fun ChatScreen(
                                                 role = "system",
                                                 content = """
                 FUSION_GENERATION_SETTINGS
-                maxTokens=${generationSettings.maxTokens}
-                topK=${generationSettings.topK}
-                topP=${generationSettings.topP}
-                temperature=${generationSettings.temperature}
-                accelerator=${generationSettings.accelerator.name}
-                reasoningBudgetTokens=${generationSettings.reasoningBudgetTokens}
+                maxTokens=${requestSettings.maxTokens}
+                topK=${requestSettings.topK}
+                topP=${requestSettings.topP}
+                temperature=${requestSettings.temperature}
+                accelerator=${requestSettings.accelerator.name}
+                reasoningBudgetTokens=${requestSettings.reasoningBudgetTokens}
+                speculativeDecoding=${requestSettings.speculativeDecodingEnabled == true}
             """.trimIndent()
                                             )
                                         )
@@ -433,13 +476,17 @@ fun ChatScreen(
 
                                         addAll(messages)
 
+                                        val finalUserContent = buildFinalUserContent(
+                                            body = userInput,
+                                            attachments = attachmentsToSend,
+                                            webSearchEnabled = shouldUseWebSearch,
+                                            webSearchResult = webSearchResult
+                                        )
+
                                         add(
                                             ChatMessage(
                                                 role = "user",
-                                                content = buildModelUserContent(
-                                                    body = userInput,
-                                                    attachments = attachmentsToSend
-                                                )
+                                                content = finalUserContent
                                             )
                                         )
                                     }
@@ -472,13 +519,60 @@ fun ChatScreen(
                                         return@launch
                                     }
 
-                                    generationStatus = "모델 로딩 중..."
+                                    generationStatus = if (mtpEnabledForRequest) {
+                                        "MTP 가속 활성화됨"
+                                    } else {
+                                        "MTP 미지원 모델/런타임"
+                                    }
 
-                                    val rawReply = engine.generate(
-                                        messages = currentMessages,
-                                        modelPath = activeModelPath,
-                                        settings = generationSettings
+                                    kotlinx.coroutines.delay(250)
+                                    generationStatus = "모델 응답 생성 중..."
+
+                                    val generationStartMs = SystemClock.elapsedRealtime()
+                                    var firstTokenLatencyMs: Long? = null
+
+                                    val rawReply = if (reasoningEnabled) {
+                                        engine.generate(
+                                            messages = currentMessages,
+                                            modelPath = activeModelPath,
+                                            settings = requestSettings
+                                        )
+                                    } else {
+                                        val streamedOutput = StringBuilder()
+                                        streamingAssistantText = ""
+                                        generationStatus = "응답 생성 중..."
+
+                                        engine.generateStreaming(
+                                            messages = currentMessages,
+                                            modelPath = activeModelPath,
+                                            settings = requestSettings,
+                                            onToken = { token ->
+                                                if (firstTokenLatencyMs == null && token.isNotEmpty()) {
+                                                    firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                                                }
+                                                streamedOutput.append(token)
+                                                val visibleText = streamedOutput.toString()
+                                                scope.launch {
+                                                    if (isGenerating) {
+                                                        streamingAssistantText = visibleText
+                                                    }
+                                                }
+                                            }
+                                        )
+                                    }
+
+                                    val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
+                                    val metricsLine = buildFusionMetricsLine(
+                                        modelName = shortModelName(selectedModel),
+                                        acceleratorName = buildAcceleratorLabel(
+                                            acceleratorName = requestSettings.accelerator.name,
+                                            speculativeDecodingEnabled = mtpEnabledForRequest
+                                        ),
+                                        generatedText = rawReply,
+                                        totalGenerationMs = totalGenerationMs,
+                                        firstTokenLatencyMs = firstTokenLatencyMs
                                     )
+                                    streamingMetricsLine = metricsLine
 
                                     generationStatus = "답변 저장 중..."
 
@@ -486,7 +580,7 @@ fun ChatScreen(
                                         MessageEntity(
                                             conversationId = activeConversationId,
                                             role = "assistant",
-                                            content = rawReply,
+                                            content = appendFusionMetrics(rawReply, metricsLine),
                                             createdAt = System.currentTimeMillis()
                                         )
                                     )
@@ -510,6 +604,8 @@ fun ChatScreen(
                                 } finally {
                                     generationStatus = null
                                     isGenerating = false
+                                    streamingAssistantText = null
+                                    streamingMetricsLine = null
                                 }
                             }
                         }
@@ -546,6 +642,7 @@ fun ChatScreen(
                                 createdAt = message.createdAt,
                                 selectedModel = selectedModel,
                                 webSearchEnabled = webSearchEnabled,
+                                reasoningEnabled = reasoningEnabled,
                                 onRetry = {
                                     Toast.makeText(
                                         context,
@@ -569,9 +666,25 @@ fun ChatScreen(
 
                     if (isGenerating) {
                         item {
-                            ModelLoadingBubble(
-                                status = generationStatus ?: "모델 준비 중..."
-                            )
+                            val streamingText = streamingAssistantText
+                            if (!reasoningEnabled && streamingText != null) {
+                                AssistantMessage(
+                                    content = streamingMetricsLine?.let {
+                                        appendFusionMetrics(streamingText, it)
+                                    } ?: streamingText,
+                                    createdAt = System.currentTimeMillis(),
+                                    selectedModel = selectedModel,
+                                    webSearchEnabled = webSearchEnabled,
+                                    reasoningEnabled = false,
+                                    onRetry = {},
+                                    onBranch = {},
+                                    onToggleWebSearch = {}
+                                )
+                            } else {
+                                ModelLoadingBubble(
+                                    status = generationStatus ?: "모델 준비 중..."
+                                )
+                            }
                         }
                     }
                 }
@@ -675,6 +788,7 @@ fun ChatScreen(
     if (showAdvancedSettingsDialog) {
         AdvancedSettingsDialog(
             settings = generationSettings,
+            selectedModel = selectedModel,
             onDismiss = {
                 showAdvancedSettingsDialog = false
             },
@@ -907,6 +1021,7 @@ private fun AssistantMessage(
     createdAt: Long,
     selectedModel: String,
     webSearchEnabled: Boolean,
+    reasoningEnabled: Boolean,
     onRetry: () -> Unit,
     onBranch: () -> Unit,
     onToggleWebSearch: () -> Unit
@@ -914,8 +1029,11 @@ private fun AssistantMessage(
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
     var moreExpanded by remember { mutableStateOf(false) }
-    val parsed = remember(content) {
-        parseAssistantOutput(content)
+    val metricsSplit = remember(content) {
+        splitFusionMetrics(content)
+    }
+    val parsed = remember(metricsSplit.content, reasoningEnabled) {
+        parseAssistantOutput(metricsSplit.content, reasoningEnabled)
     }
 
     Column(
@@ -932,6 +1050,16 @@ private fun AssistantMessage(
             fontSize = 18.sp,
             lineHeight = 29.sp
         )
+
+        metricsSplit.metricsLine?.let { metricsLine ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = metricsLine,
+                color = TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+        }
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -1769,7 +1897,13 @@ private fun AdvancedSettingsEntry(
             Spacer(modifier = Modifier.height(2.dp))
 
             Text(
-                text = "${settings.accelerator.name} · Reason ${settings.reasoningBudgetTokens}",
+                text = "${settings.accelerator.name} · Reason ${settings.reasoningBudgetTokens} · MTP ${
+                    when (settings.speculativeDecodingEnabled) {
+                        true -> "On"
+                        false -> "Off"
+                        null -> "Auto"
+                    }
+                }",
                 color = TextSecondary,
                 fontSize = 13.sp
             )
@@ -1831,6 +1965,7 @@ private fun DownloadModelDialog(
 @Composable
 private fun AdvancedSettingsDialog(
     settings: GenerationSettings,
+    selectedModel: String,
     onDismiss: () -> Unit,
     onApply: (GenerationSettings) -> Unit
 ) {
@@ -1857,6 +1992,18 @@ private fun AdvancedSettingsDialog(
                 AcceleratorMode.GPU
             }
         )
+    }
+    var speculativeDecodingEnabled by remember(settings, selectedModel) {
+        mutableStateOf(
+            settings.speculativeDecodingEnabled
+                ?: defaultSpeculativeDecodingEnabled(
+                    modelName = selectedModel,
+                    accelerator = settings.accelerator
+                )
+        )
+    }
+    var speculativeDecodingTouched by remember(settings, selectedModel) {
+        mutableStateOf(settings.speculativeDecodingEnabled != null)
     }
     var maxTokensText by remember(settings) { mutableStateOf(maxTokens.toString()) }
     var topKText by remember(settings) { mutableStateOf(topK.toString()) }
@@ -2004,6 +2151,31 @@ private fun AdvancedSettingsDialog(
                         )
                     }
                 }
+
+                SettingSwitchRow(
+                    title = "MTP 가속",
+                    subtitle = "Gemma 4에서 speculative decoding으로 출력 속도를 높입니다.",
+                    checked = if (speculativeDecodingTouched) {
+                        speculativeDecodingEnabled
+                    } else {
+                        defaultSpeculativeDecodingEnabled(
+                            modelName = selectedModel,
+                            accelerator = accelerator
+                        )
+                    },
+                    onToggle = {
+                        val current = if (speculativeDecodingTouched) {
+                            speculativeDecodingEnabled
+                        } else {
+                            defaultSpeculativeDecodingEnabled(
+                                modelName = selectedModel,
+                                accelerator = accelerator
+                            )
+                        }
+                        speculativeDecodingEnabled = !current
+                        speculativeDecodingTouched = true
+                    }
+                )
             }
         },
         dismissButton = {
@@ -2034,7 +2206,12 @@ private fun AdvancedSettingsDialog(
                             accelerator = accelerator,
                             reasoningBudgetTokens = reasoningBudgetText.toIntOrNull()
                                 ?.coerceIn(128, 8192)
-                                ?: reasoningBudget.coerceIn(128, 8192)
+                                ?: reasoningBudget.coerceIn(128, 8192),
+                            speculativeDecodingEnabled = if (speculativeDecodingTouched) {
+                                speculativeDecodingEnabled
+                            } else {
+                                null
+                            }
                         )
                     )
                 }
@@ -2216,41 +2393,164 @@ private fun AcceleratorSegment(
     }
 }
 private fun parseAssistantOutput(
-    raw: String
+    raw: String,
+    reasoningEnabled: Boolean
 ): ParsedAssistantOutput {
-    val thinkingStart = "<fusion_thinking>"
-    val thinkingEnd = "</fusion_thinking>"
-    val answerStart = "<fusion_answer>"
-    val answerEnd = "</fusion_answer>"
-    val hasThinking = raw.contains(thinkingStart) && raw.contains(thinkingEnd)
-    val hasAnswer = raw.contains(answerStart) && raw.contains(answerEnd)
+    val thinkingTagRegex = Regex("""</?fusion_thinking>""", RegexOption.IGNORE_CASE)
+    val answerTagRegex = Regex("""</?fusion_answer>""", RegexOption.IGNORE_CASE)
 
-    val thinking = if (hasThinking) {
-        raw.substringAfter(thinkingStart)
-            .substringBefore(thinkingEnd)
-            .trim()
+    val thinkingBlockRegex = Regex(
+        pattern = """(?is)<fusion_thinking>(.*?)</fusion_thinking>"""
+    )
+    val answerBlockRegex = Regex(
+        pattern = """(?is)<fusion_answer>(.*?)</fusion_answer>"""
+    )
+
+    val thinkingBlocks = thinkingBlockRegex.findAll(raw)
+        .map { match -> stripFusionTags(match.groupValues[1]).trim() }
+        .filter { it.isNotBlank() }
+        .toList()
+
+    val answerBlocks = answerBlockRegex.findAll(raw)
+        .map { match -> stripFusionTags(match.groupValues[1]).trim() }
+        .filter { it.isNotBlank() }
+        .toList()
+
+    val thinking = if (reasoningEnabled) {
+        thinkingBlocks
+            .joinToString("\n\n")
             .ifBlank { null }
     } else {
         null
     }
 
     val answer = when {
-        hasAnswer -> raw.substringAfter(answerStart)
-            .substringBefore(answerEnd)
+        answerBlocks.isNotEmpty() -> answerBlocks.joinToString("\n\n")
+
+        raw.contains("</fusion_thinking>", ignoreCase = true) -> raw
+            .substringAfterLast("</fusion_thinking>")
+            .let(::stripFusionTags)
+            .trim()
+            .ifBlank {
+                if (thinkingBlocks.isNotEmpty()) {
+                    ""
+                } else {
+                    stripFusionTags(raw).trim()
+                }
+            }
+
+        raw.contains("<fusion_answer>", ignoreCase = true) -> raw
+            .substringAfterLast("<fusion_answer>")
+            .let(::stripFusionTags)
             .trim()
 
-        hasThinking -> raw.substringAfter(thinkingEnd)
+        raw.contains("<fusion_thinking>", ignoreCase = true) -> raw
+            .substringBefore("<fusion_thinking>")
+            .let(::stripFusionTags)
             .trim()
-            .ifBlank { raw }
+            .ifBlank {
+                if (thinkingBlocks.isNotEmpty()) {
+                    ""
+                } else {
+                    stripFusionTags(raw).trim()
+                }
+            }
 
-        else -> raw
-    }
+        thinkingTagRegex.containsMatchIn(raw) || answerTagRegex.containsMatchIn(raw) -> {
+            val withoutCompleteThinking = thinkingBlockRegex.replace(raw, "")
+            stripFusionTags(withoutCompleteThinking)
+                .trim()
+                .ifBlank {
+                    if (thinkingBlocks.isNotEmpty()) {
+                        ""
+                    } else {
+                        stripFusionTags(raw).trim()
+                    }
+                }
+        }
+
+        else -> raw.trim()
+    }.let(::stripFusionTags).trim()
 
     return ParsedAssistantOutput(
         thinking = thinking,
-        answer = answer
+        answer = answer.ifBlank {
+            if (thinkingBlocks.isNotEmpty() || thinkingTagRegex.containsMatchIn(raw)) {
+                "No final answer was generated."
+            } else {
+                stripFusionTags(raw).trim()
+            }
+        }
     )
 
+}
+
+private fun estimateOutputTokens(text: String): Int {
+    val trimmed = stripFusionTags(splitFusionMetrics(text).content)
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    if (trimmed.isBlank()) return 0
+
+    val wordLikeTokens = Regex("""[A-Za-z0-9_]+|[가-힣]+|[^\s]""")
+        .findAll(trimmed)
+        .sumOf { match ->
+            val value = match.value
+            when {
+                value.any { it in '가'..'힣' } -> (value.length + 1) / 2
+                value.length > 8 -> (value.length + 3) / 4
+                else -> 1
+            }
+        }
+
+    return wordLikeTokens.coerceAtLeast(1)
+}
+
+private fun buildFusionMetricsLine(
+    modelName: String,
+    acceleratorName: String,
+    generatedText: String,
+    totalGenerationMs: Long,
+    firstTokenLatencyMs: Long?
+): String {
+    val outputTokens = estimateOutputTokens(generatedText)
+    val totalSeconds = totalGenerationMs.coerceAtLeast(1L) / 1000.0
+    val tokensPerSecond = outputTokens / totalSeconds
+    val base = "${modelName} · ${acceleratorName} · ${String.format(Locale.US, "%.1fs", totalSeconds)} · 약 ${
+        String.format(Locale.US, "%.1f", tokensPerSecond)
+    } tok/s · 약 ${outputTokens} tokens"
+
+    return firstTokenLatencyMs?.let {
+        "$base · first ${String.format(Locale.US, "%.1fs", it / 1000.0)}"
+    } ?: base
+}
+
+private fun appendFusionMetrics(
+    content: String,
+    metricsLine: String
+): String {
+    return "${splitFusionMetrics(content).content.trimEnd()}\n\n<fusion_metrics>$metricsLine</fusion_metrics>"
+}
+
+private fun splitFusionMetrics(
+    content: String
+): FusionMetricsSplit {
+    val metricsRegex = Regex("""(?is)<fusion_metrics>(.*?)</fusion_metrics>""")
+    val metricsLine = metricsRegex.findAll(content)
+        .map { it.groupValues[1].trim() }
+        .filter { it.isNotBlank() }
+        .lastOrNull()
+
+    return FusionMetricsSplit(
+        content = metricsRegex.replace(content, "").trimEnd(),
+        metricsLine = metricsLine
+    )
+}
+
+private fun stripFusionTags(text: String): String {
+    return text
+        .replace(Regex("""</?fusion_(?:thinking|answer|metrics)>""", RegexOption.IGNORE_CASE), "")
+        .trim()
 }
 private fun getModelDirectory(context: Context): File {
     val baseDir = context.getExternalFilesDir(null) ?: context.filesDir
@@ -2648,7 +2948,11 @@ private fun openAttachmentFile(
     val file = File(attachment.localPath)
 
     if (!file.exists()) {
-        Toast.makeText(context, "파일을 찾을 수 없습니다", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            context,
+            "첨부 파일을 찾을 수 없습니다: ${attachment.localPath}",
+            Toast.LENGTH_LONG
+        ).show()
         return
     }
 
@@ -2684,25 +2988,100 @@ private fun shortModelName(name: String): String {
         else -> name
     }
 }
+
+private fun isGemma4Model(modelName: String): Boolean {
+    return modelName.contains("Gemma 4", ignoreCase = true) ||
+        modelName.contains("gemma-4", ignoreCase = true)
+}
+
+private fun isGemma4E4BModel(modelName: String): Boolean {
+    return modelName.contains("E4B", ignoreCase = true) ||
+        modelName.contains("e4b", ignoreCase = true)
+}
+
+private fun isGemma4E2BModel(modelName: String): Boolean {
+    return modelName.contains("E2B", ignoreCase = true) ||
+        modelName.contains("e2b", ignoreCase = true)
+}
+
+private fun defaultSpeculativeDecodingEnabled(
+    modelName: String,
+    accelerator: AcceleratorMode
+): Boolean {
+    if (!isGemma4Model(modelName)) return false
+
+    return when (accelerator) {
+        AcceleratorMode.GPU,
+        AcceleratorMode.AUTO -> true
+
+        AcceleratorMode.CPU -> isGemma4E4BModel(modelName) && !isGemma4E2BModel(modelName)
+    }
+}
+
+private fun resolveSpeculativeDecodingEnabled(
+    modelName: String,
+    settings: GenerationSettings
+): Boolean {
+    if (!isGemma4Model(modelName)) return false
+
+    return settings.speculativeDecodingEnabled
+        ?: defaultSpeculativeDecodingEnabled(
+            modelName = modelName,
+            accelerator = settings.accelerator
+        )
+}
+
+private fun buildAcceleratorLabel(
+    acceleratorName: String,
+    speculativeDecodingEnabled: Boolean
+): String {
+    return if (speculativeDecodingEnabled) {
+        "$acceleratorName+MTP"
+    } else {
+        acceleratorName
+    }
+}
+
+private fun shouldAutoUseWebSearch(userInput: String): Boolean {
+    return FusionWebSearch.shouldAutoUseWebSearch(userInput)
+}
+
+private fun isGenericWebSearchRequest(userInput: String): Boolean {
+    val normalized = userInput.trim().lowercase(Locale.ROOT)
+    if (normalized.isBlank()) return false
+
+    return listOf(
+        "검색",
+        "검색해줘",
+        "검색해서 알려줘",
+        "찾아줘",
+        "찾아서 알려줘",
+        "웹 검색",
+        "웹검색",
+        "알려줘"
+    ).any { keyword -> normalized == keyword }
+}
+
+private fun normalizeWebSearchQuery(query: String): String {
+    val normalized = query.trim()
+
+    return if (normalized.contains("삼성전자") && normalized.contains("주가")) {
+        "삼성전자 005930 주가 오늘 네이버 금융"
+    } else {
+        normalized
+    }
+}
+
 private fun buildWebSearchQuery(
     latestUserInput: String,
     messages: List<ChatMessage>
 ): String {
     val trimmed = latestUserInput.trim()
 
-    val genericSearchRequest = listOf(
-        "검색해서 알려줘",
-        "검색해줘",
-        "찾아줘",
-        "웹검색해줘",
-        "검색",
-        "알려줘"
-    ).any { keyword ->
-        trimmed == keyword || trimmed.contains(keyword)
-    }
+    val genericSearchRequest = isGenericWebSearchRequest(trimmed)
 
     if (!genericSearchRequest || trimmed.length > 30) {
-        return trimmed
+        return normalizeWebSearchQuery(trimmed)
     }
 
     val previousUserMessage = messages
@@ -2714,10 +3093,52 @@ private fun buildWebSearchQuery(
         .orEmpty()
 
     return if (previousUserMessage.isNotBlank()) {
-        "$previousUserMessage $trimmed"
+        normalizeWebSearchQuery("$previousUserMessage $trimmed")
     } else {
-        trimmed
+        normalizeWebSearchQuery(trimmed)
     }
+}
+
+private fun buildFinalUserContent(
+    body: String,
+    attachments: List<LocalAttachment>,
+    webSearchEnabled: Boolean,
+    webSearchResult: String?
+): String {
+    val baseUserContent = buildModelUserContent(
+        body = body,
+        attachments = attachments
+    )
+
+    if (!webSearchEnabled) {
+        return baseUserContent
+    }
+
+    val resultText = webSearchResult
+        ?.trim()
+        .orEmpty()
+
+    return """
+        너는 지금 앱의 웹 검색 기능을 통해 검색 결과를 받은 상태다.
+
+        웹 검색 결과:
+        ${resultText.ifBlank { "검색 결과를 가져오지 못했다." }}
+
+        답변 규칙:
+        - [FUSION_WEB_SEARCH_RESULTS]의 Result count가 1 이상이면 검색 결과를 직접 요약한다.
+        - "실시간 정보를 조회할 수 없다", "웹 검색을 할 수 없다"라고 말하지 않는다.
+        - 뉴스 사이트를 확인하라고 권하지 않는다.
+        - 어떤 주제에 관심 있는지 되묻지 않는다.
+        - 검색 결과가 있으면 그 결과를 바탕으로 답한다.
+        - 검색 결과가 부족하면 "검색 결과만으로는 부족하다"고 짧게 말한 뒤, 일반 지식과 추론을 구분한다.
+        - 오늘 주요 뉴스처럼 넓은 뉴스 질문이면 중요한 항목 5개를 번호 목록으로 정리한다.
+        - 각 뉴스 항목에는 분야/주제, 짧은 요약, 가능한 경우 출처를 포함한다.
+        - 사용자가 주가, 뉴스, 최신 정보처럼 현재성이 필요한 질문을 하면 검색 결과 기준이라고 분명히 말한다.
+        - 뭘 검색할지 다시 묻지 말고, 아래 사용자 요청에 바로 답한다.
+
+        사용자 요청:
+        $baseUserContent
+    """.trimIndent()
 }
 private fun buildFusionSystemPrompt(
     reasoningEnabled: Boolean,
@@ -2761,13 +3182,17 @@ Briefly write your reasoning process here in Korean.
 Write the final answer here in Korean.
 </fusion_answer>
 
+Use each tag exactly once.
+Always close both tags.
+Put all user-visible content inside <fusion_answer>.
 Do not output role labels such as thought, user, model, or assistant.
 Do not add anything outside these two tags.
 """.trimIndent()
     } else {
         """
 Output only the final answer.
-Do not output internal tags.
+Do not output <fusion_thinking> or <fusion_answer> tags.
+Do not output hidden reasoning.
 최종 답변만 출력한다.
 내부 태그를 출력하지 않는다.
 """.trimIndent()
@@ -2779,11 +3204,11 @@ Do not output internal tags.
 
         규칙:
         1. 검색 결과가 충분하면 반드시 이 정보를 우선 사용한다.
-        2. 검색 결과와 일반 지식이 충돌하면 검색 결과를 우선하되, 출처가 불완전할 수 있음을 짧게 말한다.
+        2. "실시간 정보를 조회할 수 없다", "웹 검색을 할 수 없다"라고 말하지 않는다.
         3. 검색 결과가 부족하면 "검색 결과만으로는 부족하다"고 짧게 말하고, 일반 지식과 추론을 구분한다.
         4. "검색 결과가 비어 있다"는 말을 반복하지 않는다.
-        5. 답변에 원문 URL이 필요하면 검색 결과의 출처를 짧게 언급한다.
-        6. 사용자가 "검색해서 알려줘", "찾아줘"처럼 말하면 직전 대화의 주제를 이어받아 검색 의도로 해석한다. 뭘 검색할지 다시 묻지 않는다.
+        5. 사용자가 "검색해서 알려줘", "찾아줘"처럼 말하면 직전 대화의 주제를 이어받아 검색 의도로 해석한다.
+        6. 뭘 검색할지 다시 묻지 않는다.
 
         웹 검색 참고 정보:
         $webContext
@@ -2797,8 +3222,7 @@ Do not output internal tags.
         .joinToString("\n\n")
 }
 private fun getAttachmentDirectory(context: Context): File {
-    val baseDir = context.getExternalFilesDir(null) ?: context.filesDir
-    return File(baseDir, "attachments").apply {
+    return (context.getExternalFilesDir("attachments") ?: File(context.filesDir, "attachments")).apply {
         if (!exists()) mkdirs()
     }
 }
