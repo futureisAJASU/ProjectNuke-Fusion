@@ -805,7 +805,7 @@ private fun EmptyConversationList(
         )
     }
 }
-    
+
 @Composable
 private fun DrawerCircleButton(
     text: String,

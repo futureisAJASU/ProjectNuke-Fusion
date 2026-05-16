@@ -27,6 +27,9 @@ class LiteRtLlmEngine(
 
     private var engine: Engine? = null
     private var loadedKey: String? = null
+    @Volatile
+    var lastMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
+        private set
 
     override suspend fun generate(
         messages: List<ChatMessage>,
@@ -186,6 +189,8 @@ class LiteRtLlmEngine(
         enableVisionBackend: Boolean
     ): Engine {
         val mtpRequested = settings.speculativeDecodingEnabled == true
+        val mtpSupported = isSpeculativeDecodingSupportedModel(modelPath)
+        val mtpEnabledForRuntime = mtpRequested && mtpSupported
         val backendName = when (settings.accelerator) {
             AcceleratorMode.CPU -> "CPU"
             AcceleratorMode.GPU,
@@ -198,14 +203,20 @@ class LiteRtLlmEngine(
             append("|")
             append(settings.maxTokens)
             append("|")
-            append(mtpRequested)
+            append(mtpEnabledForRuntime)
             append("|vision=")
             append(enableVisionBackend)
         }
 
         val currentEngine = engine
         if (currentEngine != null && loadedKey == key) {
+            if (mtpRequested && !mtpSupported) {
+                lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
+            } else if (!mtpRequested) {
+                lastMtpStatus = MtpRuntimeStatus.OFF
+            }
             Log.i("FusionLiteRT", "MTP requested: $mtpRequested (cached engine reused)")
+            Log.i("FusionLiteRT", "MTP status: $lastMtpStatus")
             Log.i("FusionLiteRT", "Backend: $backendName")
             Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
             Log.i("FusionLiteRT", "Model path: $modelPath")
@@ -225,10 +236,19 @@ class LiteRtLlmEngine(
         Log.i("FusionLiteRT", "Backend: $backendName")
         Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
         Log.i("FusionLiteRT", "Model path: $modelPath")
-        ExperimentalFlags.enableSpeculativeDecoding = mtpRequested
+        if (mtpRequested && !mtpSupported) {
+            lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
+            Log.i("FusionLiteRT", "MTP unsupported model/runtime")
+        } else {
+            lastMtpStatus = if (mtpEnabledForRuntime) MtpRuntimeStatus.REQUESTED else MtpRuntimeStatus.OFF
+        }
+        val mtpFlagApplied = configureSpeculativeDecodingFlag(mtpEnabledForRuntime)
+        if (mtpEnabledForRuntime && !mtpFlagApplied) {
+            lastMtpStatus = MtpRuntimeStatus.FAILED
+        }
         Log.i(
             "FusionLiteRT",
-            if (mtpRequested) {
+            if (mtpEnabledForRuntime && mtpFlagApplied) {
                 "MTP enabled before engine init"
             } else {
                 "MTP disabled before engine init"
@@ -241,7 +261,33 @@ class LiteRtLlmEngine(
             visionBackend = if (enableVisionBackend) backend else null,
             maxNumTokens = settings.maxTokens.coerceAtLeast(1)
         ).getOrElse { throwable ->
-            if (enableVisionBackend && backendName == "GPU") {
+            if (mtpEnabledForRuntime && mtpFlagApplied) {
+                Log.w("FusionLiteRT", "MTP engine initialization failed, retrying without MTP", throwable)
+                lastMtpStatus = MtpRuntimeStatus.FAILED
+                configureSpeculativeDecodingFlag(false)
+                createEngine(
+                    modelPath = modelPath,
+                    backend = backend,
+                    visionBackend = if (enableVisionBackend) backend else null,
+                    maxNumTokens = settings.maxTokens.coerceAtLeast(1)
+                ).getOrElse { retryThrowable ->
+                    if (enableVisionBackend && backendName == "GPU") {
+                        Log.w(
+                            "FusionLiteRT",
+                            "GPU vision backend failed after MTP fallback, retrying CPU vision backend",
+                            retryThrowable
+                        )
+                        createEngine(
+                            modelPath = modelPath,
+                            backend = backend,
+                            visionBackend = Backend.CPU(),
+                            maxNumTokens = settings.maxTokens.coerceAtLeast(1)
+                        ).getOrThrow()
+                    } else {
+                        throw retryThrowable
+                    }
+                }
+            } else if (enableVisionBackend && backendName == "GPU") {
                 Log.w(
                     "FusionLiteRT",
                     "GPU vision backend failed, retrying CPU vision backend",
@@ -374,4 +420,29 @@ class LiteRtLlmEngine(
         engine = null
         loadedKey = null
     }
+
+    private fun isSpeculativeDecodingSupportedModel(modelPath: String): Boolean {
+        val lower = modelPath.lowercase()
+        return "gemma-4" in lower || "gemma4" in lower
+    }
+
+    private fun configureSpeculativeDecodingFlag(enabled: Boolean): Boolean {
+        return runCatching {
+            ExperimentalFlags.enableSpeculativeDecoding = enabled
+        }.onFailure { throwable ->
+            Log.w(
+                "FusionLiteRT",
+                "Failed to ${if (enabled) "enable" else "disable"} MTP speculative decoding flag",
+                throwable
+            )
+        }.isSuccess
+    }
+}
+
+enum class MtpRuntimeStatus {
+    OFF,
+    REQUESTED,
+    APPLIED,
+    UNSUPPORTED,
+    FAILED
 }

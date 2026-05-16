@@ -2,6 +2,7 @@ package com.projectnuke.fusion.ui
 
 import android.content.Context
 import android.os.SystemClock
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
+import com.projectnuke.fusion.llm.MtpRuntimeStatus
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
@@ -77,7 +79,7 @@ fun SafeBenchmarkScreen(onBack: () -> Unit) {
             Text("모델: $selectedModel", color = Color(0xFFF5F5F5))
             Text("경로: ${resolvedModelPath ?: "없음"}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
             Text("가속기: ${settings.accelerator.name}", color = Color(0xFFF5F5F5))
-            Text("MTP 가속: ${if (settings.speculativeDecodingEnabled == true) "사용" else "해제"}", color = Color(0xFFF5F5F5))
+            Text("MTP 가속: ${initialMtpStatusLabel(settings, selectedModel, resolvedModelPath)}", color = Color(0xFFF5F5F5))
             Text("maxTokens=${settings.maxTokens} / temp=${settings.temperature} / topK=${settings.topK} / topP=${settings.topP}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
         }
 
@@ -114,17 +116,24 @@ fun SafeBenchmarkScreen(onBack: () -> Unit) {
                                 val text = output.toString().replace(Regex("""</?fusion_(thinking|answer|metrics)>"""), "").trim()
                                 val estTokens = estimateTokens(text)
                                 val tps = if (totalMs > 0) (estTokens * 1000.0 / totalMs) else 0.0
+                                val decodeMs = firstTokenMs?.let { totalMs - it }?.takeIf { it > 0 }
+                                val decodeTps = decodeMs?.let { estTokens * 1000.0 / it }
+                                val mtpStatus = engine.lastMtpStatus
                                 result = buildString {
                                     appendLine("모델 로딩 시간: 측정 불가")
                                     appendLine("첫 토큰 시간: ${firstTokenMs?.let { "${it}ms" } ?: "측정 불가"}")
                                     appendLine("총 생성 시간: ${"%.2f".format(Locale.US, totalMs / 1000.0)}s")
                                     appendLine("추정 출력 토큰 수: $estTokens")
-                                    appendLine("추정 토큰 속도: ${"%.1f".format(Locale.US, tps)} tok/s")
+                                    appendLine("전체 기준 토큰 속도: ${"%.1f".format(Locale.US, tps)} tok/s")
+                                    appendLine("디코딩 기준 토큰 속도: ${decodeTps?.let { "${"%.1f".format(Locale.US, it)} tok/s" } ?: "측정 불가"}")
                                     appendLine("가속기: ${settings.accelerator.name}")
-                                    appendLine("MTP 가속: ${if (settings.speculativeDecodingEnabled == true) "사용" else "해제"}")
+                                    appendLine("MTP 가속: ${mtpStatus.toKoreanLabel()}")
+                                    appendLine()
+                                    appendLine("정확한 비교를 위해 같은 조건에서 MTP 꺼짐/켜짐을 각각 2회 이상 측정해 주세요.")
                                 }.trim()
                                 status = null
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
+                                Log.e("FusionBenchmark", "Benchmark generation failed", e)
                                 status = null
                                 Toast.makeText(context, "벤치마크 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
                             } finally {
@@ -236,7 +245,8 @@ fun BenchmarkScreen(onBack: () -> Unit) {
                                     appendLine("MTP 가속: ${if (settings.speculativeDecodingEnabled == true) "사용" else "해제"}")
                                 }.trim()
                                 status = null
-                            } catch (_: Exception) {
+                            } catch (e: Exception) {
+                                Log.e("FusionBenchmark", "Benchmark generation failed", e)
                                 status = null
                                 Toast.makeText(context, "벤치마크 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
                             } finally {
@@ -301,4 +311,25 @@ private fun estimateTokens(text: String): Int {
     val cleaned = text.trim()
     if (cleaned.isBlank()) return 0
     return (cleaned.length / 4.0).toInt().coerceAtLeast(1)
+}
+
+private fun initialMtpStatusLabel(
+    settings: GenerationSettings,
+    modelName: String,
+    modelPath: String?
+): String {
+    if (settings.speculativeDecodingEnabled != true) return "꺼짐"
+    val modelKey = "${modelName}\n${modelPath.orEmpty()}".lowercase()
+    val looksSupported = "gemma-4" in modelKey || "gemma4" in modelKey
+    return if (looksSupported) "요청됨" else "미지원"
+}
+
+private fun MtpRuntimeStatus.toKoreanLabel(): String {
+    return when (this) {
+        MtpRuntimeStatus.OFF -> "꺼짐"
+        MtpRuntimeStatus.REQUESTED -> "요청됨"
+        MtpRuntimeStatus.APPLIED -> "적용됨"
+        MtpRuntimeStatus.UNSUPPORTED -> "미지원"
+        MtpRuntimeStatus.FAILED -> "적용 실패"
+    }
 }
