@@ -60,6 +60,7 @@ fun FusionApp() {
                             drawerState.close()
                         }
                     },
+                    isDrawerOpen = drawerState.currentValue == DrawerValue.Open,
                     onOpenModelLibrary = {
                         openModelLibraryRequest += 1L
                         scope.launch { drawerState.close() }

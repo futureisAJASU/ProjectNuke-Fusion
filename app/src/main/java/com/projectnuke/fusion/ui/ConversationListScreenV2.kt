@@ -35,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -88,6 +89,7 @@ fun ConversationListScreenV2(
     onOpenConversation: (Long) -> Unit,
     onConversationRemovedFromList: (removedConversationId: Long, nextConversationId: Long?) -> Unit,
     onNewChat: () -> Unit,
+    isDrawerOpen: Boolean = true,
     onOpenModelLibrary: (() -> Unit)? = null,
     onOpenAdvancedSettings: (() -> Unit)? = null
 ) {
@@ -109,6 +111,12 @@ fun ConversationListScreenV2(
     var attachmentStorageLoading by remember { mutableStateOf(false) }
     var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
     var archiveUnlockedForSession by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isDrawerOpen) {
+        if (!isDrawerOpen) {
+            archiveUnlockedForSession = false
+        }
+    }
 
     var reasoningEnabled by remember { mutableStateOf(prefs.getBoolean("reasoning_enabled", false)) }
     var webSearchEnabled by remember { mutableStateOf(prefs.getBoolean("web_search_enabled", false)) }
@@ -142,8 +150,23 @@ fun ConversationListScreenV2(
         Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
     }
 
+    fun leaveArchive() {
+        archiveUnlockedForSession = false
+        page = SidebarPage.HOME
+    }
+
+    fun closeDrawer() {
+        archiveUnlockedForSession = false
+        onBack()
+    }
+
+    fun openConversation(conversationId: Long) {
+        archiveUnlockedForSession = false
+        onOpenConversation(conversationId)
+    }
+
     fun openArchiveWithAuth() {
-        if (!archiveLockEnabled || archiveUnlockedForSession) {
+        if (!archiveLockEnabled) {
             page = SidebarPage.ARCHIVE
             return
         }
@@ -179,9 +202,9 @@ fun ConversationListScreenV2(
         if (!isSearchMode) {
             item {
                 when (page) {
-                    SidebarPage.HOME -> DrawerTopBar(onClose = onBack, onNewChat = onNewChat)
-                    SidebarPage.SETTINGS -> DrawerPageTopBar("설정", onBack = { page = SidebarPage.HOME })
-                    SidebarPage.ARCHIVE -> DrawerPageTopBar("아카이브", onBack = { page = SidebarPage.HOME })
+                    SidebarPage.HOME -> DrawerTopBar(onClose = { closeDrawer() }, onNewChat = onNewChat)
+                    SidebarPage.SETTINGS -> DrawerPageTopBar("설정", onBack = { leaveArchive() })
+                    SidebarPage.ARCHIVE -> DrawerPageTopBar("아카이브", onBack = { leaveArchive() })
                 }
             }
         }
@@ -202,7 +225,7 @@ fun ConversationListScreenV2(
                 items(filteredConversations, key = { it.id }) { conversation ->
                     ConversationRow(
                         conversation = conversation,
-                        onClick = { onOpenConversation(conversation.id) },
+                        onClick = { openConversation(conversation.id) },
                         menuExpanded = menuConversation?.id == conversation.id,
                         onDismissMenu = { menuConversation = null },
                         onMenuClick = { menuConversation = conversation },
@@ -267,7 +290,7 @@ fun ConversationListScreenV2(
                         items(filteredConversations, key = { it.id }) { conversation ->
                             ConversationRow(
                                 conversation = conversation,
-                                onClick = { onOpenConversation(conversation.id) },
+                                onClick = { openConversation(conversation.id) },
                                 menuExpanded = menuConversation?.id == conversation.id,
                                 onDismissMenu = { menuConversation = null },
                                 onMenuClick = { menuConversation = conversation },
@@ -310,7 +333,10 @@ fun ConversationListScreenV2(
                             title = "설정",
                             subtitle = "모델, 생성, 데이터 관련 설정을 관리합니다.",
                             leading = "S"
-                        ) { page = SidebarPage.SETTINGS }
+                        ) {
+                            archiveUnlockedForSession = false
+                            page = SidebarPage.SETTINGS
+                        }
                     }
                 }
 
@@ -322,7 +348,7 @@ fun ConversationListScreenV2(
                         items(archivedConversations, key = { it.id }) { conversation ->
                             ConversationRow(
                                 conversation = conversation,
-                                onClick = { onOpenConversation(conversation.id) },
+                                onClick = { openConversation(conversation.id) },
                                 menuExpanded = menuConversation?.id == conversation.id,
                                 onDismissMenu = { menuConversation = null },
                                 onMenuClick = { menuConversation = conversation },
@@ -422,7 +448,7 @@ fun ConversationListScreenV2(
                                     archiveLockEnabled = false
                                     archiveUnlockedForSession = false
                                     prefs.edit().putBoolean(PrefArchiveLockEnabled, false).apply()
-                                    Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "아카이브 잠금을 해제했습니다.", Toast.LENGTH_SHORT).show()
                                 } else if (!isArchiveAuthenticationAvailable(context)) {
                                     archiveLockEnabled = false
                                     archiveUnlockedForSession = false
@@ -433,9 +459,9 @@ fun ConversationListScreenV2(
                                         context = context,
                                         onSuccess = {
                                             archiveLockEnabled = true
-                                            archiveUnlockedForSession = true
+                                            archiveUnlockedForSession = false
                                             prefs.edit().putBoolean(PrefArchiveLockEnabled, true).apply()
-                                            Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "아카이브 잠금을 사용합니다.", Toast.LENGTH_SHORT).show()
                                         },
                                         onCanceled = {
                                             archiveLockEnabled = false
