@@ -261,6 +261,19 @@ fun ConversationListScreenV2(
                             renameConversation = conversation
                             renameTitle = conversation.title
                         },
+                        onRegenerateTitle = {
+                            menuConversation = null
+                            scope.launch {
+                                runCatching {
+                                    val messages = dao.getMessagesForConversation(conversation.id)
+                                    val newTitle = buildConversationTitleFromMessages(messages)
+                                    dao.updateConversationTitle(conversation.id, newTitle)
+                                    Toast.makeText(context, "채팅 제목을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
+                                }.onFailure {
+                                    Toast.makeText(context, "채팅 제목을 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        },
                         onArchive = {
                             menuConversation = null
                             scope.launch {
@@ -326,6 +339,19 @@ fun ConversationListScreenV2(
                                     renameConversation = conversation
                                     renameTitle = conversation.title
                                 },
+                                onRegenerateTitle = {
+                                    menuConversation = null
+                                    scope.launch {
+                                        runCatching {
+                                            val messages = dao.getMessagesForConversation(conversation.id)
+                                            val newTitle = buildConversationTitleFromMessages(messages)
+                                            dao.updateConversationTitle(conversation.id, newTitle)
+                                            Toast.makeText(context, "채팅 제목을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
+                                        }.onFailure {
+                                            Toast.makeText(context, "채팅 제목을 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
                                 onArchive = {
                                     menuConversation = null
                                     scope.launch {
@@ -383,6 +409,19 @@ fun ConversationListScreenV2(
                                     menuConversation = null
                                     renameConversation = conversation
                                     renameTitle = conversation.title
+                                },
+                                onRegenerateTitle = {
+                                    menuConversation = null
+                                    scope.launch {
+                                        runCatching {
+                                            val messages = dao.getMessagesForConversation(conversation.id)
+                                            val newTitle = buildConversationTitleFromMessages(messages)
+                                            dao.updateConversationTitle(conversation.id, newTitle)
+                                            Toast.makeText(context, "채팅 제목을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
+                                        }.onFailure {
+                                            Toast.makeText(context, "채팅 제목을 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
                                 },
                                 onArchive = {
                                     menuConversation = null
@@ -860,6 +899,7 @@ private fun ConversationRow(
     onMenuClick: () -> Unit,
     onTogglePinned: () -> Unit,
     onRename: () -> Unit,
+    onRegenerateTitle: () -> Unit,
     onArchive: () -> Unit,
     onDelete: () -> Unit,
     archiveMenuLabel: String = "아카이브에 보관",
@@ -903,6 +943,7 @@ private fun ConversationRow(
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = onDismissMenu, containerColor = DrawerPanelBg) {
                     DropdownMenuItem(text = { Text(pinMenuLabel, color = DrawerTextPrimary) }, onClick = onTogglePinned)
                     DropdownMenuItem(text = { Text("이름 변경", color = DrawerTextPrimary) }, onClick = onRename)
+                    DropdownMenuItem(text = { Text("제목 다시 생성", color = DrawerTextPrimary) }, onClick = onRegenerateTitle)
                     DropdownMenuItem(text = { Text(archiveMenuLabel, color = DrawerTextPrimary) }, onClick = onArchive)
                     DropdownMenuItem(text = { Text("삭제", color = Color(0xFFFF7A7A)) }, onClick = onDelete)
                 }
@@ -988,6 +1029,45 @@ private fun DrawerCircleButton(text: String, onClick: () -> Unit) {
     ) {
         Text(text = text, color = DrawerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Medium)
     }
+}
+
+private fun buildConversationTitleFromMessages(messages: List<MessageEntity>): String {
+    val userCandidates = messages
+        .asSequence()
+        .filter { it.role == "user" }
+        .map { stripHiddenForTitle(it.content) }
+        .filter { it.isNotBlank() && it.length >= 2 }
+        .toList()
+
+    val assistantCandidates = messages
+        .asSequence()
+        .filter { it.role != "user" }
+        .map { stripHiddenForTitle(it.content) }
+        .filter { it.isNotBlank() && it.length >= 2 }
+        .toList()
+
+    val base = (userCandidates + assistantCandidates).firstOrNull().orEmpty()
+    if (base.isBlank()) return "새 대화"
+    return truncateTitle(base)
+}
+
+private fun stripHiddenForTitle(raw: String): String {
+    return raw
+        .replace(Regex("""(?is)<fusion_metrics>.*?</fusion_metrics>"""), " ")
+        .replace(Regex("""(?is)<fusion_thinking>.*?</fusion_thinking>"""), " ")
+        .replace(Regex("""(?is)</?fusion_answer>"""), " ")
+        .replace(Regex("""(?is)<fusion_attachment_v2>.*?</fusion_attachment_v2>"""), " ")
+        .replace(Regex("""(?is)<fusion_attachment>.*?</fusion_attachment>"""), " ")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+}
+
+private fun truncateTitle(text: String): String {
+    val normalized = text.replace('\n', ' ').trim()
+    if (normalized.isBlank()) return "새 대화"
+    val hasNonAscii = normalized.any { it.code > 127 }
+    val limit = if (hasNonAscii) 18 else 28
+    return if (normalized.length <= limit) normalized else normalized.take(limit).trimEnd() + "…"
 }
 
 private fun buildChatExportMarkdown(
