@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -247,6 +248,21 @@ fun ChatScreen(
     LaunchedEffect(openAdvancedSettingsRequest) {
         if (openAdvancedSettingsRequest > 0) {
             showAdvancedSettingsDialog = true
+        }
+    }
+
+    BackHandler(
+        enabled = showModelDialog || showAdvancedSettingsDialog || showDeleteChatDialog || inChatSearchMode || isGenerating
+    ) {
+        when {
+            showDeleteChatDialog -> showDeleteChatDialog = false
+            showAdvancedSettingsDialog -> showAdvancedSettingsDialog = false
+            showModelDialog -> showModelDialog = false
+            inChatSearchMode -> {
+                inChatSearchMode = false
+                inChatSearchQuery = ""
+            }
+            isGenerating -> Unit
         }
     }
 

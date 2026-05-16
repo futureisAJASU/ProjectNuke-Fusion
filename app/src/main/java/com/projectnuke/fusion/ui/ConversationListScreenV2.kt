@@ -9,6 +9,7 @@ import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
 import android.os.CancellationSignal
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -191,6 +192,24 @@ fun ConversationListScreenV2(
                 Toast.makeText(context, "아카이브를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
             }
         )
+    }
+
+    BackHandler(enabled = isDrawerOpen && (trimmedSearchQuery.isNotBlank() || page != SidebarPage.HOME)) {
+        when {
+            trimmedSearchQuery.isNotBlank() -> {
+                searchQuery = ""
+            }
+            page == SidebarPage.ARCHIVE -> {
+                leaveArchive()
+            }
+            page == SidebarPage.SETTINGS -> {
+                leaveArchive()
+            }
+            page == SidebarPage.PROMPT_LAB -> {
+                page = SidebarPage.SETTINGS
+            }
+            else -> Unit
+        }
     }
 
     LazyColumn(
