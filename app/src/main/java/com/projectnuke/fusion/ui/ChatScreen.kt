@@ -45,6 +45,8 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -154,7 +156,9 @@ fun ChatScreen(
     conversationId: Long,
     onConversationCreated: (Long) -> Unit,
     onOpenList: () -> Unit,
-    onNewChat: () -> Unit
+    onNewChat: () -> Unit,
+    openModelLibraryRequest: Int = 0,
+    openAdvancedSettingsRequest: Int = 0
 ) {
     val context = LocalContext.current
     val settingsPrefs = remember {
@@ -208,6 +212,43 @@ fun ChatScreen(
     var downloadingModelName by remember { mutableStateOf<String?>(null) }
     var downloadProgressPercent by remember { mutableStateOf<Int?>(null) }
     var generationStatus by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(settingsPrefs) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
+            when (key) {
+                PrefSelectedModel -> {
+                    selectedModel = prefs.getString(PrefSelectedModel, selectedModel) ?: selectedModel
+                }
+                PrefSelectedModelPath -> {
+                    selectedModelPath = prefs.getString(PrefSelectedModelPath, selectedModelPath)
+                }
+                PrefReasoningEnabled -> {
+                    reasoningEnabled = prefs.getBoolean(PrefReasoningEnabled, reasoningEnabled)
+                }
+                PrefWebSearchEnabled -> {
+                    webSearchEnabled = prefs.getBoolean(PrefWebSearchEnabled, webSearchEnabled)
+                }
+                PrefMaxTokens, PrefTopK, PrefTopP, PrefTemperature, PrefReasoningBudget, PrefAccelerator, PrefSpeculativeDecoding -> {
+                    generationSettings = loadSavedGenerationSettings(prefs)
+                }
+            }
+        }
+        settingsPrefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose {
+            settingsPrefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
+
+    LaunchedEffect(openModelLibraryRequest) {
+        if (openModelLibraryRequest > 0) {
+            showModelDialog = true
+        }
+    }
+    LaunchedEffect(openAdvancedSettingsRequest) {
+        if (openAdvancedSettingsRequest > 0) {
+            showAdvancedSettingsDialog = true
+        }
+    }
 
     val scope = rememberCoroutineScope()
     val engine = remember { LiteRtLlmEngine(context.applicationContext) }

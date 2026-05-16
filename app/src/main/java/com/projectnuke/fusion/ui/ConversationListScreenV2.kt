@@ -79,7 +79,9 @@ fun ConversationListScreenV2(
     onBack: () -> Unit,
     onOpenConversation: (Long) -> Unit,
     onConversationRemovedFromList: (removedConversationId: Long, nextConversationId: Long?) -> Unit,
-    onNewChat: () -> Unit
+    onNewChat: () -> Unit,
+    onOpenModelLibrary: (() -> Unit)? = null,
+    onOpenAdvancedSettings: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -321,12 +323,22 @@ fun ConversationListScreenV2(
                     val temperature = prefs.getFloat("temperature", 1.0f)
 
                     item { DrawerSectionTitle("모델") }
-                    item { DrawerSettingActionRow("모델 라이브러리", "Gemma, Fusion, 커스텀 모델을 관리합니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
+                    item {
+                        DrawerSettingActionRow("모델 라이브러리", "모델을 선택합니다.") {
+                            if (onOpenModelLibrary != null) onOpenModelLibrary()
+                            else Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                     item { DrawerSettingInfoRow("기본 모델", modelPath?.let { "$modelName\n$it" } ?: modelName) }
                     item { DrawerSettingInfoRow("가속기", accelerator) }
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("생성") }
-                    item { DrawerSettingActionRow("고급 설정", "maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
+                    item {
+                        DrawerSettingActionRow("고급 설정", "maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP") {
+                            if (onOpenAdvancedSettings != null) onOpenAdvancedSettings()
+                            else Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
                     item {
                         DrawerSettingToggleRow(
                             title = "Reasoning",

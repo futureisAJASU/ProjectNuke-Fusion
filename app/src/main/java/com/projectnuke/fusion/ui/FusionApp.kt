@@ -19,6 +19,8 @@ import kotlinx.coroutines.launch
 @Composable
 fun FusionApp() {
     var currentConversationId by remember { mutableLongStateOf(0L) }
+    var openModelLibraryRequest by remember { mutableLongStateOf(0L) }
+    var openAdvancedSettingsRequest by remember { mutableLongStateOf(0L) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -57,6 +59,14 @@ fun FusionApp() {
                         scope.launch {
                             drawerState.close()
                         }
+                    },
+                    onOpenModelLibrary = {
+                        openModelLibraryRequest += 1L
+                        scope.launch { drawerState.close() }
+                    },
+                    onOpenAdvancedSettings = {
+                        openAdvancedSettingsRequest += 1L
+                        scope.launch { drawerState.close() }
                     }
                 )
             }
@@ -74,7 +84,9 @@ fun FusionApp() {
             },
             onNewChat = {
                 currentConversationId = 0L
-            }
+            },
+            openModelLibraryRequest = openModelLibraryRequest.toInt(),
+            openAdvancedSettingsRequest = openAdvancedSettingsRequest.toInt()
         )
     }
 }
