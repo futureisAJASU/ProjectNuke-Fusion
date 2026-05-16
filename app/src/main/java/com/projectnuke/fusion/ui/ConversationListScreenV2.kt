@@ -1,6 +1,9 @@
 package com.projectnuke.fusion.ui
 
 import android.content.Intent
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
@@ -415,16 +418,38 @@ fun ConversationListScreenV2(
                             subtitle = "보관된 채팅을 열 때 생체 인증 또는 기기 잠금 인증을 요구합니다.",
                             checked = archiveLockEnabled,
                             onToggle = { enabled ->
-                                if (enabled && !isArchiveAuthenticationAvailable(context)) {
+                                if (!enabled) {
+                                    archiveLockEnabled = false
+                                    archiveUnlockedForSession = false
+                                    prefs.edit().putBoolean(PrefArchiveLockEnabled, false).apply()
+                                    Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                                } else if (!isArchiveAuthenticationAvailable(context)) {
                                     archiveLockEnabled = false
                                     archiveUnlockedForSession = false
                                     prefs.edit().putBoolean(PrefArchiveLockEnabled, false).apply()
                                     Toast.makeText(context, "이 기기에서는 아카이브 잠금을 사용할 수 없습니다.", Toast.LENGTH_SHORT).show()
                                 } else {
-                                    archiveLockEnabled = enabled
-                                    archiveUnlockedForSession = false
-                                    prefs.edit().putBoolean(PrefArchiveLockEnabled, enabled).apply()
-                                    Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                                    authenticateArchiveAccess(
+                                        context = context,
+                                        onSuccess = {
+                                            archiveLockEnabled = true
+                                            archiveUnlockedForSession = true
+                                            prefs.edit().putBoolean(PrefArchiveLockEnabled, true).apply()
+                                            Toast.makeText(context, "설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                                        },
+                                        onCanceled = {
+                                            archiveLockEnabled = false
+                                            archiveUnlockedForSession = false
+                                            prefs.edit().putBoolean(PrefArchiveLockEnabled, false).apply()
+                                            Toast.makeText(context, "인증이 취소되었습니다.", Toast.LENGTH_SHORT).show()
+                                        },
+                                        onError = {
+                                            archiveLockEnabled = false
+                                            archiveUnlockedForSession = false
+                                            prefs.edit().putBoolean(PrefArchiveLockEnabled, false).apply()
+                                            Toast.makeText(context, "아카이브 잠금을 설정할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                        }
+                                    )
                                 }
                             }
                         )
@@ -991,48 +1016,65 @@ private fun archiveAuthenticators(): Int {
         BiometricManager.Authenticators.DEVICE_CREDENTIAL
 }
 
-private fun isArchiveAuthenticationAvailable(context: android.content.Context): Boolean {
-    val biometricManager = context.getSystemService(BiometricManager::class.java) ?: return false
-    return biometricManager.canAuthenticate(archiveAuthenticators()) == BiometricManager.BIOMETRIC_SUCCESS
+private fun Context.findActivity(): Activity? {
+    var currentContext: Context? = this
+    while (currentContext is ContextWrapper) {
+        if (currentContext is Activity) return currentContext
+        currentContext = currentContext.baseContext
+    }
+    return null
+}
+
+private fun isArchiveAuthenticationAvailable(context: Context): Boolean {
+    if (context.findActivity() == null) return false
+    return runCatching {
+        val biometricManager = context.getSystemService(BiometricManager::class.java) ?: return false
+        biometricManager.canAuthenticate(archiveAuthenticators()) == BiometricManager.BIOMETRIC_SUCCESS
+    }.getOrDefault(false)
 }
 
 private fun authenticateArchiveAccess(
-    context: android.content.Context,
+    context: Context,
     onSuccess: () -> Unit,
     onCanceled: () -> Unit,
     onError: () -> Unit
 ) {
-    val cancellationSignal = CancellationSignal()
-    val prompt = BiometricPrompt.Builder(context)
-        .setTitle("본인 인증")
-        .setSubtitle("아카이브를 열려면 인증이 필요합니다.")
-        .setAllowedAuthenticators(archiveAuthenticators())
-        .build()
+    val activity = context.findActivity() ?: run {
+        onError()
+        return
+    }
 
-    prompt.authenticate(
-        cancellationSignal,
-        context.mainExecutor,
-        object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
-                onSuccess()
-            }
+    runCatching {
+        val cancellationSignal = CancellationSignal()
+        val prompt = BiometricPrompt.Builder(activity)
+            .setTitle("본인 인증")
+            .setSubtitle("아카이브를 열려면 인증이 필요합니다.")
+            .setAllowedAuthenticators(archiveAuthenticators())
+            .build()
 
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
-                if (
-                    errorCode == BiometricPrompt.BIOMETRIC_ERROR_CANCELED ||
-                    errorCode == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED
-                ) {
-                    onCanceled()
-                } else {
-                    onError()
+        prompt.authenticate(
+            cancellationSignal,
+            activity.mainExecutor,
+            object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
+                    onSuccess()
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
+                    if (
+                        errorCode == BiometricPrompt.BIOMETRIC_ERROR_CANCELED ||
+                        errorCode == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED
+                    ) {
+                        onCanceled()
+                    } else {
+                        onError()
+                    }
                 }
             }
-
-            override fun onAuthenticationFailed() {
-                onError()
-            }
-        }
-    )
+        )
+    }.onFailure {
+        onError()
+    }
 }
 
 private suspend fun buildFusionDebugInfo(
