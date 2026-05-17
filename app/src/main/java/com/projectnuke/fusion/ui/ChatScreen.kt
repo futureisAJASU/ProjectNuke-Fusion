@@ -436,11 +436,18 @@ fun ChatScreen(
                         ?.let { getModelFile(context, it).absolutePath }
 
                 if (activeModelPath == null) {
+                    selectedModelPath?.takeIf { it.isNotBlank() }?.let {
+                        android.util.Log.e("FusionEngine", "Selected model file missing: $it")
+                    }
                     dao.insertMessage(
                         MessageEntity(
                             conversationId = activeConversationId,
                             role = "assistant",
-                            content = "아직 사용할 모델이 없습니다. 모델 탭에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.",
+                            content = if (!selectedModelPath.isNullOrBlank()) {
+                                "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                            } else {
+                                "아직 사용할 모델이 없습니다. 모델 탭에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요."
+                            },
                             createdAt = System.currentTimeMillis()
                         )
                     )
@@ -941,11 +948,18 @@ fun ChatScreen(
                                             ?.let { getModelFile(context, it).absolutePath }
 
                                     if (activeModelPath == null) {
+                                        selectedModelPath?.takeIf { it.isNotBlank() }?.let {
+                                            android.util.Log.e("FusionEngine", "Selected model file missing: $it")
+                                        }
                                         dao.insertMessage(
                                             MessageEntity(
                                                 conversationId = activeConversationId,
                                                 role = "assistant",
-                                                content = "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.",
+                                                content = if (!selectedModelPath.isNullOrBlank()) {
+                                                    "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                                                } else {
+                                                    "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요."
+                                                },
                                                 createdAt = System.currentTimeMillis()
                                             )
                                         )

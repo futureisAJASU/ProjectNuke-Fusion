@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -32,6 +33,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -41,6 +43,9 @@ import com.projectnuke.fusion.data.BenchmarkResultEntity
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import android.widget.Toast
 
 private val BenchmarkBg = Color(0xFF000000)
 private val BenchmarkCard = Color(0xFF111111)
@@ -57,11 +62,14 @@ fun BenchmarkHistoryScreen(
 ) {
     val allResults by dao.observeAll().collectAsState(initial = emptyList())
     val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var mtpFilter by remember { mutableStateOf("전체") }
     var acceleratorFilter by remember { mutableStateOf("전체") }
     var dateFilter by remember { mutableStateOf("전체") }
     var modelFilter by remember { mutableStateOf("전체") }
     var comparisonMode by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
     val selectedIds = remember { mutableStateListOf<Long>() }
 
     BackHandler(enabled = comparisonMode) {
@@ -112,6 +120,36 @@ fun BenchmarkHistoryScreen(
         return
     }
 
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("벤치마크 기록을 삭제하시겠습니까?") },
+            text = { Text("삭제된 벤치마크 기록은 복구할 수 없습니다.") },
+            dismissButton = {
+                TextButton(onClick = { showClearConfirm = false }) {
+                    Text("취소")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearConfirm = false
+                        scope.launch {
+                            dao.deleteAll()
+                            selectedIds.clear()
+                            Toast.makeText(context, "벤치마크 기록을 삭제했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("삭제", color = BenchmarkFail)
+                }
+            },
+            containerColor = BenchmarkPanel,
+            titleContentColor = BenchmarkText,
+            textContentColor = BenchmarkText
+        )
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxWidth().background(BenchmarkBg).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -122,6 +160,13 @@ fun BenchmarkHistoryScreen(
                 Column {
                     Text("벤치마크 기록", color = BenchmarkText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Text("측정 결과를 조건별로 비교합니다.", color = BenchmarkSubtle, fontSize = 12.sp)
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                TextButton(
+                    enabled = allResults.isNotEmpty(),
+                    onClick = { showClearConfirm = true }
+                ) {
+                    Text("기록 삭제", color = if (allResults.isNotEmpty()) BenchmarkFail else BenchmarkSubtle)
                 }
             }
         }

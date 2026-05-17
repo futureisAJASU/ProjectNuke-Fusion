@@ -54,7 +54,8 @@ class LiteRtLlmEngine(
             val modelFile = File(modelPath)
 
             if (!modelFile.exists()) {
-                return@withContext "모델 파일을 찾을 수 없습니다.\n$modelPath"
+                Log.e("FusionEngine", "Selected model file does not exist: $modelPath")
+                return@withContext "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
             }
 
             val engine = getOrCreateEngine(
@@ -118,7 +119,8 @@ class LiteRtLlmEngine(
             val modelFile = File(modelPath)
 
             if (!modelFile.exists()) {
-                return@withContext "이미지 입력 처리 실패: 모델 파일을 찾을 수 없습니다.\n$modelPath"
+                Log.e("FusionEngine", "Selected model file does not exist for multimodal request: $modelPath")
+                return@withContext "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
             }
 
             val missingImage = imagePaths.firstOrNull { !File(it).exists() }

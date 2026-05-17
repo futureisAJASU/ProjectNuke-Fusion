@@ -56,6 +56,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.AppDatabase
+import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
 import com.projectnuke.fusion.util.AttachmentStorageManager
@@ -68,6 +69,11 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 private const val PrefArchiveLockEnabled = "archive_lock_enabled"
+
+private data class AppInfoSummary(
+    val versionName: String,
+    val versionCode: String
+)
 
 private val DrawerBlackBg = Color(0xFF000000)
 private val DrawerPanelBg = Color(0xFF171717)
@@ -110,6 +116,8 @@ fun ConversationListScreenV2(
     var renameTitle by remember { mutableStateOf("") }
     var deleteConversation by remember { mutableStateOf<ConversationEntity?>(null) }
     var showAttachmentStorageDialog by remember { mutableStateOf(false) }
+    var showAppInfoDialog by remember { mutableStateOf(false) }
+    var showReleaseNotesDialog by remember { mutableStateOf(false) }
     var attachmentStorageStats by remember { mutableStateOf<AttachmentStorageStats?>(null) }
     var attachmentStorageLoading by remember { mutableStateOf(false) }
     var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
@@ -683,7 +691,16 @@ fun ConversationListScreenV2(
                     item { DrawerSettingActionRow("에이전트 모드", "기기 제어 실험 기능입니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("앱 정보") }
-                    item { DrawerSettingInfoRow("Fusion", "패키지: ${context.packageName}") }
+                    item {
+                        DrawerSettingActionRow("앱 정보", "버전, 모델 상태, 데이터 정보를 확인합니다.") {
+                            showAppInfoDialog = true
+                        }
+                    }
+                    item {
+                        DrawerSettingActionRow("릴리즈 노트", "Fusion Beta 변경 사항을 확인합니다.") {
+                            showReleaseNotesDialog = true
+                        }
+                    }
                     item {
                         DrawerSettingActionRow("디버그 정보 복사", "모델, 설정, 기기, 최근 상태 정보를 클립보드에 복사합니다.") {
                             scope.launch {
@@ -691,6 +708,7 @@ fun ConversationListScreenV2(
                                     val debugText = buildFusionDebugInfo(
                                         context = context,
                                         dao = dao,
+                                        benchmarkDao = db.benchmarkDao(),
                                         currentConversationId = currentConversationId,
                                         modelName = modelName,
                                         modelPath = modelPath,
@@ -723,6 +741,64 @@ fun ConversationListScreenV2(
                 }
             }
         }
+    }
+
+    if (showAppInfoDialog) {
+        val modelName = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
+        val modelPath = prefs.getString("selected_model_path", null)
+        val modelExists = modelPath?.let { File(it).exists() } == true
+        val accelerator = prefs.getString("accelerator", "GPU") ?: "GPU"
+        val mtpEnabled = prefs.getBoolean("speculative_decoding_enabled", false)
+        val appInfo = rememberAppInfo(context)
+        AlertDialog(
+            onDismissRequest = { showAppInfoDialog = false },
+            title = { Text("앱 정보") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Fusion Beta", color = DrawerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("버전 이름: ${appInfo.versionName}", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("버전 코드: ${appInfo.versionCode}", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("기기: ${Build.MANUFACTURER} ${Build.MODEL}", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("선택 모델: $modelName", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("모델 경로: ${modelPath ?: "없음"}", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("모델 파일 존재: ${if (modelExists) "예" else "아니요"}", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("가속기: $accelerator", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("MTP 설정: ${if (mtpEnabled) "켜짐" else "꺼짐"}", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text("채팅과 설정 데이터는 이 기기에 저장됩니다.", color = DrawerTextSecondary, fontSize = 13.sp)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAppInfoDialog = false }) { Text("확인") }
+            },
+            containerColor = DrawerPanelBg,
+            titleContentColor = DrawerTextPrimary,
+            textContentColor = DrawerTextPrimary
+        )
+    }
+
+    if (showReleaseNotesDialog) {
+        AlertDialog(
+            onDismissRequest = { showReleaseNotesDialog = false },
+            title = { Text("릴리즈 노트") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("• 로컬 모델 채팅 안정성을 개선했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("• 벤치마크와 기록 기능을 추가했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("• MTP 켜짐/꺼짐 비교를 지원합니다.", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("• Prompt Lab을 추가했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("• 아카이브 잠금을 추가했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
+                    Text("• 첨부파일 미리보기와 관리를 개선했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showReleaseNotesDialog = false }) { Text("확인") }
+            },
+            containerColor = DrawerPanelBg,
+            titleContentColor = DrawerTextPrimary,
+            textContentColor = DrawerTextPrimary
+        )
     }
 
     if (showAttachmentStorageDialog) {
@@ -1339,6 +1415,7 @@ private fun authenticateArchiveAccess(
 private suspend fun buildFusionDebugInfo(
     context: android.content.Context,
     dao: com.projectnuke.fusion.data.ChatDao,
+    benchmarkDao: BenchmarkDao,
     currentConversationId: Long,
     modelName: String,
     modelPath: String?,
@@ -1352,25 +1429,8 @@ private suspend fun buildFusionDebugInfo(
     webSearchEnabled: Boolean,
     speculativeEnabled: Boolean
 ): String {
-    val packageInfo = runCatching {
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.packageManager.getPackageInfo(
-                context.packageName,
-                android.content.pm.PackageManager.PackageInfoFlags.of(0)
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            context.packageManager.getPackageInfo(context.packageName, 0)
-        }
-    }.getOrNull()
-
-    val versionName = packageInfo?.versionName ?: "unknown"
-    val versionCode = if (packageInfo != null) {
-        if (Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode.toString()
-        else @Suppress("DEPRECATION") packageInfo.versionCode.toString()
-    } else {
-        "unknown"
-    }
+    val appInfo = getAppInfoSummary(context)
+    val latestBenchmark = runCatching { benchmarkDao.getLatest() }.getOrNull()
 
     val modelFile = modelPath?.let { File(it) }
     val modelExists = modelFile?.exists() == true
@@ -1391,7 +1451,7 @@ private suspend fun buildFusionDebugInfo(
         appendLine("Fusion Debug Info")
         appendLine("-----------------")
         appendLine("Package: ${context.packageName}")
-        appendLine("App version: $versionName ($versionCode)")
+        appendLine("App version: ${appInfo.versionName} (${appInfo.versionCode})")
         appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
         appendLine()
@@ -1411,12 +1471,27 @@ private suspend fun buildFusionDebugInfo(
         appendLine("- Reasoning enabled: $reasoningEnabled")
         appendLine("- Web search enabled: $webSearchEnabled")
         appendLine("- MTP enabled/requested: $speculativeEnabled")
+        appendLine("- MTP status: ${if (speculativeEnabled) "requested" else "off"}")
         appendLine()
         appendLine("Runtime")
         appendLine("- Latest status: unavailable")
         appendLine("- Latest metrics: unavailable")
+        appendLine("- Latest runtime error: unavailable")
         appendLine("- Streaming state: unavailable")
         appendLine("- Web search pipeline: enabled")
+        appendLine()
+        appendLine("Latest Benchmark")
+        if (latestBenchmark != null) {
+            appendLine("- Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(latestBenchmark.createdAt))}")
+            appendLine("- Model: ${latestBenchmark.modelName}")
+            appendLine("- Accelerator: ${latestBenchmark.actualBackend ?: latestBenchmark.accelerator}")
+            appendLine("- MTP: ${latestBenchmark.mtpStatus}")
+            appendLine("- Total tok/s: ${latestBenchmark.totalTokensPerSecond}")
+            appendLine("- Decode tok/s: ${latestBenchmark.decodeTokensPerSecond ?: "unknown"}")
+            appendLine("- Success: ${latestBenchmark.success}")
+        } else {
+            appendLine("- None")
+        }
         appendLine()
         appendLine("Storage")
         appendLine("- Attachment dir: ${attachmentDir.absolutePath}")
@@ -1429,4 +1504,33 @@ private suspend fun buildFusionDebugInfo(
         appendLine("- Total conversations: ${totalConversations ?: "unknown"}")
         appendLine("- Archived conversations: ${archivedConversations ?: "unknown"}")
     }.trimEnd()
+}
+
+@Composable
+private fun rememberAppInfo(context: Context): AppInfoSummary {
+    return remember(context) { getAppInfoSummary(context) }
+}
+
+private fun getAppInfoSummary(context: Context): AppInfoSummary {
+    val packageInfo = runCatching {
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.packageManager.getPackageInfo(
+                context.packageName,
+                android.content.pm.PackageManager.PackageInfoFlags.of(0)
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+    }.getOrNull()
+
+    val versionName = packageInfo?.versionName ?: "unknown"
+    val versionCode = if (packageInfo != null) {
+        if (Build.VERSION.SDK_INT >= 28) packageInfo.longVersionCode.toString()
+        else @Suppress("DEPRECATION") packageInfo.versionCode.toString()
+    } else {
+        "unknown"
+    }
+
+    return AppInfoSummary(versionName = versionName, versionCode = versionCode)
 }

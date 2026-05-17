@@ -117,7 +117,8 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
                     onClick = {
                         val snapshot = loadBenchmarkSnapshot(context, prefs)
                         if (snapshot.modelPath.isNullOrBlank() || !File(snapshot.modelPath).exists()) {
-                            Toast.makeText(context, "선택된 모델이 없습니다.", Toast.LENGTH_SHORT).show()
+                            Log.e("FusionBenchmark", "Selected model file missing: ${snapshot.modelPath}")
+                            Toast.makeText(context, "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요.", Toast.LENGTH_SHORT).show()
                             return@TextButton
                         }
 

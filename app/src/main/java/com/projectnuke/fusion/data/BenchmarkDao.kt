@@ -14,6 +14,12 @@ interface BenchmarkDao {
     @Query("SELECT * FROM benchmark_results ORDER BY createdAt DESC")
     fun observeAll(): Flow<List<BenchmarkResultEntity>>
 
+    @Query("SELECT * FROM benchmark_results ORDER BY createdAt DESC LIMIT 1")
+    suspend fun getLatest(): BenchmarkResultEntity?
+
     @Delete
     suspend fun delete(result: BenchmarkResultEntity)
+
+    @Query("DELETE FROM benchmark_results")
+    suspend fun deleteAll()
 }
