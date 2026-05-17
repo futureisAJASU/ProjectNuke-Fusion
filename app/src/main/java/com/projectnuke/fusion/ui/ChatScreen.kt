@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.SystemClock
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -72,6 +73,7 @@ import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
+import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
@@ -79,6 +81,8 @@ import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.search.FusionWebSearch
 import com.projectnuke.fusion.search.SearchIntent
 import com.projectnuke.fusion.search.toStructuredContext
+import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
+import com.projectnuke.fusion.util.buildEffectiveSettingsLine
 import java.io.File
 import java.net.URL
 import java.net.URLEncoder
@@ -478,7 +482,15 @@ fun ChatScreen(
                 val generationStartMs = SystemClock.elapsedRealtime()
                 var firstTokenLatencyMs: Long? = null
 
-                val rawReply = if (useMultimodalImages) {
+                val rawReply = FusionRuntimeLock.withLock {
+                    generateWithLiteRtRecovery(
+                        engine = engine,
+                        onBeforeRetry = {
+                            generationStatus = "모델 로딩 중..."
+                            streamingAssistantText = null
+                        },
+                        generateOnce = {
+                            if (useMultimodalImages) {
                     generationStatus = "이미지 분석 준비 중..."
                     val streamedOutput = StringBuilder()
                     if (!reasoningEnabled) {
@@ -535,6 +547,9 @@ fun ChatScreen(
                             }
                         }
                     )
+                            }
+                        }
+                    )
                 }
 
                 val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
@@ -547,7 +562,16 @@ fun ChatScreen(
                     generatedText = rawReply,
                     totalGenerationMs = totalGenerationMs,
                     firstTokenLatencyMs = firstTokenLatencyMs,
-                    settingsLine = buildFusionSettingsMetricsLine(requestSettings)
+                    settingsLine = buildEffectiveSettingsLine(
+                        buildEffectiveRuntimeSettings(
+                            modelName = selectedModel,
+                            modelPath = activeModelPath,
+                            settings = requestSettings,
+                            reasoningEnabled = reasoningEnabled,
+                            webSearchEnabled = webSearchEnabled,
+                            mtpStatus = engine.lastMtpStatus
+                        )
+                    )
                 )
 
                 generationStatus = "답변 저장 중..."
@@ -562,11 +586,16 @@ fun ChatScreen(
                 )
                 dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
             } catch (e: Exception) {
+                Log.e("FusionEngine", "Chat generation failed", e)
                 dao.insertMessage(
                     MessageEntity(
                         conversationId = activeConversationId,
                         role = "assistant",
-                        content = "오류가 발생했습니다:\n${e.message ?: e::class.java.simpleName}",
+                        content = if (isLiteRtModelLoadException(e)) {
+                            "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                        } else {
+                            "오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+                        },
                         createdAt = System.currentTimeMillis()
                     )
                 )
@@ -706,7 +735,7 @@ fun ChatScreen(
                         if (option == "대화 내 검색") {
                             inChatSearchMode = true
                         } else {
-                            Toast.makeText(context, "$option 기능은 나중에 연결할게", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "$option 기능은 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                         }
                     }
                 )
@@ -916,7 +945,7 @@ fun ChatScreen(
                                             MessageEntity(
                                                 conversationId = activeConversationId,
                                                 role = "assistant",
-                                                content = "아직 사용할 모델이 없어. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해줘.",
+                                                content = "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.",
                                                 createdAt = System.currentTimeMillis()
                                             )
                                         )
@@ -973,7 +1002,15 @@ fun ChatScreen(
                                     val generationStartMs = SystemClock.elapsedRealtime()
                                     var firstTokenLatencyMs: Long? = null
 
-                                    val rawReply = if (useMultimodalImages) {
+                                    val rawReply = FusionRuntimeLock.withLock {
+                                        generateWithLiteRtRecovery(
+                                            engine = engine,
+                                            onBeforeRetry = {
+                                                generationStatus = "모델 로딩 중..."
+                                                streamingAssistantText = null
+                                            },
+                                            generateOnce = {
+                                                if (useMultimodalImages) {
                                         generationStatus = "이미지 분석 준비 중..."
                                         val streamedOutput = StringBuilder()
                                         if (!reasoningEnabled) {
@@ -1030,6 +1067,9 @@ fun ChatScreen(
                                                 }
                                             }
                                         )
+                                                }
+                                            }
+                                        )
                                     }
 
                                     val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
@@ -1042,7 +1082,16 @@ fun ChatScreen(
                                         generatedText = rawReply,
                                         totalGenerationMs = totalGenerationMs,
                                         firstTokenLatencyMs = firstTokenLatencyMs,
-                                        settingsLine = buildFusionSettingsMetricsLine(requestSettings)
+                                        settingsLine = buildEffectiveSettingsLine(
+                                            buildEffectiveRuntimeSettings(
+                                                modelName = selectedModel,
+                                                modelPath = activeModelPath,
+                                                settings = requestSettings,
+                                                reasoningEnabled = reasoningEnabled,
+                                                webSearchEnabled = webSearchEnabled,
+                                                mtpStatus = engine.lastMtpStatus
+                                            )
+                                        )
                                     )
                                     streamingMetricsLine = metricsLine
 
@@ -1063,12 +1112,17 @@ fun ChatScreen(
                                     )
                                     pendingAttachments.clear()
                                 } catch (e: Exception) {
+                                    Log.e("FusionEngine", "Chat generation failed", e)
                                     if (activeConversationId != 0L) {
                                         dao.insertMessage(
                                             MessageEntity(
                                                 conversationId = activeConversationId,
                                                 role = "assistant",
-                                                content = "오류가 났어:\n${e.message ?: e::class.java.simpleName}",
+                                                content = if (isLiteRtModelLoadException(e)) {
+                                                    "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                                                } else {
+                                                    "오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+                                                },
                                                 createdAt = System.currentTimeMillis()
                                             )
                                         )
@@ -1171,7 +1225,7 @@ fun ChatScreen(
                                 onBranch = {
                                     Toast.makeText(
                                         context,
-                                        "새 채팅으로 가지치기 기능은 다음 단계에서 연결할게",
+                                        "새 채팅으로 가지치기 기능은 다음 단계에서 연결하겠습니다.",
                                         Toast.LENGTH_SHORT
                                     ).show()
                                 },
@@ -1581,7 +1635,7 @@ private fun EmptyChatBody() {
         Spacer(modifier = Modifier.height(12.dp))
 
         Text(
-            text = "새 채팅을 시작해봐.",
+            text = "새 채팅을 시작해보세요.",
             color = TextPrimary,
             fontSize = 20.sp,
             fontWeight = FontWeight.Medium
@@ -1590,7 +1644,7 @@ private fun EmptyChatBody() {
         Spacer(modifier = Modifier.height(6.dp))
 
         Text(
-            text = "모델과 모드는 위쪽 칩에서 바꿀 수 있어.",
+            text = "모델과 모드는 위쪽 칩에서 바꿀 수 있습니다.",
             color = TextSecondary,
             fontSize = 15.sp
         )
@@ -1784,7 +1838,7 @@ private fun AssistantMessage(
                 contentDescription = "복사",
                 onClick = {
                     clipboardManager.setText(AnnotatedString(parsed.answer))
-                    Toast.makeText(context, "복사했어", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "복사했습니다.", Toast.LENGTH_SHORT).show()
                 }
             )
 
@@ -1792,7 +1846,7 @@ private fun AssistantMessage(
                 icon = Icons.Rounded.VolumeUp,
                 contentDescription = "음성으로 읽기",
                 onClick = {
-                    Toast.makeText(context, "음성 읽기는 나중에 연결할게", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "음성 읽기는 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                 }
             )
 
@@ -2346,7 +2400,7 @@ private fun buildImageUserInstruction(
     userInput: String
 ): String {
     return userInput.trim().ifBlank {
-        "이 이미지를 자세히 설명해줘."
+        "이 이미지를 자세히 설명해 주세요."
     }
 }
 @Composable
@@ -2732,9 +2786,9 @@ private fun DownloadModelDialog(
 
                 Text(
                     text = if (model.downloadUrl != null) {
-                        "이 모델은 아직 기기에 없어. 다운로드한 뒤 로컬 추론 엔진에 연결할 수 있어."
+                        "이 모델은 아직 기기에 없습니다. 다운로드한 뒤 로컬 추론 엔진에 연결할 수 있습니다."
                     } else {
-                        "이 모델은 아직 다운로드 URL이 등록되지 않았어."
+                        "이 모델은 아직 다운로드 URL이 등록되지 않았습니다."
                     },
                     color = TextSecondary,
                     fontSize = 14.sp
@@ -3283,6 +3337,48 @@ private fun parseAssistantOutput(
 
 }
 
+private suspend fun generateWithLiteRtRecovery(
+    engine: LiteRtLlmEngine,
+    onBeforeRetry: () -> Unit,
+    generateOnce: suspend () -> String
+): String {
+    val firstResult = generateOnce()
+    if (!looksLikeLiteRtEngineFailure(firstResult)) {
+        return firstResult
+    }
+
+    Log.e("FusionEngine", "LiteRT generation failed; unloading engine and retrying once: $firstResult")
+    runCatching { engine.unload() }
+        .onFailure { Log.e("FusionEngine", "Failed to unload chat engine before retry", it) }
+    onBeforeRetry()
+
+    val retryResult = generateOnce()
+    if (!looksLikeLiteRtEngineFailure(retryResult)) {
+        return retryResult
+    }
+
+    Log.e("FusionEngine", "LiteRT generation retry failed: $retryResult")
+    runCatching { engine.unload() }
+        .onFailure { Log.e("FusionEngine", "Failed to unload chat engine after retry failure", it) }
+    throw IllegalStateException("모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.")
+}
+
+private fun looksLikeLiteRtEngineFailure(text: String): Boolean {
+    return text.contains("Failed to create engine", ignoreCase = true) ||
+        text.contains("litert_compiled_model", ignoreCase = true) ||
+        text.contains("모델을 불러올 수 없습니다") ||
+        text.contains("LiteRT-LM 실행 실패", ignoreCase = true) ||
+        text.contains("LiteRT-LM", ignoreCase = true) && text.contains("INTERNAL", ignoreCase = true)
+}
+
+private fun isLiteRtModelLoadException(error: Throwable): Boolean {
+    val message = error.message.orEmpty()
+    return message.contains("모델을 불러올 수 없습니다") ||
+        message.contains("Failed to create engine", ignoreCase = true) ||
+        message.contains("litert_compiled_model", ignoreCase = true) ||
+        message.contains("INTERNAL", ignoreCase = true)
+}
+
 private fun estimateOutputTokens(text: String): Int {
     val trimmed = stripFusionTags(splitFusionMetrics(text).content)
         .replace(Regex("\\s+"), " ")
@@ -3541,7 +3637,7 @@ private suspend fun performSimpleWebSearch(
             return@withContext htmlResult
         }
 
-        instantResult ?: "검색 결과를 가져오지 못했어. 일반 지식과 추론을 구분해서 답해야 해."
+        instantResult ?: "검색 결과를 가져오지 못했습니다. 일반 지식과 추론을 구분해서 답변해야 합니다."
     }
 }
 private fun performDuckDuckGoInstantSearch(
@@ -3808,11 +3904,11 @@ private fun openAttachmentFile(
             Intent.createChooser(intent, "파일 열기")
         )
     } catch (_: ActivityNotFoundException) {
-        Toast.makeText(context, "이 파일을 열 앱이 없어", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "이 파일을 열 수 있는 앱이 없습니다.", Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
         Toast.makeText(
             context,
-            "파일 열기 실패: ${e.message ?: e::class.java.simpleName}",
+            "파일을 열 수 없습니다.",
             Toast.LENGTH_SHORT
         ).show()
     }

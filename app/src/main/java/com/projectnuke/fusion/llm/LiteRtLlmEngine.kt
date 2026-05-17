@@ -54,7 +54,7 @@ class LiteRtLlmEngine(
             val modelFile = File(modelPath)
 
             if (!modelFile.exists()) {
-                return@withContext "모델 파일을 찾을 수 없어:\n$modelPath"
+                return@withContext "모델 파일을 찾을 수 없습니다.\n$modelPath"
             }
 
             val engine = getOrCreateEngine(
@@ -87,9 +87,8 @@ class LiteRtLlmEngine(
                     conversation
                         .sendMessageAsync(promptText)
                         .catch { throwable ->
-                            output.append(
-                                "\n\nLiteRT-LM 생성 중 오류:\n${throwable.message ?: throwable::class.java.simpleName}"
-                            )
+                            Log.e("FusionEngine", "LiteRT-LM generation stream failed", throwable)
+                            output.append("\n\n모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.")
                         }
                         .collect { chunk ->
                             val token = chunk.toString()
@@ -99,10 +98,11 @@ class LiteRtLlmEngine(
                 }
 
                 output.toString().ifBlank {
-                    "모델 응답이 비어 있어."
+                    "모델 응답이 비어 있습니다."
                 }
             } catch (e: Throwable) {
-                "LiteRT-LM 실행 실패:\n${e.message ?: e::class.java.simpleName}"
+                Log.e("FusionEngine", "LiteRT-LM generation failed", e)
+                "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
             }
         }
     }
@@ -163,9 +163,8 @@ class LiteRtLlmEngine(
                     conversation
                         .sendMessageAsync(Contents.of(contentParts))
                         .catch { throwable ->
-                            output.append(
-                                "\n\n이미지 입력 처리 실패: ${throwable.message ?: throwable::class.java.simpleName}"
-                            )
+                            Log.e("FusionEngine", "LiteRT-LM multimodal generation stream failed", throwable)
+                            output.append("\n\n이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요.")
                         }
                         .collect { chunk ->
                             val token = chunk.toString()
@@ -178,7 +177,8 @@ class LiteRtLlmEngine(
                     "이미지 입력 처리 실패: 모델 응답이 비어 있습니다."
                 }
             } catch (e: Throwable) {
-                "이미지 입력 처리 실패: ${e.message ?: e::class.java.simpleName}"
+                Log.e("FusionEngine", "LiteRT-LM multimodal generation failed", e)
+                "이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요."
             }
         }
     }
@@ -414,7 +414,8 @@ class LiteRtLlmEngine(
     override fun unload() {
         try {
             engine?.close()
-        } catch (_: Throwable) {
+        } catch (throwable: Throwable) {
+            Log.w("FusionEngine", "Failed to close LiteRT engine", throwable)
         }
 
         engine = null

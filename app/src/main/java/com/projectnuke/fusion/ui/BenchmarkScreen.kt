@@ -1,9 +1,11 @@
 package com.projectnuke.fusion.ui
 
 import android.content.Context
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -35,9 +37,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
+import com.projectnuke.fusion.data.AppDatabase
+import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
+import com.projectnuke.fusion.util.toKoreanMtpStatus
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.launch
@@ -52,6 +58,18 @@ fun SafeBenchmarkScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("fusion_chat_settings", Context.MODE_PRIVATE) }
     val engine = remember { LiteRtLlmEngine(context.applicationContext) }
+    val db = remember { AppDatabase.getInstance(context) }
+    val benchmarkDao = remember { db.benchmarkDao() }
+    var showHistory by remember { mutableStateOf(false) }
+
+    if (showHistory) {
+        BackHandler { showHistory = false }
+        BenchmarkHistoryScreen(
+            dao = benchmarkDao,
+            onBack = { showHistory = false }
+        )
+        return
+    }
 
     val selectedModel = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
     val selectedModelPath = prefs.getString("selected_model_path", null)

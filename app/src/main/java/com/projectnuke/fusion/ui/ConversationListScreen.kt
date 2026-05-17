@@ -786,7 +786,7 @@ private fun EmptyConversationList(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = if (hasSearchQuery) "검색 결과가 없어" else "아직 저장된 대화가 없습니다.",
+            text = if (hasSearchQuery) "검색 결과가 없습니다." else "아직 저장된 대화가 없습니다.",
             color = DrawerTextPrimary,
             fontSize = 16.sp,
             fontWeight = FontWeight.Medium

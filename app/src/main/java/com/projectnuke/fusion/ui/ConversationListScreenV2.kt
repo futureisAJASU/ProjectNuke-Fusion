@@ -232,6 +232,111 @@ fun ConversationListScreenV2(
         }
     }
 
+    if (!isSearchMode && page == SidebarPage.BENCHMARK) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(DrawerBlackBg)
+        ) {
+            FusionBenchmarkScreen(onBack = { leaveArchive() })
+        }
+        return
+    }
+
+    if (isSearchMode || page == SidebarPage.HOME) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(DrawerBlackBg)
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+        ) {
+            if (!isSearchMode) {
+                DrawerTopBar(onClose = { closeDrawer() }, onNewChat = onNewChat)
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            DrawerSearchBox(value = searchQuery, onValueChange = { searchQuery = it })
+            Spacer(modifier = Modifier.height(10.dp))
+            DrawerSectionTitle(if (isSearchMode) "검색 결과" else "대화")
+            Spacer(modifier = Modifier.height(8.dp))
+
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (filteredConversations.isEmpty()) {
+                    item { EmptyConversationList(hasSearchQuery = isSearchMode) }
+                } else {
+                    items(filteredConversations, key = { it.id }) { conversation ->
+                        ConversationRow(
+                            conversation = conversation,
+                            onClick = { openConversation(conversation.id) },
+                            menuExpanded = menuConversation?.id == conversation.id,
+                            onDismissMenu = { menuConversation = null },
+                            onMenuClick = { menuConversation = conversation },
+                            onTogglePinned = {
+                                menuConversation = null
+                                scope.launch { dao.updateConversationPinned(conversation.id, !conversation.isPinned) }
+                            },
+                            onRename = {
+                                menuConversation = null
+                                renameConversation = conversation
+                                renameTitle = conversation.title
+                            },
+                            onRegenerateTitle = {
+                                regenerateConversationTitle(conversation)
+                            },
+                            onArchive = {
+                                menuConversation = null
+                                scope.launch {
+                                    dao.archiveConversation(conversation.id)
+                                    if (conversation.id == currentConversationId) {
+                                        val nextId = dao.getLatestConversation()?.id
+                                        onConversationRemovedFromList(conversation.id, nextId)
+                                    }
+                                }
+                            },
+                            onDelete = {
+                                menuConversation = null
+                                deleteConversation = conversation
+                            }
+                        )
+                    }
+                }
+            }
+
+            if (!isSearchMode) {
+                Spacer(modifier = Modifier.height(10.dp))
+                DrawerBottomNavRow(
+                    title = "벤치마크",
+                    subtitle = "선택한 모델의 성능을 측정합니다.",
+                    leading = "B"
+                ) { page = SidebarPage.BENCHMARK }
+                DrawerBottomNavRow(
+                    title = "Prompt Lab",
+                    subtitle = "시스템 프롬프트와 응답 스타일을 조정합니다.",
+                    leading = "L"
+                ) { page = SidebarPage.PROMPT_LAB }
+                DrawerBottomNavRow(
+                    title = "아카이브",
+                    subtitle = "보관한 채팅을 확인하고 복원합니다.",
+                    leading = "A"
+                ) { openArchiveWithAuth() }
+                DrawerBottomNavRow(
+                    title = "설정",
+                    subtitle = "모델, 생성, 데이터 관련 설정을 관리합니다.",
+                    leading = "S"
+                ) {
+                    archiveUnlockedForSession = false
+                    page = SidebarPage.SETTINGS
+                }
+            }
+        }
+        return
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -614,9 +719,7 @@ fun ConversationListScreenV2(
                     }
                 }
                 SidebarPage.BENCHMARK -> {
-                    item {
-                        SafeBenchmarkScreen(onBack = { leaveArchive() })
-                    }
+                    // Rendered above outside this LazyColumn to avoid nested vertical scrolling.
                 }
             }
         }
