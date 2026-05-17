@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
+import com.projectnuke.fusion.llm.BenchmarkRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
@@ -272,6 +273,15 @@ fun ChatScreen(
 
     val scope = rememberCoroutineScope()
     val engine = remember { LiteRtLlmEngine(context.applicationContext) }
+    DisposableEffect(engine) {
+        val unregister = FusionRuntimeLock.registerChatEngineUnloadCallback {
+            Log.i("FusionEngine", "Unloading chat engine for exclusive benchmark mode")
+            engine.unload()
+        }
+        onDispose {
+            unregister()
+        }
+    }
 
     val messageFlow = remember(conversationId) {
         if (conversationId == 0L) {
@@ -303,6 +313,10 @@ fun ChatScreen(
 
     fun startRegenerateLatestResponse() {
         if (isGenerating) return
+        if (FusionRuntimeLock.isBenchmarkRunning) {
+            Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         val latestAssistantIndex = messageEntities.indexOfLast { it.role != "user" }
         if (latestAssistantIndex <= 0) {
@@ -489,7 +503,7 @@ fun ChatScreen(
                 val generationStartMs = SystemClock.elapsedRealtime()
                 var firstTokenLatencyMs: Long? = null
 
-                val rawReply = FusionRuntimeLock.withLock {
+                val rawReply = FusionRuntimeLock.withChatGeneration {
                     generateWithLiteRtRecovery(
                         engine = engine,
                         onBeforeRetry = {
@@ -594,6 +608,10 @@ fun ChatScreen(
                 dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
             } catch (e: Exception) {
                 Log.e("FusionEngine", "Chat generation failed", e)
+                if (e is BenchmarkRunningException) {
+                    Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
                 dao.insertMessage(
                     MessageEntity(
                         conversationId = activeConversationId,
@@ -780,12 +798,12 @@ fun ChatScreen(
                         )
                     },
                     onMicClick = {
-                        Toast.makeText(context, "음성 입력은 나중에 붙이자", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "음성 입력은 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                     },
                     onVoiceModeClick = {
-                        Toast.makeText(context, "보이스 모드는 나중에 붙이자", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "보이스 모드는 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                     },
-                    onSendClick = {
+                    onSendClick = sendClick@ {
                         val userInput = input.trim()
                         val attachmentsToSend = pendingAttachments.toList()
                         val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
@@ -798,8 +816,14 @@ fun ChatScreen(
                         val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
 
                         if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
+                            if (FusionRuntimeLock.isBenchmarkRunning) {
+                                Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                                return@sendClick
+                            }
+
                             input = ""
                             pendingAttachments.clear()
+
                             isGenerating = true
                             streamingAssistantText = null
                             streamingMetricsLine = null
@@ -1016,7 +1040,7 @@ fun ChatScreen(
                                     val generationStartMs = SystemClock.elapsedRealtime()
                                     var firstTokenLatencyMs: Long? = null
 
-                                    val rawReply = FusionRuntimeLock.withLock {
+                                    val rawReply = FusionRuntimeLock.withChatGeneration {
                                         generateWithLiteRtRecovery(
                                             engine = engine,
                                             onBeforeRetry = {
@@ -1127,6 +1151,10 @@ fun ChatScreen(
                                     pendingAttachments.clear()
                                 } catch (e: Exception) {
                                     Log.e("FusionEngine", "Chat generation failed", e)
+                                    if (e is BenchmarkRunningException) {
+                                        Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                                        return@launch
+                                    }
                                     if (activeConversationId != 0L) {
                                         dao.insertMessage(
                                             MessageEntity(

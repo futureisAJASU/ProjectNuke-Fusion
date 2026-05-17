@@ -1,5 +1,6 @@
 ﻿package com.projectnuke.fusion.ui
 
+import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
@@ -37,6 +38,7 @@ import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.BenchmarkResultEntity
+import com.projectnuke.fusion.llm.ChatGenerationRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
@@ -82,6 +84,7 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
     val selectedModel = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
     val selectedModelPath = prefs.getString("selected_model_path", null)
     val settings = loadBenchmarkSettingsFromPrefs(prefs)
+    val safeMaxTokensCap = benchmarkSafeMaxTokensCap(context)
     val resolvedModelPath = resolveBenchmarkModelPath(context, selectedModel, selectedModelPath)
     var isRunning by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -108,6 +111,9 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
             Text("가속기: ${settings.accelerator.name}", color = Color(0xFFF5F5F5))
             Text("MTP 가속: ${initialBenchmarkMtpStatusLabel(settings, selectedModel, resolvedModelPath)}", color = Color(0xFFF5F5F5))
             Text("maxTokens=${settings.maxTokens} / temp=${settings.temperature} / topK=${settings.topK} / topP=${settings.topP}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
+            safeMaxTokensCap?.let {
+                Text("벤치마크 안전 제한: maxTokens=$it", color = Color(0xFF9E9E9E), fontSize = 12.sp)
+            }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -116,6 +122,10 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
                     enabled = !isRunning,
                     onClick = {
                         val snapshot = loadBenchmarkSnapshot(context, prefs)
+                        if (FusionRuntimeLock.isChatGenerationRunning) {
+                            Toast.makeText(context, "현재 응답을 생성하는 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                            return@TextButton
+                        }
                         if (snapshot.modelPath.isNullOrBlank() || !File(snapshot.modelPath).exists()) {
                             Log.e("FusionBenchmark", "Selected model file missing: ${snapshot.modelPath}")
                             Toast.makeText(context, "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요.", Toast.LENGTH_SHORT).show()
@@ -180,6 +190,8 @@ private data class BenchmarkSnapshot(
     val modelName: String,
     val modelPath: String?,
     val settings: GenerationSettings,
+    val requestedMaxTokens: Int,
+    val safeMaxTokensCap: Int?,
     val reasoningEnabled: Boolean,
     val webSearchEnabled: Boolean
 )
@@ -194,7 +206,15 @@ private suspend fun runBenchmark(
     onFinished: () -> Unit
 ) {
     try {
-        FusionRuntimeLock.withLock {
+        FusionRuntimeLock.withExclusiveBenchmark(
+            onPrepareExclusiveMode = {
+                onStatus("채팅 모델 리소스를 정리하는 중입니다.")
+                Log.i("FusionEngine", "Requesting chat engine unload before benchmark")
+                FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
+                runCatching { engine.unload() }
+                    .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine before exclusive mode", it) }
+            }
+        ) {
             try {
                 Log.i(
                     "FusionBenchmark",
@@ -245,6 +265,9 @@ private suspend fun runBenchmark(
 
             val resultText = buildString {
                 appendLine(buildAppliedBenchmarkSettingsLine(snapshot, effective.actualBackend, mtpStatus))
+                if (snapshot.safeMaxTokensCap != null && snapshot.requestedMaxTokens != snapshot.settings.maxTokens) {
+                    appendLine("설정값: maxTokens=${snapshot.requestedMaxTokens} / 적용값: maxTokens=${snapshot.settings.maxTokens}")
+                }
                 appendLine("모델 설정을 다시 적용했습니다.")
                 appendLine("모델 설정 재적용 시간: ${engineReloadMs}ms")
                 appendLine("모델 로딩 시간: 측정 불가")
@@ -283,11 +306,15 @@ private suspend fun runBenchmark(
                     .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine after run", it) }
             }
         }
+    } catch (e: ChatGenerationRunningException) {
+        Log.i("FusionBenchmark", "Benchmark blocked because chat generation is running")
+        onStatus(null)
+        Toast.makeText(context, "현재 응답을 생성하는 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
         Log.e("FusionBenchmark", "Benchmark generation failed", e)
         Log.e("FusionEngine", "모델 설정을 적용할 수 없습니다.", e)
         onStatus(null)
-        Toast.makeText(context, "벤치마크 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "모델을 불러올 수 없습니다. CPU 또는 낮은 maxTokens로 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
         runCatching {
             saveBenchmarkResult(
                 context = context,
@@ -387,13 +414,30 @@ private fun BenchmarkCardBlock(content: @Composable ColumnScope.() -> Unit) {
 private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.SharedPreferences): BenchmarkSnapshot {
     val modelName = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
     val selectedPath = prefs.getString("selected_model_path", null)
+    val rawSettings = loadBenchmarkSettingsFromPrefs(prefs)
+    val safeCap = benchmarkSafeMaxTokensCap(context)
+    val effectiveSettings = if (safeCap != null && rawSettings.maxTokens > safeCap) {
+        rawSettings.copy(maxTokens = safeCap)
+    } else {
+        rawSettings
+    }
     return BenchmarkSnapshot(
         modelName = modelName,
         modelPath = resolveBenchmarkModelPath(context, modelName, selectedPath),
-        settings = loadBenchmarkSettingsFromPrefs(prefs),
+        settings = effectiveSettings,
+        requestedMaxTokens = rawSettings.maxTokens,
+        safeMaxTokensCap = safeCap,
         reasoningEnabled = prefs.getBoolean("reasoning_enabled", false),
         webSearchEnabled = prefs.getBoolean("web_search_enabled", false)
     )
+}
+
+private fun benchmarkSafeMaxTokensCap(context: Context): Int? {
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
+    val memoryInfo = ActivityManager.MemoryInfo()
+    activityManager.getMemoryInfo(memoryInfo)
+    val eightGbBytes = 8L * 1024L * 1024L * 1024L
+    return if (memoryInfo.totalMem in 1..eightGbBytes) 2048 else null
 }
 
 private fun loadBenchmarkSettingsFromPrefs(prefs: android.content.SharedPreferences): GenerationSettings {
