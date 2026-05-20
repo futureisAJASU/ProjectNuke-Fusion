@@ -1,6 +1,5 @@
 ﻿package com.projectnuke.fusion.ui
 
-import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
@@ -45,6 +44,7 @@ import com.projectnuke.fusion.llm.MtpRuntimeStatus
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
 import com.projectnuke.fusion.util.toKoreanMtpStatus
 import java.io.File
@@ -66,7 +66,14 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
     var showHistory by remember { mutableStateOf(false) }
 
     DisposableEffect(engine) {
+        val unregisterMemoryUnloader = FusionMemoryManager.registerIdleEngineUnloader {
+            if (!FusionRuntimeLock.isChatGenerationRunning && !FusionRuntimeLock.isBenchmarkRunning) {
+                Log.i("FusionMemory", "Unloading idle benchmark engine under memory pressure")
+                engine.unload()
+            }
+        }
         onDispose {
+            unregisterMemoryUnloader()
             runCatching { engine.unload() }
                 .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine on dispose", it) }
         }
@@ -90,12 +97,27 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
     var status by remember { mutableStateOf<String?>(null) }
     var result by remember { mutableStateOf<String?>(null) }
 
+    DisposableEffect(Unit) {
+        onDispose {
+            status = null
+            result = null
+        }
+    }
+
+    fun leaveBenchmark() {
+        if (!isRunning) {
+            status = null
+            result = null
+        }
+        onBack()
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth().background(Color(0xFF000000)).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("뒤로", color = Color(0xFFF5F5F5)) }
+            TextButton(onClick = { leaveBenchmark() }) { Text("뒤로", color = Color(0xFFF5F5F5)) }
             Column(modifier = Modifier.weight(1f)) {
                 Text("벤치마크", color = Color(0xFFF5F5F5), fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Text("선택한 모델의 응답 속도와 생성 성능을 측정합니다.", color = Color(0xFF9E9E9E), fontSize = 12.sp)
@@ -130,6 +152,16 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
                             Log.e("FusionBenchmark", "Selected model file missing: ${snapshot.modelPath}")
                             Toast.makeText(context, "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요.", Toast.LENGTH_SHORT).show()
                             return@TextButton
+                        }
+                        FusionMemoryManager.logMemorySnapshot("FusionMemory", context, "benchmark-start")
+                        val memorySnapshot = FusionMemoryManager.getMemorySnapshot(context)
+                        if (memorySnapshot.lowMemory || FusionMemoryManager.shouldBlockBenchmark(context)) {
+                            status = "사용 가능한 메모리가 부족하여 벤치마크를 시작할 수 없습니다."
+                            Toast.makeText(context, "사용 가능한 메모리가 부족하여 벤치마크를 시작할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                            return@TextButton
+                        }
+                        if (memorySnapshot.availMem < memorySnapshot.threshold * 2) {
+                            Toast.makeText(context, "메모리 사용량이 높아 일부 기능이 느려질 수 있습니다.", Toast.LENGTH_SHORT).show()
                         }
 
                         isRunning = true
@@ -208,7 +240,7 @@ private suspend fun runBenchmark(
     try {
         FusionRuntimeLock.withExclusiveBenchmark(
             onPrepareExclusiveMode = {
-                onStatus("채팅 모델 리소스를 정리하는 중입니다.")
+                onStatus("모델 리소스를 정리하는 중입니다.")
                 Log.i("FusionEngine", "Requesting chat engine unload before benchmark")
                 FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
                 runCatching { engine.unload() }
@@ -246,6 +278,7 @@ private suspend fun runBenchmark(
 
             val totalMs = SystemClock.elapsedRealtime() - start
             val text = output.toString().replace(Regex("""</?fusion_(thinking|answer|metrics)>"""), "").trim()
+            output.clear()
             if (looksLikeBenchmarkLiteRtFailure(text)) {
                 throw IllegalStateException("Benchmark LiteRT generation failed")
             }
@@ -266,7 +299,8 @@ private suspend fun runBenchmark(
             val resultText = buildString {
                 appendLine(buildAppliedBenchmarkSettingsLine(snapshot, effective.actualBackend, mtpStatus))
                 if (snapshot.safeMaxTokensCap != null && snapshot.requestedMaxTokens != snapshot.settings.maxTokens) {
-                    appendLine("설정값: maxTokens=${snapshot.requestedMaxTokens} / 적용값: maxTokens=${snapshot.settings.maxTokens}")
+                    appendLine("설정값: maxTokens=${snapshot.requestedMaxTokens}")
+                    appendLine("적용값: maxTokens=${snapshot.settings.maxTokens}")
                 }
                 appendLine("모델 설정을 다시 적용했습니다.")
                 appendLine("모델 설정 재적용 시간: ${engineReloadMs}ms")
@@ -304,6 +338,7 @@ private suspend fun runBenchmark(
             } finally {
                 runCatching { engine.unload() }
                     .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine after run", it) }
+                System.gc()
             }
         }
     } catch (e: ChatGenerationRunningException) {
@@ -314,7 +349,8 @@ private suspend fun runBenchmark(
         Log.e("FusionBenchmark", "Benchmark generation failed", e)
         Log.e("FusionEngine", "모델 설정을 적용할 수 없습니다.", e)
         onStatus(null)
-        Toast.makeText(context, "모델을 불러올 수 없습니다. CPU 또는 낮은 maxTokens로 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+        val userMessage = benchmarkUserErrorMessage(e, snapshot)
+        Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
         runCatching {
             saveBenchmarkResult(
                 context = context,
@@ -328,13 +364,16 @@ private suspend fun runBenchmark(
                 totalTokensPerSecond = 0f,
                 decodeTokensPerSecond = null,
                 success = false,
-                errorMessage = e.message ?: e::class.java.simpleName
+                errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot)
             )
         }.onFailure { saveError ->
             Log.e("FusionBenchmark", "Failed to save benchmark result", saveError)
             Toast.makeText(context, "벤치마크 기록을 저장할 수 없습니다.", Toast.LENGTH_SHORT).show()
         }
     } finally {
+        runCatching { engine.unload() }
+            .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine in final cleanup", it) }
+        System.gc()
         onFinished()
     }
 }
@@ -416,10 +455,14 @@ private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.Share
     val selectedPath = prefs.getString("selected_model_path", null)
     val rawSettings = loadBenchmarkSettingsFromPrefs(prefs)
     val safeCap = benchmarkSafeMaxTokensCap(context)
-    val effectiveSettings = if (safeCap != null && rawSettings.maxTokens > safeCap) {
-        rawSettings.copy(maxTokens = safeCap)
+    val recommendedMaxTokens = FusionMemoryManager.recommendedBenchmarkMaxTokens(context, rawSettings.maxTokens)
+    val effectiveSettings = if (recommendedMaxTokens != rawSettings.maxTokens) {
+        rawSettings.copy(
+            maxTokens = recommendedMaxTokens,
+            speculativeDecodingEnabled = resolveBenchmarkSpeculativeDecoding(rawSettings, modelName)
+        )
     } else {
-        rawSettings
+        rawSettings.copy(speculativeDecodingEnabled = resolveBenchmarkSpeculativeDecoding(rawSettings, modelName))
     }
     return BenchmarkSnapshot(
         modelName = modelName,
@@ -427,17 +470,65 @@ private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.Share
         settings = effectiveSettings,
         requestedMaxTokens = rawSettings.maxTokens,
         safeMaxTokensCap = safeCap,
-        reasoningEnabled = prefs.getBoolean("reasoning_enabled", false),
-        webSearchEnabled = prefs.getBoolean("web_search_enabled", false)
+        reasoningEnabled = false,
+        webSearchEnabled = false
     )
 }
 
 private fun benchmarkSafeMaxTokensCap(context: Context): Int? {
-    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
-    val memoryInfo = ActivityManager.MemoryInfo()
-    activityManager.getMemoryInfo(memoryInfo)
-    val eightGbBytes = 8L * 1024L * 1024L * 1024L
-    return if (memoryInfo.totalMem in 1..eightGbBytes) 2048 else null
+    val recommended = FusionMemoryManager.recommendedBenchmarkMaxTokens(context, Int.MAX_VALUE)
+    return recommended.takeIf { it < Int.MAX_VALUE }
+}
+
+private fun resolveBenchmarkSpeculativeDecoding(
+    settings: GenerationSettings,
+    modelName: String
+): Boolean? {
+    if (!modelName.contains("Gemma 4", ignoreCase = true) &&
+        !modelName.contains("gemma-4", ignoreCase = true)
+    ) {
+        return false
+    }
+    return settings.speculativeDecodingEnabled
+}
+
+private fun benchmarkUserErrorMessage(
+    throwable: Throwable,
+    snapshot: BenchmarkSnapshot
+): String {
+    val message = throwable.message.orEmpty()
+    return when {
+        message.contains("memory", ignoreCase = true) ||
+            message.contains("oom", ignoreCase = true) ||
+            message.contains("OutOfMemory", ignoreCase = true) -> {
+            "메모리가 부족하여 벤치마크를 중단했습니다."
+        }
+        snapshot.settings.accelerator != AcceleratorMode.CPU -> {
+            "GPU 벤치마크 중 오류가 발생했습니다. CPU 또는 낮은 maxTokens로 다시 시도해 주세요."
+        }
+        else -> {
+            "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+        }
+    }
+}
+
+private fun sanitizeBenchmarkErrorMessage(
+    throwable: Throwable,
+    snapshot: BenchmarkSnapshot
+): String {
+    return when {
+        throwable.message.orEmpty().contains("memory", ignoreCase = true) ||
+            throwable.message.orEmpty().contains("oom", ignoreCase = true) ||
+            throwable is OutOfMemoryError -> {
+            "메모리가 부족하여 벤치마크를 중단했습니다."
+        }
+        snapshot.settings.accelerator != AcceleratorMode.CPU -> {
+            "GPU 벤치마크 오류"
+        }
+        else -> {
+            "모델 로딩 오류"
+        }
+    }.take(100)
 }
 
 private fun loadBenchmarkSettingsFromPrefs(prefs: android.content.SharedPreferences): GenerationSettings {

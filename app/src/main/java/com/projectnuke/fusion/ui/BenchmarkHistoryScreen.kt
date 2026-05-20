@@ -20,6 +20,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -60,7 +61,7 @@ fun BenchmarkHistoryScreen(
     dao: BenchmarkDao,
     onBack: () -> Unit
 ) {
-    val allResults by dao.observeAll().collectAsState(initial = emptyList())
+    val allResults by dao.observeRecent(limit = 50).collectAsState(initial = emptyList())
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -71,6 +72,21 @@ fun BenchmarkHistoryScreen(
     var comparisonMode by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
     val selectedIds = remember { mutableStateListOf<Long>() }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            comparisonMode = false
+            selectedIds.clear()
+            showClearConfirm = false
+        }
+    }
+
+    fun leaveHistory() {
+        comparisonMode = false
+        selectedIds.clear()
+        showClearConfirm = false
+        onBack()
+    }
 
     BackHandler(enabled = comparisonMode) {
         comparisonMode = false
@@ -156,7 +172,7 @@ fun BenchmarkHistoryScreen(
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack) { Text("뒤로", color = BenchmarkText) }
+                TextButton(onClick = { leaveHistory() }) { Text("뒤로", color = BenchmarkText) }
                 Column {
                     Text("벤치마크 기록", color = BenchmarkText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Text("측정 결과를 조건별로 비교합니다.", color = BenchmarkSubtle, fontSize = 12.sp)

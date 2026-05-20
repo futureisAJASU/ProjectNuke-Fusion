@@ -17,8 +17,14 @@ interface ChatDao {
     @Query("SELECT * FROM conversations WHERE isArchived = 0 ORDER BY isPinned DESC, updatedAt DESC")
     fun observeConversations(): Flow<List<ConversationEntity>>
 
+    @Query("SELECT * FROM conversations WHERE isArchived = 0 ORDER BY isPinned DESC, updatedAt DESC LIMIT :limit")
+    fun observeConversationsLimited(limit: Int): Flow<List<ConversationEntity>>
+
     @Query("SELECT * FROM conversations WHERE isArchived = 1 ORDER BY isPinned DESC, updatedAt DESC")
     fun observeArchivedConversations(): Flow<List<ConversationEntity>>
+
+    @Query("SELECT * FROM conversations WHERE isArchived = 1 ORDER BY isPinned DESC, updatedAt DESC LIMIT :limit")
+    fun observeArchivedConversationsLimited(limit: Int): Flow<List<ConversationEntity>>
 
     @Query(
         """
@@ -37,8 +43,29 @@ interface ChatDao {
     )
     fun observeConversationIdsMatchingMessages(query: String): Flow<List<Long>>
 
+    @Query(
+        """
+        SELECT DISTINCT conversationId
+        FROM messages
+        WHERE
+            CASE
+                WHEN instr(content, '<fusion_metrics>') > 0 THEN substr(content, 1, instr(content, '<fusion_metrics>') - 1)
+                WHEN instr(content, '<fusion_thinking>') > 0 THEN substr(content, 1, instr(content, '<fusion_thinking>') - 1)
+                WHEN instr(content, '<fusion_attachment_v2>') > 0 THEN substr(content, 1, instr(content, '<fusion_attachment_v2>') - 1)
+                WHEN instr(content, '<fusion_attachment>') > 0 THEN substr(content, 1, instr(content, '<fusion_attachment>') - 1)
+                ELSE content
+            END
+            LIKE '%' || :query || '%'
+        LIMIT :limit
+        """
+    )
+    fun observeConversationIdsMatchingMessagesLimited(query: String, limit: Int): Flow<List<Long>>
+
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     fun observeMessages(conversationId: Long): Flow<List<MessageEntity>>
+
+    @Query("SELECT * FROM (SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt DESC LIMIT :limit) ORDER BY createdAt ASC")
+    fun observeMessagesLatestLimited(conversationId: Long, limit: Int): Flow<List<MessageEntity>>
 
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     suspend fun getMessagesForConversation(conversationId: Long): List<MessageEntity>

@@ -14,6 +14,9 @@ interface BenchmarkDao {
     @Query("SELECT * FROM benchmark_results ORDER BY createdAt DESC")
     fun observeAll(): Flow<List<BenchmarkResultEntity>>
 
+    @Query("SELECT * FROM benchmark_results ORDER BY createdAt DESC LIMIT :limit")
+    fun observeRecent(limit: Int): Flow<List<BenchmarkResultEntity>>
+
     @Query("SELECT * FROM benchmark_results ORDER BY createdAt DESC LIMIT 1")
     suspend fun getLatest(): BenchmarkResultEntity?
 

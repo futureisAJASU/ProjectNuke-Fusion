@@ -1458,16 +1458,20 @@ fun ChatScreen(
         AdvancedSettingsDialog(
             settings = generationSettings,
             selectedModel = selectedModel,
+            reasoningEnabled = reasoningEnabled,
+            webSearchEnabled = webSearchEnabled,
             onDismiss = {
                 showAdvancedSettingsDialog = false
             },
-            onApply = { newSettings ->
+            onApply = { newSettings, newReasoningEnabled, newWebSearchEnabled ->
                 generationSettings = newSettings
+                reasoningEnabled = newReasoningEnabled
+                webSearchEnabled = newWebSearchEnabled
                 saveFusionSettings(
                     prefs = settingsPrefs,
                     settings = newSettings,
-                    reasoningEnabled = reasoningEnabled,
-                    webSearchEnabled = webSearchEnabled,
+                    reasoningEnabled = newReasoningEnabled,
+                    webSearchEnabled = newWebSearchEnabled,
                     selectedModel = selectedModel,
                     selectedModelPath = selectedModelPath
                 )
@@ -2717,6 +2721,8 @@ private fun SettingSwitchRow(
     checked: Boolean,
     onToggle: () -> Unit
 ) {
+    val displayTitle = if (title.contains("MTP")) "MTP" else title
+    val displaySubtitle = settingExplanation(displayTitle) ?: subtitle
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -2725,7 +2731,7 @@ private fun SettingSwitchRow(
             modifier = Modifier.weight(1f)
         ) {
             Text(
-                text = title,
+                text = displayTitle,
                 color = TextPrimary,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Medium
@@ -2733,7 +2739,7 @@ private fun SettingSwitchRow(
             Spacer(modifier = Modifier.height(2.dp))
 
             Text(
-                text = subtitle,
+                text = displaySubtitle,
                 color = TextSecondary,
                 fontSize = 12.sp,
                 lineHeight = 16.sp
@@ -2754,6 +2760,20 @@ private fun SettingSwitchRow(
         )
     }
 
+}
+
+private fun settingExplanation(title: String): String? {
+    return when (title) {
+        "Max tokens" -> "\ub2f5\ubcc0\uc758 \ucd5c\ub300 \uae38\uc774\ub97c \uc81c\ud55c\ud569\ub2c8\ub2e4. \uac12\uc774 \ud074\uc218\ub85d \uae34 \ub2f5\ubcc0\uc744 \uc0dd\uc131\ud560 \uc218 \uc788\uc9c0\ub9cc \uba54\ubaa8\ub9ac \uc0ac\uc6a9\ub7c9\uacfc \uc0dd\uc131 \uc2dc\uac04\uc774 \uc99d\uac00\ud569\ub2c8\ub2e4."
+        "Temperature" -> "\ub2f5\ubcc0\uc758 \ubb34\uc791\uc704\uc131\uacfc \ucc3d\uc758\uc131\uc744 \uc870\uc808\ud569\ub2c8\ub2e4. \ub0ae\uc744\uc218\ub85d \uc548\uc815\uc801\uc774\uace0, \ub192\uc744\uc218\ub85d \ub2e4\uc591\ud558\uc9c0\ub9cc \ubd80\uc815\ud655\ud574\uc9c8 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
+        "TopK" -> "\ub2e4\uc74c \ud1a0\ud070 \ud6c4\ubcf4\ub97c \uc0c1\uc704 \uba87 \uac1c\uae4c\uc9c0 \uace0\ub824\ud560\uc9c0 \uc815\ud569\ub2c8\ub2e4. \ub0ae\uc744\uc218\ub85d \uc548\uc815\uc801\uc774\uace0, \ub192\uc744\uc218\ub85d \ud45c\ud604\uc774 \ub2e4\uc591\ud574\uc9c8 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
+        "TopP" -> "\ub204\uc801 \ud655\ub960 \uae30\uc900\uc73c\ub85c \ud6c4\ubcf4 \ud1a0\ud070 \ubc94\uc704\ub97c \uc81c\ud55c\ud569\ub2c8\ub2e4. \ub0ae\uc744\uc218\ub85d \ubcf4\uc218\uc801\uc774\uace0, \ub192\uc744\uc218\ub85d \ub2e4\uc591\ud55c \ud45c\ud604\uc744 \uc0ac\uc6a9\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
+        "Reasoning budget" -> "\ucd94\ub860 \ubaa8\ub4dc\uc5d0\uc11c \uc0ac\uc6a9\ud560 \ubaa9\ud45c \ud1a0\ud070 \ubc94\uc704\uc785\ub2c8\ub2e4. \ud604\uc7ac \ubaa8\ub378\uacfc \ub7f0\ud0c0\uc784\uc5d0 \ub530\ub77c \uc2e4\uc81c \uc801\uc6a9 \uc815\ub3c4\uac00 \ub2ec\ub77c\uc9c8 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
+        "MTP" -> "\uc5ec\ub7ec \ud1a0\ud070\uc744 \ubbf8\ub9ac \uc608\uce21\ud574 \uc18d\ub3c4\ub97c \ub192\uc774\ub294 \uc2e4\ud5d8\uc801 \uac00\uc18d \uae30\ub2a5\uc785\ub2c8\ub2e4. \uae30\uae30\uc640 \ubaa8\ub378\uc5d0 \ub530\ub77c \ub354 \ub290\ub824\uc9c8 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
+        "Reasoning" -> "\ub2f5\ubcc0\uc744 \uc0dd\uc131\ud558\uae30 \uc804\uc5d0 \ub354 \uad6c\uc870\uc801\uc73c\ub85c \uc0dd\uac01\ud558\ub3c4\ub85d \uc720\ub3c4\ud569\ub2c8\ub2e4. \ud488\uc9c8\uc774 \uc88b\uc544\uc9c8 \uc218 \uc788\uc9c0\ub9cc \uc0dd\uc131 \uc2dc\uac04\uc774 \ub298\uc5b4\ub0a9\ub2c8\ub2e4."
+        "Web Search" -> "\ucd5c\uc2e0 \uc815\ubcf4\uac00 \ud544\uc694\ud55c \uc9c8\ubb38\uc5d0\uc11c \uc778\ud130\ub137 \uac80\uc0c9 \uacb0\uacfc\ub97c \ucc38\uace0\ud569\ub2c8\ub2e4. \uac80\uc0c9 \uacb0\uacfc\uac00 \uae38\uba74 \uc751\ub2f5 \uc2dc\uac04\uc774 \ub298\uc5b4\ub0a0 \uc218 \uc788\uc2b5\ub2c8\ub2e4."
+        else -> null
+    }
 }
 @Composable
 private fun AdvancedSettingsEntry(
@@ -2860,11 +2880,13 @@ private fun DownloadModelDialog(
 private fun AdvancedSettingsDialog(
     settings: GenerationSettings,
     selectedModel: String,
+    reasoningEnabled: Boolean,
+    webSearchEnabled: Boolean,
     onDismiss: () -> Unit,
-    onApply: (GenerationSettings) -> Unit
+    onApply: (GenerationSettings, Boolean, Boolean) -> Unit
 ) {
     var maxTokens by remember(settings) {
-        mutableStateOf(settings.maxTokens.coerceIn(2000, 32000))
+        mutableStateOf(settings.maxTokens.coerceIn(1024, 32000))
     }
     var topK by remember(settings) {
         mutableStateOf(settings.topK.coerceIn(5, 100))
@@ -2904,6 +2926,8 @@ private fun AdvancedSettingsDialog(
     var topPText by remember(settings) { mutableStateOf("%.2f".format(topP)) }
     var temperatureText by remember(settings) { mutableStateOf("%.2f".format(temperature)) }
     var reasoningBudgetText by remember(settings) { mutableStateOf(reasoningBudget.toString()) }
+    var reasoningEnabledLocal by remember(reasoningEnabled) { mutableStateOf(reasoningEnabled) }
+    var webSearchEnabledLocal by remember(webSearchEnabled) { mutableStateOf(webSearchEnabled) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2923,11 +2947,55 @@ private fun AdvancedSettingsDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(22.dp)
             ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(text = "\ucd94\ucc9c \uc124\uc815", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(onClick = {
+                            maxTokens = 1024; maxTokensText = "1024"; temperature = 0.7f; temperatureText = "0.70"; topK = 40; topKText = "40"; topP = 0.9f; topPText = "0.90"; reasoningEnabledLocal = false; speculativeDecodingEnabled = false; speculativeDecodingTouched = true
+                        }) { Text("\uc800\uba54\ubaa8\ub9ac", color = TextPrimary) }
+                        TextButton(onClick = {
+                            maxTokens = 1024; maxTokensText = "1024"; temperature = 0.7f; temperatureText = "0.70"; topK = 40; topKText = "40"; topP = 0.9f; topPText = "0.90"; reasoningEnabledLocal = false; speculativeDecodingEnabled = false; speculativeDecodingTouched = true
+                        }) { Text("\ube60\ub978 \uc751\ub2f5", color = TextPrimary) }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(onClick = {
+                            maxTokens = 2048; maxTokensText = "2048"; temperature = 0.4f; temperatureText = "0.40"; topK = 40; topKText = "40"; topP = 0.9f; topPText = "0.90"; reasoningEnabledLocal = true; speculativeDecodingEnabled = false; speculativeDecodingTouched = true
+                        }) { Text("\uc815\ud655\ud55c \ub2f5\ubcc0", color = TextPrimary) }
+                        TextButton(onClick = {
+                            maxTokens = 4096; maxTokensText = "4096"; temperature = 0.7f; temperatureText = "0.70"; topK = 64; topKText = "64"; topP = 0.95f; topPText = "0.95"; reasoningEnabledLocal = false
+                        }) { Text("\uae34 \uc124\uba85", color = TextPrimary) }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(onClick = {
+                            maxTokens = 2048; maxTokensText = "2048"; temperature = 1.1f; temperatureText = "1.10"; topK = 80; topKText = "80"; topP = 0.98f; topPText = "0.98"; reasoningEnabledLocal = false; speculativeDecodingEnabled = false; speculativeDecodingTouched = true
+                        }) { Text("\ucc3d\uc758\uc801 \ub2f5\ubcc0", color = TextPrimary) }
+                        TextButton(onClick = {
+                            maxTokens = 1024; maxTokensText = "1024"; temperature = 0.7f; temperatureText = "0.70"; topK = 40; topKText = "40"; topP = 0.9f; topPText = "0.90"; reasoningEnabledLocal = false; webSearchEnabledLocal = false; speculativeDecodingEnabled = false; speculativeDecodingTouched = true
+                        }) { Text("\ubca4\uce58\ub9c8\ud06c \uc548\uc804", color = TextPrimary) }
+                    }
+                }
+
+                Surface(shape = RoundedCornerShape(12.dp), color = PanelBg, modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("\ud604\uc7ac \uc801\uc6a9\uac12", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                        Text("\ubaa8\ub378: $selectedModel", color = TextSecondary, fontSize = 12.sp)
+                        Text("\uac00\uc18d\uae30: ${accelerator.name} · MTP: ${if (speculativeDecodingEnabled) "\ucf1c\uc9d0" else "\uaebc\uc9d0"}", color = TextSecondary, fontSize = 12.sp)
+                        Text("maxTokens=$maxTokensText · temp=$temperatureText · topK=$topKText · topP=$topPText", color = TextSecondary, fontSize = 12.sp)
+                        Text("Reasoning: ${if (reasoningEnabledLocal) "\ucf1c\uc9d0" else "\uaebc\uc9d0"} · Web Search: ${if (webSearchEnabledLocal) "\ucf1c\uc9d0" else "\uaebc\uc9d0"}", color = TextSecondary, fontSize = 12.sp)
+                    }
+                }
+                Text(
+                    text = "\uc815\ud655\ud55c \ube44\uad50\ub97c \uc704\ud574 \uac19\uc740 \uc870\uac74\uc5d0\uc11c 3\ud68c \uc774\uc0c1 \uce21\uc815\ud574 \uc8fc\uc138\uc694.",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    lineHeight = 16.sp
+                )
+
                 IntSliderField(
                     title = "Max tokens",
                     value = maxTokens,
                     valueText = maxTokensText,
-                    min = 2000,
+                    min = 1024,
                     max = 32000,
                     onSliderChange = { newValue ->
                         maxTokens = newValue
@@ -2936,7 +3004,7 @@ private fun AdvancedSettingsDialog(
                     onTextChange = { text ->
                         maxTokensText = text
                         text.toIntOrNull()?.let { parsed ->
-                            maxTokens = parsed.coerceIn(2000, 32000)
+                            maxTokens = parsed.coerceIn(1024, 32000)
                         }
                     }
                 )
@@ -3070,6 +3138,20 @@ private fun AdvancedSettingsDialog(
                         speculativeDecodingTouched = true
                     }
                 )
+
+                SettingSwitchRow(
+                    title = "Reasoning",
+                    subtitle = "",
+                    checked = reasoningEnabledLocal,
+                    onToggle = { reasoningEnabledLocal = !reasoningEnabledLocal }
+                )
+
+                SettingSwitchRow(
+                    title = "Web Search",
+                    subtitle = "",
+                    checked = webSearchEnabledLocal,
+                    onToggle = { webSearchEnabledLocal = !webSearchEnabledLocal }
+                )
             }
         },
         dismissButton = {
@@ -3086,8 +3168,8 @@ private fun AdvancedSettingsDialog(
                     onApply(
                         settings.copy(
                             maxTokens = maxTokensText.toIntOrNull()
-                                ?.coerceIn(2000, 32000)
-                                ?: maxTokens.coerceIn(2000, 32000),
+                                ?.coerceIn(1024, 32000)
+                                ?: maxTokens.coerceIn(1024, 32000),
                             topK = topKText.toIntOrNull()
                                 ?.coerceIn(5, 100)
                                 ?: topK.coerceIn(5, 100),
@@ -3106,7 +3188,9 @@ private fun AdvancedSettingsDialog(
                             } else {
                                 null
                             }
-                        )
+                        ),
+                        reasoningEnabledLocal,
+                        webSearchEnabledLocal
                     )
                 }
             ) {
@@ -3138,6 +3222,14 @@ private fun IntSliderField(
             fontSize = 16.sp,
             fontWeight = FontWeight.Medium
         )
+        settingExplanation(title)?.let { explanation ->
+            Text(
+                text = explanation,
+                color = TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+        }
         Row(
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -3211,6 +3303,14 @@ private fun FloatSliderField(
             fontSize = 16.sp,
             fontWeight = FontWeight.Medium
         )
+        settingExplanation(title)?.let { explanation ->
+            Text(
+                text = explanation,
+                color = TextSecondary,
+                fontSize = 12.sp,
+                lineHeight = 16.sp
+            )
+        }
         Row(
             verticalAlignment = Alignment.CenterVertically
         ) {
