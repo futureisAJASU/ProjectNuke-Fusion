@@ -2,7 +2,10 @@ package com.projectnuke.fusion.ui
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.app.ActivityManager
+import android.app.DownloadManager
 import android.os.SystemClock
+import android.os.Environment
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
@@ -70,6 +73,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.core.net.toUri
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
@@ -79,6 +84,14 @@ import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.modelzoo.FusionModelCatalog
+import com.projectnuke.fusion.modelzoo.FusionModelSpec
+import com.projectnuke.fusion.modelzoo.ModelAvailability
+import com.projectnuke.fusion.modelzoo.ModelFamily
+import com.projectnuke.fusion.modelzoo.ModelMemoryClass
+import com.projectnuke.fusion.modelzoo.ModelRuntimeFormat
+import com.projectnuke.fusion.modelzoo.deviceLabel
+import com.projectnuke.fusion.modelzoo.statusLabel
 import com.projectnuke.fusion.search.FusionWebSearch
 import com.projectnuke.fusion.search.SearchIntent
 import com.projectnuke.fusion.search.toStructuredContext
@@ -117,6 +130,12 @@ private data class LocalModel(
     val fileName: String,
     val downloadUrl: String? = null,
     val customPath: String? = null
+)
+private data class PendingExternalModel(
+    val displayName: String,
+    val originalFileName: String,
+    val uri: Uri,
+    val fileSizeBytes: Long?
 )
 private data class ParsedAssistantOutput(
     val thinking: String?,
@@ -206,6 +225,10 @@ fun ChatScreen(
     }
 
     val customModels = remember { mutableStateListOf<LocalModel>() }
+    var pendingImportedModel by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var pendingExternalModel by remember { mutableStateOf<PendingExternalModel?>(null) }
+    var showModelStorageManager by remember { mutableStateOf(false) }
+    var storageRefreshKey by remember { mutableStateOf(0) }
 
     var selectedModel by remember {
         mutableStateOf(settingsPrefs.getString(PrefSelectedModel, "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it")
@@ -427,6 +450,8 @@ fun ChatScreen(
                         add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
                     }
 
+                    add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
+
                     addAll(historyBeforeUser)
 
                     add(
@@ -646,7 +671,7 @@ fun ChatScreen(
             }
 
             val displayName = getDisplayNameFromUri(context, uri)
-            Toast.makeText(context, "커스텀 모델 복사 중...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "모델 파일을 가져오는 중입니다.", Toast.LENGTH_SHORT).show()
 
             scope.launch {
                 val copiedFile = copyUriToModelFile(
@@ -656,34 +681,42 @@ fun ChatScreen(
                 )
 
                 if (copiedFile == null) {
-                    Toast.makeText(context, "커스텀 모델 복사 실패", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "모델 파일을 가져오지 못했습니다.", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
-                val model = LocalModel(
-                    name = "Custom: $displayName",
-                    fileName = displayName,
-                    customPath = copiedFile.absolutePath
-                )
-
-                if (customModels.none { it.name == model.name }) {
-                    customModels.add(model)
-                }
-
-                selectedModel = model.name
-                selectedModelPath = copiedFile.absolutePath
-                saveFusionSettings(
-                    prefs = settingsPrefs,
-                    settings = generationSettings,
-                    reasoningEnabled = reasoningEnabled,
-                    webSearchEnabled = webSearchEnabled,
-                    selectedModel = selectedModel,
-                    selectedModelPath = selectedModelPath
-                )
-
-                Toast.makeText(context, "커스텀 모델 등록: $displayName", Toast.LENGTH_SHORT).show()
+                pendingImportedModel = displayName to copiedFile.absolutePath
+                Toast.makeText(context, "모델 패밀리를 선택해 주세요.", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    val externalModelPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val displayName = getDisplayNameFromUri(context, uri)
+        if (!isModelLikeFileName(displayName)) {
+            Toast.makeText(context, "이 파일은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (_: SecurityException) {
+            Toast.makeText(context, "모델 파일 권한을 유지할 수 없습니다.", Toast.LENGTH_SHORT).show()
+        }
+
+        pendingExternalModel = PendingExternalModel(
+            displayName = displayName,
+            originalFileName = displayName,
+            uri = uri,
+            fileSizeBytes = getFileSizeFromUri(context, uri)
+        )
+        Toast.makeText(context, "모델 패밀리를 선택해 주세요.", Toast.LENGTH_SHORT).show()
     }
 
     val attachmentPickerLauncher = rememberLauncherForActivityResult(
@@ -943,6 +976,13 @@ fun ChatScreen(
                                                 )
                                             )
                                         }
+
+                                        add(
+                                            ChatMessage(
+                                                role = "system",
+                                                content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"
+                                            )
+                                        )
 
                                         addAll(messages)
 
@@ -1373,6 +1413,12 @@ fun ChatScreen(
             onUploadCustomModel = {
                 modelPickerLauncher.launch(arrayOf("*/*"))
             },
+            onLinkExternalModel = {
+                externalModelPickerLauncher.launch(arrayOf("*/*"))
+            },
+            onOpenStorageManager = {
+                showModelStorageManager = true
+            },
             onOpenAdvancedSettings = {
                 showAdvancedSettingsDialog = true
             },
@@ -1398,6 +1444,98 @@ fun ChatScreen(
                     selectedModelPath = selectedModelPath
                 )
             }
+        )
+    }
+
+    pendingImportedModel?.let { (displayName, path) ->
+        CustomModelFamilyDialog(
+            onDismiss = { pendingImportedModel = null },
+            onFamilySelected = { family ->
+                val spec = FusionModelCatalog.importedSpec(displayName, path, family)
+                FusionModelCatalog.saveImported(context, spec)
+                val model = LocalModel(
+                    name = spec.displayName,
+                    fileName = spec.fileName ?: displayName,
+                    customPath = path
+                )
+                if (customModels.none { it.customPath == path }) {
+                    customModels.add(model)
+                }
+                if (spec.runtimeFormat == ModelRuntimeFormat.GGUF || spec.runtimeFormat == ModelRuntimeFormat.UNKNOWN) {
+                    Toast.makeText(context, "이 형식은 현재 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    selectedModel = spec.displayName
+                    selectedModelPath = path
+                    saveFusionSettings(
+                        prefs = settingsPrefs,
+                        settings = generationSettings,
+                        reasoningEnabled = reasoningEnabled,
+                        webSearchEnabled = webSearchEnabled,
+                        selectedModel = selectedModel,
+                        selectedModelPath = selectedModelPath
+                    )
+                    Toast.makeText(context, "모델 파일을 가져왔습니다.", Toast.LENGTH_SHORT).show()
+                }
+                pendingImportedModel = null
+            }
+        )
+    }
+
+    pendingExternalModel?.let { pending ->
+        CustomModelFamilyDialog(
+            onDismiss = { pendingExternalModel = null },
+            onFamilySelected = { family ->
+                val spec = FusionModelCatalog.externalLinkedSpec(
+                    displayName = pending.displayName,
+                    originalFileName = pending.originalFileName,
+                    uriString = pending.uri.toString(),
+                    fileSizeBytes = pending.fileSizeBytes,
+                    family = family
+                )
+                FusionModelCatalog.saveImported(context, spec)
+                storageRefreshKey += 1
+                pendingExternalModel = null
+                Toast.makeText(context, "외부 모델 파일을 연결했습니다.", Toast.LENGTH_SHORT).show()
+                if (spec.availability == ModelAvailability.CUSTOM_IMPORTED) {
+                    Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 합니다.", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(context, "이 파일은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    if (showModelStorageManager) {
+        ModelStorageManagerDialog(
+            refreshKey = storageRefreshKey,
+            currentModel = selectedModel,
+            onDismiss = { showModelStorageManager = false },
+            onSelect = { spec ->
+                val localPath = spec.localPath
+                when {
+                    spec.externallyReferenced && localPath.isNullOrBlank() -> {
+                        if (spec.availability == ModelAvailability.CUSTOM_IMPORTED) {
+                            Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 합니다.", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(context, "이 파일은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    localPath != null && File(localPath).exists() && spec.availability == ModelAvailability.CUSTOM_IMPORTED -> {
+                        selectedModel = spec.displayName
+                        selectedModelPath = localPath
+                        saveFusionSettings(
+                            prefs = settingsPrefs,
+                            settings = generationSettings,
+                            reasoningEnabled = reasoningEnabled,
+                            webSearchEnabled = webSearchEnabled,
+                            selectedModel = selectedModel,
+                            selectedModelPath = selectedModelPath
+                        )
+                    }
+                    else -> Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onChanged = { storageRefreshKey += 1 }
         )
     }
 
@@ -2564,156 +2702,1073 @@ private fun ModelSelectDialog(
     onDismiss: () -> Unit,
     onSelect: (LocalModel) -> Unit,
     onUploadCustomModel: () -> Unit,
+    onLinkExternalModel: () -> Unit,
+    onOpenStorageManager: () -> Unit,
     onOpenAdvancedSettings: () -> Unit,
     onToggleReasoning: () -> Unit,
     onToggleWebSearch: () -> Unit
 ) {
+    val context = LocalContext.current
     val models = builtInModels.toList() + customModels.toList()
+    val catalogModels = FusionModelCatalog.all(context)
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text("모델 / 모드")
+            Text("모델 라이브러리")
         },
         text = {
             Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                modifier = Modifier.heightIn(max = 560.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = "모델 선택",
-                    color = TextSecondary,
-                    fontSize = 13.sp
-                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "사용할 모델을 선택하거나 새 모델을 가져옵니다.",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
 
-                models.forEach { model: LocalModel ->
-                    val downloaded = model.customPath != null || isDownloaded(model)
-                    val downloading = downloadingModelName == model.name
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FusionTextButton(onClick = onLinkExternalModel) { Text("외부 모델 파일 연결", fontSize = 13.sp) }
+                        FusionTextButton(onClick = onOpenStorageManager) { Text("모델 저장공간", fontSize = 13.sp) }
+                    }
 
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = if (model.name == currentModel) BubbleBg else Color.Transparent,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onSelect(model) }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                    ModelZooSection(
+                        title = "사용 가능한 모델",
+                        specs = catalogModels.filter { isCatalogModelAvailable(context, it) },
+                        currentModel = currentModel,
+                        onSelect = { spec ->
+                            val model = LocalModel(
+                                name = spec.displayName,
+                                fileName = spec.fileName ?: spec.displayName,
+                                customPath = spec.localPath,
+                                downloadUrl = spec.downloadUrl
+                            )
+                            onSelect(model)
+                        },
+                        onUploadCustomModel = onUploadCustomModel,
+                        onApplyRecommendedSettings = { spec ->
+                            val prefs = context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
+                            applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
+                            Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                    ModelZooSection(
+                        title = "변환이 필요한 모델",
+                        specs = catalogModels.filter { it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE },
+                        currentModel = currentModel,
+                        onSelect = {},
+                        onUploadCustomModel = onUploadCustomModel,
+                        onApplyRecommendedSettings = {}
+                    )
+                    ModelZooSection(
+                        title = "원격 모델",
+                        specs = catalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY },
+                        currentModel = currentModel,
+                        onSelect = {},
+                        onUploadCustomModel = onUploadCustomModel,
+                        onApplyRecommendedSettings = {}
+                    )
+                    ModelZooSection(
+                        title = "가져온 모델",
+                        specs = catalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED },
+                        currentModel = currentModel,
+                        onSelect = { spec ->
+                            onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
+                        },
+                        onUploadCustomModel = onUploadCustomModel,
+                        onApplyRecommendedSettings = {}
+                    )
+
+                    Text(
+                        text = "기존 Gemma 다운로드",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    models.forEach { model: LocalModel ->
+                        val downloaded = model.customPath != null || isDownloaded(model)
+                        val downloading = downloadingModelName == model.name
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (model.name == currentModel) BubbleBg else Color.Transparent,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(model) }
                         ) {
-                            Column(
-                                modifier = Modifier.weight(1f)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = model.name,
-                                    color = TextPrimary,
-                                    fontSize = 15.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Column(
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(
+                                        text = model.name,
+                                        color = TextPrimary,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
 
-                                Spacer(modifier = Modifier.height(3.dp))
+                                    Spacer(modifier = Modifier.height(2.dp))
 
-                                Text(
-                                    text = when {
-                                        model.customPath != null -> "커스텀 모델"
-                                        downloading -> "다운로드 중 ${downloadProgressPercent ?: 0}%"
-                                        downloaded -> "다운로드됨"
-                                        model.downloadUrl != null -> "탭해서 다운로드"
-                                        else -> "다운로드 URL 미등록"
-                                    },
-                                    color = TextSecondary,
-                                    fontSize = 12.sp
-                                )
-
-                                if (downloading) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-
-                                    LinearProgressIndicator(
-                                        progress = { ((downloadProgressPercent ?: 0) / 100f).coerceIn(0f, 1f) },
-                                        modifier = Modifier.fillMaxWidth(),
+                                    Text(
+                                        text = when {
+                                            model.customPath != null -> "커스텀 모델"
+                                            downloading -> "다운로드 중 ${downloadProgressPercent ?: 0}%"
+                                            downloaded -> "다운로드됨"
+                                            model.downloadUrl != null -> "탭해서 다운로드"
+                                            else -> "다운로드 URL 미등록"
+                                        },
                                         color = TextSecondary,
-                                        trackColor = LineColor
+                                        fontSize = 12.sp
+                                    )
+
+                                    if (downloading) {
+                                        Spacer(modifier = Modifier.height(5.dp))
+
+                                        LinearProgressIndicator(
+                                            progress = { ((downloadProgressPercent ?: 0) / 100f).coerceIn(0f, 1f) },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            color = TextSecondary,
+                                            trackColor = LineColor
+                                        )
+                                    }
+                                }
+
+                                if (model.name == currentModel) {
+                                    Text(
+                                        text = "사용 중",
+                                        color = AccentBlue,
+                                        fontSize = 12.sp
                                     )
                                 }
                             }
+                        }
+                    }
 
-                            if (model.name == currentModel) {
-                                Text(
-                                    text = "사용 중",
-                                    color = AccentBlue,
-                                    fontSize = 12.sp
-                                )
-                            }
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = PanelBg,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onUploadCustomModel() }
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) {
+                            Text(
+                                text = "+ 커스텀 모델 업로드",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+
+                            Spacer(modifier = Modifier.height(2.dp))
+
+                            Text(
+                                text = "다운로드한 .litertlm / .task / 모델 파일 선택",
+                                color = TextSecondary,
+                                fontSize = 12.sp
+                            )
                         }
                     }
                 }
 
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = PanelBg,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onUploadCustomModel() }
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp)
-                    ) {
-                        Text(
-                            text = "+ 커스텀 모델 업로드",
-                            color = TextPrimary,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-
-                        Spacer(modifier = Modifier.height(3.dp))
-
-                        Text(
-                            text = "다운로드한 .litertlm / .task / 모델 파일 선택",
-                            color = TextSecondary,
-                            fontSize = 12.sp
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(1.dp)
-                        .background(LineColor)
-                )
-
-                SettingSwitchRow(
-                    title = "Reasoning mode",
-                    subtitle = "생각 과정 표시와 reasoning 프롬프트 사용",
-                    checked = reasoningEnabled,
-                    onToggle = onToggleReasoning
-                )
-
-                SettingSwitchRow(
-                    title = "Web search",
-                    subtitle = "웹 검색 결과를 참고 정보로 추가",
-                    checked = webSearchEnabled,
-                    onToggle = onToggleWebSearch
-                )
-
-                AdvancedSettingsEntry(
-                    settings = generationSettings,
-                    onClick = onOpenAdvancedSettings
+                ModelLibrarySettingsDock(
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = webSearchEnabled,
+                    generationSettings = generationSettings,
+                    onToggleReasoning = onToggleReasoning,
+                    onToggleWebSearch = onToggleWebSearch,
+                    onOpenAdvancedSettings = onOpenAdvancedSettings,
+                    onDismiss = onDismiss
                 )
             }
         },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("닫기")
-            }
-        },
+        confirmButton = {},
         containerColor = PanelBg,
         titleContentColor = TextPrimary,
         textContentColor = TextPrimary
     )
 
 }
+
+@Composable
+private fun ModelLibrarySettingsDock(
+    reasoningEnabled: Boolean,
+    webSearchEnabled: Boolean,
+    generationSettings: GenerationSettings,
+    onToggleReasoning: () -> Unit,
+    onToggleWebSearch: () -> Unit,
+    onOpenAdvancedSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = BubbleBg,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CompactToggleChip(
+                    title = "Reasoning",
+                    checked = reasoningEnabled,
+                    modifier = Modifier.weight(1f),
+                    onClick = onToggleReasoning
+                )
+                CompactToggleChip(
+                    title = "Web search",
+                    checked = webSearchEnabled,
+                    modifier = Modifier.weight(1f),
+                    onClick = onToggleWebSearch
+                )
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = PanelBg,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onOpenAdvancedSettings() }
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                        Text("고급 설정", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "maxTokens ${generationSettings.maxTokens} · TopK ${generationSettings.topK}",
+                            color = TextSecondary,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                FusionTextButton(onClick = onDismiss) {
+                    Text("닫기", fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompactToggleChip(
+    title: String,
+    checked: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(999.dp),
+        color = if (checked) AccentBlue.copy(alpha = 0.18f) else PanelBg,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (checked) AccentBlue.copy(alpha = 0.65f) else LineColor
+        ),
+        modifier = modifier.clickable { onClick() }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(7.dp)
+                    .clip(CircleShape)
+                    .background(if (checked) AccentBlue else TextSecondary.copy(alpha = 0.5f))
+            )
+            Text(
+                text = "$title ${if (checked) "켜짐" else "꺼짐"}",
+                color = if (checked) AccentBlue else TextSecondary,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModelZooSection(
+    title: String,
+    specs: List<FusionModelSpec>,
+    currentModel: String,
+    onSelect: (FusionModelSpec) -> Unit,
+    onUploadCustomModel: () -> Unit,
+    onApplyRecommendedSettings: (FusionModelSpec) -> Unit
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    var selectedSpec by remember { mutableStateOf<FusionModelSpec?>(null) }
+    var showDirectDownloadConfirm by remember { mutableStateOf(false) }
+    if (specs.isEmpty()) return
+    Text(title, color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    specs.forEach { spec ->
+        val available = isCatalogModelAvailable(context, spec)
+        val memoryInfo = remember(spec.id) { buildModelMemoryInfo(context, spec) }
+        val localSelectionMessage = buildLocalSelectionMessage(spec, available)
+        val tokenRecommendation = remember(spec.id, memoryInfo.totalRamGb, memoryInfo.availableRamGb) {
+            buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb)
+        }
+        Surface(
+            shape = RoundedCornerShape(12.dp),
+            color = if (spec.displayName == currentModel) BubbleBg else Color.Transparent,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { selectedSpec = spec }
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(spec.displayName, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text("${spec.sourceLabel ?: spec.family.name} · ${spec.parameterLabel} · ${modelFootprintLabel(spec)}", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(localSelectionMessage ?: compactCompatibilityLine(memoryInfo, tokenRecommendation), color = if (memoryInfo.warning != null) DangerRed else TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (spec.displayName == currentModel) {
+                    Text("사용 중", color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+
+    selectedSpec?.let { spec ->
+        val available = isCatalogModelAvailable(context, spec)
+        val memoryInfo = buildModelMemoryInfo(context, spec)
+        val tokenRecommendation = buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb)
+        ModelZooDetailDialog(
+            spec = spec,
+            available = available,
+            memoryInfo = memoryInfo,
+            tokenRecommendation = tokenRecommendation,
+            localSelectionMessage = buildLocalSelectionMessage(spec, available),
+            onDismiss = { selectedSpec = null },
+            onSelect = {
+                onSelect(spec)
+                selectedSpec = null
+            },
+            onUploadCustomModel = onUploadCustomModel,
+            onApplyRecommendedSettings = {
+                onApplyRecommendedSettings(spec)
+                selectedSpec = null
+            },
+            onOpenOfficial = { openModelLink(context, spec.officialUrl) },
+            onOpenModelPage = {
+                val pageUrl = spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl
+                openModelLink(context, pageUrl)
+            },
+            onDirectDownload = {
+                showDirectDownloadConfirm = true
+            },
+            onCopyLink = {
+                val link = spec.directDownloadUrl ?: spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl
+                if (link == null) {
+                    Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    clipboard.setText(AnnotatedString(link))
+                    Toast.makeText(context, "모델 링크를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+        if (showDirectDownloadConfirm) {
+            DirectDownloadConfirmDialog(
+                onDismiss = { showDirectDownloadConfirm = false },
+                onConfirm = {
+                    showDirectDownloadConfirm = false
+                    startModelDirectDownload(context, spec)
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModelZooDetailDialog(
+    spec: FusionModelSpec,
+    available: Boolean,
+    memoryInfo: ModelMemoryUiInfo,
+    tokenRecommendation: TokenRecommendation,
+    localSelectionMessage: String?,
+    onDismiss: () -> Unit,
+    onSelect: () -> Unit,
+    onUploadCustomModel: () -> Unit,
+    onApplyRecommendedSettings: () -> Unit,
+    onOpenOfficial: () -> Unit,
+    onOpenModelPage: () -> Unit,
+    onDirectDownload: () -> Unit,
+    onCopyLink: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = PanelBg,
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.9f)
+                .navigationBarsPadding()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 20.dp, vertical = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(spec.displayName, color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("${spec.sourceLabel ?: spec.family.name} · ${spec.family.name} · ${spec.runtimeFormat.name}", color = TextSecondary, fontSize = 12.sp)
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = true)
+                        .verticalScroll(rememberScrollState())
+                        .padding(bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    DetailMetaRow("파일/가중치 크기", modelFootprintLabel(spec))
+                    DetailMetaRow("기기 메모리", "약 ${formatGb(memoryInfo.totalRamGb)}GB")
+                    DetailMetaRow("현재 사용 가능", "약 ${formatGb(memoryInfo.availableRamGb)}GB")
+                    DetailMetaRow("권장 메모리", spec.recommendedRamGb?.let { "${it}GB 이상" } ?: "정보 없음")
+                    DetailMetaRow("권장 토큰 수", tokenRecommendation.label.removePrefix("권장 토큰 수: ").trim())
+                    if (spec.notes.isNotBlank()) Text(spec.notes, color = TextPrimary, fontSize = 13.sp)
+                    Text(tokenRecommendation.explanation, color = TextSecondary, fontSize = 12.sp)
+                    memoryInfo.warning?.let {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = DangerRed.copy(alpha = 0.12f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "$it 긴 응답 또는 멀티태스킹 환경에서 종료될 수 있습니다. 가능하면 더 작은 모델 또는 낮은 최대 토큰 수를 권장합니다.",
+                                color = DangerRed,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                    spec.localExecutionWarning?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
+                    localSelectionMessage?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
+                    Text("NPU/GPU/CPU 참고", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text(buildRuntimeNote(spec), color = TextSecondary, fontSize = 12.sp)
+                    if (spec.supportsNpuCandidate) {
+                        Text("Exynos AI Studio 변환 후 NPU 실행 후보로 검토할 수 있습니다. 현재 앱에서 NPU 실행을 보장하지는 않습니다.", color = TextSecondary, fontSize = 12.sp)
+                    }
+                    if (spec.officialUrl == null && spec.downloadUrl == null) {
+                        Text("등록된 링크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .padding(top = 4.dp, bottom = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FusionTextButton(enabled = available, onClick = onSelect) { Text("선택", fontSize = 13.sp) }
+                        FusionTextButton(onClick = onApplyRecommendedSettings) { Text("권장 설정", fontSize = 13.sp) }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Start
+                    ) {
+                        FusionTextButton(onClick = onUploadCustomModel) { Text("파일 가져오기", fontSize = 12.sp) }
+                        if (!spec.directDownloadUrl.isNullOrBlank()) {
+                            FusionTextButton(onClick = onDirectDownload) { Text("파일 다운로드", fontSize = 12.sp) }
+                        } else {
+                            FusionTextButton(enabled = (spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl) != null, onClick = onOpenModelPage) { Text("다운로드 페이지 열기", fontSize = 12.sp) }
+                        }
+                        FusionTextButton(enabled = spec.officialUrl != null, onClick = onOpenOfficial) { Text("세부 정보", fontSize = 12.sp) }
+                        FusionTextButton(enabled = spec.downloadUrl != null || spec.officialUrl != null, onClick = onCopyLink) { Text("링크 복사", fontSize = 12.sp) }
+                    }
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                        FusionTextButton(onClick = onDismiss) { Text("닫기", fontSize = 12.sp) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailMetaRow(
+    label: String,
+    value: String
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Text(
+            text = label,
+            color = TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.width(92.dp)
+        )
+        Text(
+            text = value,
+            color = TextPrimary,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun DirectDownloadConfirmDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("모델 파일을 다운로드하시겠습니까?") },
+        text = { Text("모델 파일은 용량이 클 수 있습니다. Wi-Fi 연결과 충분한 저장공간을 확인해 주세요.") },
+        confirmButton = { FusionTextButton(onClick = onConfirm) { Text("다운로드") } },
+        dismissButton = { FusionTextButton(onClick = onDismiss) { Text("취소") } },
+        containerColor = PanelBg,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary
+    )
+}
+
+@Composable
+private fun FusionTextButton(
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+    content: @Composable RowScope.() -> Unit
+) {
+    TextButton(
+        enabled = enabled,
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+        modifier = Modifier.heightIn(min = 30.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            content = {
+                androidx.compose.runtime.CompositionLocalProvider(
+                    androidx.compose.material3.LocalContentColor provides if (enabled) AccentBlue else TextSecondary.copy(alpha = 0.45f)
+                ) {
+                    content()
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun CustomModelFamilyDialog(
+    onDismiss: () -> Unit,
+    onFamilySelected: (ModelFamily) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("모델 패밀리를 선택해 주세요.") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(
+                    ModelFamily.GEMMA to "Gemma",
+                    ModelFamily.QWEN to "Qwen",
+                    ModelFamily.LLAMA to "Llama",
+                    ModelFamily.PHI to "Phi",
+                    ModelFamily.DEEPSEEK to "DeepSeek",
+                    ModelFamily.MISTRAL to "Mistral",
+                    ModelFamily.KIMI to "Kimi",
+                    ModelFamily.CUSTOM to "Custom"
+                ).forEach { (family, label) ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = PanelBg,
+                        modifier = Modifier.fillMaxWidth().clickable { onFamilySelected(family) }
+                    ) {
+                        Text(label, color = TextPrimary, modifier = Modifier.padding(14.dp), fontSize = 15.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("나중에") } },
+        containerColor = PanelBg,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary
+    )
+}
+
+private fun isCatalogModelAvailable(context: Context, spec: FusionModelSpec): Boolean {
+    if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return false
+    spec.localPath?.let { return File(it).exists() && spec.canRunLocalRuntime }
+    spec.fileName?.let { return File(getModelDirectory(context), it).exists() && spec.canRunLocalRuntime }
+    return spec.availability == ModelAvailability.READY
+}
+
+private data class ModelMemoryUiInfo(
+    val totalRamGb: Float,
+    val availableRamGb: Float,
+    val warning: String?
+)
+
+private data class TokenRecommendation(
+    val value: Int,
+    val label: String,
+    val explanation: String
+)
+
+private fun getTotalRamGb(context: Context): Float {
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    val memoryInfo = ActivityManager.MemoryInfo()
+    activityManager?.getMemoryInfo(memoryInfo)
+    return bytesToGb(memoryInfo.totalMem)
+}
+
+private fun getAvailableRamGb(context: Context): Float {
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    val memoryInfo = ActivityManager.MemoryInfo()
+    activityManager?.getMemoryInfo(memoryInfo)
+    return bytesToGb(memoryInfo.availMem)
+}
+
+private fun buildModelMemoryInfo(context: Context, spec: FusionModelSpec): ModelMemoryUiInfo {
+    val totalRamGb = getTotalRamGb(context)
+    val availableRamGb = getAvailableRamGb(context)
+    return ModelMemoryUiInfo(
+        totalRamGb = totalRamGb,
+        availableRamGb = availableRamGb,
+        warning = buildModelMemoryWarning(spec, totalRamGb, availableRamGb)
+    )
+}
+
+private fun buildModelMemoryWarning(
+    spec: FusionModelSpec,
+    totalRamGb: Float,
+    availableRamGb: Float
+): String? {
+    if (spec.memoryClass == ModelMemoryClass.SERVER || spec.availability == ModelAvailability.REMOTE_ONLY) {
+        return "이 모델은 모바일 로컬 실행용이 아닙니다."
+    }
+    spec.minRecommendedRamGb?.let { minRam ->
+        if (totalRamGb < minRam) {
+            return "현재 기기 메모리로는 이 모델의 로컬 실행을 권장하지 않습니다."
+        }
+    }
+    spec.recommendedRamGb?.let { recommendedRam ->
+        if (totalRamGb < recommendedRam) {
+            return "이 모델은 현재 기기에서 메모리 압박이 발생할 수 있습니다."
+        }
+    }
+    if (availableRamGb > 0f && availableRamGb < 2f) {
+        return "현재 사용 가능한 메모리가 낮아 실행 전에 다른 작업을 정리하는 것이 좋습니다."
+    }
+    return null
+}
+
+private fun buildDeviceAwareTokenRecommendation(
+    spec: FusionModelSpec,
+    totalRamGb: Float,
+    availableRamGb: Float
+): TokenRecommendation {
+    val sizeGb = spec.modelSizeEstimateGb ?: when (spec.memoryClass) {
+        ModelMemoryClass.LOW -> 1.5f
+        ModelMemoryClass.MEDIUM -> 3.5f
+        ModelMemoryClass.HIGH -> 7.0f
+        ModelMemoryClass.SERVER -> 32.0f
+    }
+    val pressure = sizeGb + 1.0f
+    val base = when {
+        spec.memoryClass == ModelMemoryClass.SERVER || spec.availability == ModelAvailability.REMOTE_ONLY -> 0
+        totalRamGb <= 8.5f -> when {
+            pressure >= 8f -> 1024
+            pressure >= 5f -> 1536
+            else -> 2048
+        }
+        totalRamGb < 15.5f -> when {
+            pressure >= 10f -> 2048
+            pressure >= 6f -> 3072
+            else -> 4096
+        }
+        else -> when {
+            pressure >= 16f -> 4096
+            else -> 6144
+        }
+    }
+    val adjusted = if (availableRamGb in 0.1f..2.5f && base > 1024) {
+        (base / 2).coerceAtLeast(1024)
+    } else {
+        base
+    }
+    val label = if (adjusted <= 0) {
+        "권장 토큰 수: 원격 실행 권장"
+    } else if (totalRamGb >= 12f && adjusted >= 4096) {
+        "권장 토큰 수: 약 2048~$adjusted"
+    } else {
+        "권장 토큰 수: 약 $adjusted"
+    }
+    val explanation = "현재 기기의 메모리를 기준으로 권장값을 계산했습니다. 메모리가 부족한 기기에서는 긴 출력에서 속도 저하 또는 종료가 발생할 수 있습니다."
+    return TokenRecommendation(value = adjusted, label = label, explanation = explanation)
+}
+
+private fun applyDeviceAwareRecommendedSettings(
+    context: Context,
+    editor: SharedPreferences.Editor,
+    spec: FusionModelSpec
+) {
+    val memoryInfo = buildModelMemoryInfo(context, spec)
+    val tokenRecommendation = buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb)
+    if (tokenRecommendation.value > 0) {
+        editor.putInt(PrefMaxTokens, tokenRecommendation.value)
+    }
+    editor.putBoolean(PrefSpeculativeDecoding, spec.recommendedMtpEnabled)
+    editor.putBoolean(PrefReasoningEnabled, spec.recommendedReasoningEnabled)
+    if (spec.runtimeFormat == ModelRuntimeFormat.EXYNOS_AI_STUDIO) {
+        editor.putString(PrefAccelerator, AcceleratorMode.AUTO.name)
+    }
+    editor.apply()
+}
+
+private fun modelFootprintLabel(spec: FusionModelSpec): String {
+    return spec.modelSizeEstimateGb?.let { "약 ${formatGb(it)}GB" } ?: "메모리 ${spec.memoryClass.name}"
+}
+
+private fun compactCompatibilityLine(
+    memoryInfo: ModelMemoryUiInfo,
+    tokenRecommendation: TokenRecommendation
+): String {
+    return memoryInfo.warning ?: tokenRecommendation.label
+}
+
+private fun buildRuntimeNote(spec: FusionModelSpec): String {
+    return when (spec.availability) {
+        ModelAvailability.REMOTE_ONLY -> "이 항목은 원격 실행 후보입니다. 로컬 GPU/CPU 실행을 전제로 하지 않습니다."
+        ModelAvailability.NEEDS_CONVERSION -> "로컬 실행 전 변환과 실제 기기 호환성 확인이 필요합니다."
+        ModelAvailability.NEEDS_DOWNLOAD -> "로컬 파일을 가져온 뒤 현재 LiteRT/Gemma 실행 경로에서 확인해야 합니다."
+        ModelAvailability.UNSUPPORTED_ON_DEVICE -> "현재 앱의 로컬 실행 형식으로는 권장하지 않습니다."
+        else -> "로컬 파일이 준비된 경우 현재 설정의 GPU/CPU 경로에서 실행할 수 있습니다."
+    }
+}
+
+private fun buildLocalSelectionMessage(spec: FusionModelSpec, available: Boolean): String? {
+    if (available) return null
+    if (spec.externallyReferenced && spec.localPath.isNullOrBlank() && spec.availability == ModelAvailability.CUSTOM_IMPORTED) {
+        return "실행 준비 필요"
+    }
+    return when (spec.availability) {
+        ModelAvailability.NEEDS_DOWNLOAD -> "모델 파일을 먼저 가져와야 합니다."
+        ModelAvailability.NEEDS_CONVERSION -> "이 모델은 변환 후 사용할 수 있습니다."
+        ModelAvailability.REMOTE_ONLY -> "이 모델은 원격 실행이 필요합니다."
+        ModelAvailability.UNSUPPORTED_ON_DEVICE -> "현재 기기에서는 로컬 실행을 권장하지 않습니다."
+        else -> "모델 파일을 먼저 가져와야 합니다."
+    }
+}
+
+private fun openModelLink(context: Context, url: String?) {
+    if (url.isNullOrBlank()) {
+        Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
+        return
+    }
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "링크를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+    } catch (_: Exception) {
+        Toast.makeText(context, "링크를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun startModelDirectDownload(context: Context, spec: FusionModelSpec) {
+    val url = spec.directDownloadUrl
+    if (url.isNullOrBlank()) {
+        Toast.makeText(context, "다운로드 페이지를 열어 주세요.", Toast.LENGTH_SHORT).show()
+        openModelLink(context, spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl)
+        return
+    }
+    try {
+        val request = DownloadManager.Request(url.toUri()).apply {
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            setTitle(spec.directDownloadFileName ?: "${spec.displayName} 모델 파일")
+            setDescription("${spec.directDownloadFormat ?: "모델"} 파일 다운로드")
+            setAllowedOverMetered(false)
+            setAllowedOverRoaming(false)
+            setDestinationInExternalPublicDir(
+                Environment.DIRECTORY_DOWNLOADS,
+                spec.directDownloadFileName ?: Uri.parse(url).lastPathSegment ?: "${spec.id}.bin"
+            )
+        }
+        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+        if (manager == null) {
+            Toast.makeText(context, "모델 파일 다운로드를 시작할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        manager.enqueue(request)
+        Toast.makeText(context, "모델 파일 다운로드를 시작했습니다.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "다운로드가 완료되면 파일 가져오기로 모델 파일을 선택해 주세요.", Toast.LENGTH_LONG).show()
+    } catch (_: Exception) {
+        Toast.makeText(context, "모델 파일 다운로드를 시작할 수 없습니다.", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun bytesToGb(bytes: Long): Float {
+    if (bytes <= 0L) return 0f
+    return bytes / (1024f * 1024f * 1024f)
+}
+
+private fun formatGb(value: Float): String {
+    return String.format(Locale.US, "%.1f", value.coerceAtLeast(0f))
+}
+
+@Composable
+private fun ModelStorageManagerDialog(
+    refreshKey: Int,
+    currentModel: String,
+    onDismiss: () -> Unit,
+    onSelect: (FusionModelSpec) -> Unit,
+    onChanged: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var models by remember(refreshKey) { mutableStateOf(FusionModelCatalog.loadImported(context)) }
+    var deleteTarget by remember { mutableStateOf<FusionModelSpec?>(null) }
+    val internalFiles = remember(refreshKey) {
+        getModelDirectory(context).listFiles()?.filter { it.isFile }.orEmpty()
+    }
+    val totalSize = internalFiles.sumOf { it.length() } + models.sumOf { it.fileSizeBytes ?: 0L }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = PanelBg,
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.9f)
+                .navigationBarsPadding()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("모델 저장공간", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("가져온 모델과 외부 연결 파일을 관리합니다.", color = TextSecondary, fontSize = 13.sp)
+                Text("총 용량 약 ${formatBytes(totalSize)}", color = TextSecondary, fontSize = 12.sp)
+
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    item {
+                        Text("Fusion 내부 모델 파일", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    items(internalFiles) { file ->
+                        val spec = models.firstOrNull { it.localPath == file.absolutePath }
+                        StorageModelRow(
+                            name = spec?.displayName ?: file.name,
+                            source = "Fusion 내부 저장소",
+                            size = formatBytes(file.length()),
+                            runtimeFormat = FusionModelCatalog.runtimeFormatForFile(file.name).name,
+                            family = spec?.family?.name ?: ModelFamily.CUSTOM.name,
+                            status = if (file.exists()) "사용 가능" else "파일을 찾을 수 없습니다.",
+                            current = spec?.displayName == currentModel,
+                            actions = {
+                                FusionTextButton(onClick = {
+                                    onSelect(spec ?: FusionModelCatalog.importedSpec(file.name, file.absolutePath, ModelFamily.CUSTOM))
+                                }) { Text("선택", fontSize = 12.sp) }
+                                FusionTextButton(onClick = {
+                                    openModelFile(context, file)
+                                }) { Text("파일 열기", fontSize = 12.sp) }
+                                FusionTextButton(onClick = {
+                                    deleteTarget = spec ?: FusionModelCatalog.importedSpec(file.name, file.absolutePath, ModelFamily.CUSTOM)
+                                }) { Text("삭제", fontSize = 12.sp, color = DangerRed) }
+                            }
+                        )
+                    }
+                    item {
+                        Text("외부 연결 모델 파일", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    items(models.filter { it.externallyReferenced }) { spec ->
+                        val available = canOpenUri(context, spec.uriString)
+                        StorageModelRow(
+                            name = spec.displayName,
+                            source = "외부 파일 연결",
+                            size = spec.fileSizeBytes?.let { formatBytes(it) } ?: "크기 정보 없음",
+                            runtimeFormat = spec.runtimeFormat.name,
+                            family = spec.family.name,
+                            status = storageStatusLabel(spec, available),
+                            current = spec.displayName == currentModel,
+                            actions = {
+                                FusionTextButton(onClick = { onSelect(spec) }) { Text("선택", fontSize = 12.sp) }
+                                FusionTextButton(onClick = { openModelUri(context, spec.uriString) }) { Text("파일 열기", fontSize = 12.sp) }
+                                if (spec.availability == ModelAvailability.CUSTOM_IMPORTED && spec.localPath.isNullOrBlank()) {
+                                    FusionTextButton(onClick = {
+                                        scope.launch {
+                                            val copied = copyUriToModelFile(
+                                                context = context,
+                                                uri = Uri.parse(spec.uriString),
+                                                displayName = spec.originalFileName ?: spec.fileName ?: spec.displayName
+                                            )
+                                            if (copied == null) {
+                                                Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                FusionModelCatalog.saveImported(
+                                                    context,
+                                                    spec.copy(
+                                                        localPath = copied.absolutePath,
+                                                        fileName = copied.name,
+                                                        copiedInternally = true,
+                                                        externallyReferenced = false,
+                                                        sourceLabel = "사용자 가져오기",
+                                                        lastCheckedAt = System.currentTimeMillis()
+                                                    )
+                                                )
+                                                models = FusionModelCatalog.loadImported(context)
+                                                onChanged()
+                                                Toast.makeText(context, "실행용으로 복사했습니다.", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }) { Text("실행용으로 복사", fontSize = 12.sp) }
+                                }
+                                FusionTextButton(onClick = {
+                                    FusionModelCatalog.removeImported(context, spec)
+                                    models = FusionModelCatalog.loadImported(context)
+                                    onChanged()
+                                }) { Text("연결 해제", fontSize = 12.sp) }
+                            }
+                        )
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    FusionTextButton(onClick = onDismiss) { Text("닫기", fontSize = 13.sp) }
+                }
+            }
+        }
+    }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("모델 파일을 삭제하시겠습니까?") },
+            text = { Text("Fusion 내부 저장소의 모델 파일이 삭제됩니다.") },
+            confirmButton = {
+                FusionTextButton(onClick = {
+                    target.localPath?.let { File(it).delete() }
+                    FusionModelCatalog.removeImported(context, target)
+                    models = FusionModelCatalog.loadImported(context)
+                    deleteTarget = null
+                    onChanged()
+                }) { Text("삭제") }
+            },
+            dismissButton = { FusionTextButton(onClick = { deleteTarget = null }) { Text("취소") } },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
+        )
+    }
+}
+
+@Composable
+private fun StorageModelRow(
+    name: String,
+    source: String,
+    size: String,
+    runtimeFormat: String,
+    family: String,
+    status: String,
+    current: Boolean,
+    actions: @Composable RowScope.() -> Unit
+) {
+    Surface(shape = RoundedCornerShape(12.dp), color = if (current) BubbleBg else Color.Transparent) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(name, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("$source · $size · $runtimeFormat · $family", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(status, color = if (status == "사용 가능") AccentBlue else TextSecondary, fontSize = 12.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), content = actions)
+        }
+    }
+}
+
+private fun storageStatusLabel(spec: FusionModelSpec, uriAvailable: Boolean): String {
+    if (!uriAvailable) return "파일을 찾을 수 없습니다."
+    if (spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION) return "변환 필요"
+    if (spec.availability != ModelAvailability.CUSTOM_IMPORTED) return "실행 준비 필요"
+    if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return "실행 준비 필요"
+    return "사용 가능"
+}
+
+private fun isModelLikeFileName(name: String): Boolean {
+    val lower = name.lowercase(Locale.US)
+    return listOf(".litertlm", ".task", ".gguf", ".onnx", ".bin", ".safetensors").any { lower.endsWith(it) }
+}
+
+private fun getFileSizeFromUri(context: Context, uri: Uri): Long? {
+    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (sizeIndex >= 0 && cursor.moveToFirst()) {
+            return cursor.getLong(sizeIndex).takeIf { it > 0L }
+        }
+    }
+    return null
+}
+
+private fun canOpenUri(context: Context, uriString: String?): Boolean {
+    if (uriString.isNullOrBlank()) return false
+    return runCatching {
+        context.contentResolver.openInputStream(Uri.parse(uriString))?.close()
+        true
+    }.getOrDefault(false)
+}
+
+private fun openModelUri(context: Context, uriString: String?) {
+    if (uriString.isNullOrBlank()) {
+        Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
+        return
+    }
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(uriString), "application/octet-stream")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        })
+    } catch (_: Exception) {
+        Toast.makeText(context, "파일을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun openModelFile(context: Context, file: File) {
+    try {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/octet-stream")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        })
+    } catch (_: Exception) {
+        Toast.makeText(context, "파일을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 B"
+    val gb = bytes / (1024f * 1024f * 1024f)
+    if (gb >= 1f) return "약 ${formatGb(gb)}GB"
+    val mb = bytes / (1024f * 1024f)
+    return "약 ${String.format(Locale.US, "%.1f", mb)}MB"
+}
+
 @Composable
 private fun SettingSwitchRow(
     title: String,

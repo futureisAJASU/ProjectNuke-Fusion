@@ -15,6 +15,7 @@ import com.google.ai.edge.litertlm.SamplerConfig
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withContext
@@ -69,8 +70,10 @@ class LiteRtLlmEngine(
                 enableVisionBackend = false
             )
 
-            val systemText = buildSystemInstruction(messages, settings)
-            val promptText = buildPrompt(messages)
+            val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
+            val adaptedMessages = promptAdapter.buildMessages(messages)
+            val systemText = buildSystemInstruction(adaptedMessages, settings)
+            val promptText = buildPrompt(adaptedMessages)
 
             val conversationConfig = ConversationConfig(
                 systemInstruction = Contents.of(systemText),
@@ -98,7 +101,7 @@ class LiteRtLlmEngine(
                         }
                 }
 
-                output.toString().ifBlank {
+                promptAdapter.sanitizeOutput(output.toString()).ifBlank {
                     "모델 응답이 비어 있습니다."
                 }
             } catch (e: Throwable) {
@@ -140,8 +143,10 @@ class LiteRtLlmEngine(
                     enableVisionBackend = true
                 )
 
-                val systemText = buildSystemInstruction(messages, settings)
-                val promptText = buildPrompt(messages)
+                val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
+                val adaptedMessages = promptAdapter.buildMessages(messages)
+                val systemText = buildSystemInstruction(adaptedMessages, settings)
+                val promptText = buildPrompt(adaptedMessages)
 
                 val conversationConfig = ConversationConfig(
                     systemInstruction = Contents.of(systemText),
@@ -175,7 +180,7 @@ class LiteRtLlmEngine(
                         }
                 }
 
-                output.toString().ifBlank {
+                promptAdapter.sanitizeOutput(output.toString()).ifBlank {
                     "이미지 입력 처리 실패: 모델 응답이 비어 있습니다."
                 }
             } catch (e: Throwable) {
