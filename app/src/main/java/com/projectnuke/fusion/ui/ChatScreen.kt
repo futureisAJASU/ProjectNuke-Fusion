@@ -39,6 +39,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
@@ -85,6 +86,8 @@ import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
+import com.projectnuke.fusion.modelzoo.FusionModelCompatibility
+import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
 import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.modelzoo.ModelFamily
@@ -3117,6 +3120,11 @@ private fun ModelZooDetailDialog(
     onDirectDownload: () -> Unit,
     onCopyLink: () -> Unit
 ) {
+    val context = LocalContext.current
+    var overflowExpanded by remember { mutableStateOf(false) }
+    var compatibilityReport by remember { mutableStateOf<FusionModelCompatibilityReport?>(null) }
+    var showConversionGuide by remember { mutableStateOf(false) }
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(24.dp),
@@ -3133,7 +3141,13 @@ private fun ModelZooDetailDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(spec.displayName, color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                Text("${spec.sourceLabel ?: spec.family.name} · ${spec.family.name} · ${spec.runtimeFormat.name}", color = TextSecondary, fontSize = 12.sp)
+                Text(
+                    text = "${spec.sourceLabel ?: spec.family.name} • ${spec.family.name} • ${spec.runtimeFormat.name}",
+                    color = TextSecondary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 Column(
                     modifier = Modifier
                         .weight(1f, fill = true)
@@ -3145,7 +3159,7 @@ private fun ModelZooDetailDialog(
                     DetailMetaRow("기기 메모리", "약 ${formatGb(memoryInfo.totalRamGb)}GB")
                     DetailMetaRow("현재 사용 가능", "약 ${formatGb(memoryInfo.availableRamGb)}GB")
                     DetailMetaRow("권장 메모리", spec.recommendedRamGb?.let { "${it}GB 이상" } ?: "정보 없음")
-                    DetailMetaRow("권장 토큰 수", tokenRecommendation.label.removePrefix("권장 토큰 수: ").trim())
+                    DetailMetaRow("권장 토큰 수", tokenRecommendation.label.removePrefix("권장 토큰 수 ").trim())
                     if (spec.notes.isNotBlank()) Text(spec.notes, color = TextPrimary, fontSize = 13.sp)
                     Text(tokenRecommendation.explanation, color = TextSecondary, fontSize = 12.sp)
                     memoryInfo.warning?.let {
@@ -3155,7 +3169,7 @@ private fun ModelZooDetailDialog(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                "$it 긴 응답 또는 멀티태스킹 환경에서 종료될 수 있습니다. 가능하면 더 작은 모델 또는 낮은 최대 토큰 수를 권장합니다.",
+                                "$it 긴 응답 또는 멀티태스크 환경에서 종료될 수 있습니다. 가능하면 더 작은 모델 또는 더 낮은 최대 토큰 수를 권장합니다.",
                                 color = DangerRed,
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
@@ -3167,47 +3181,182 @@ private fun ModelZooDetailDialog(
                     Text("NPU/GPU/CPU 참고", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     Text(buildRuntimeNote(spec), color = TextSecondary, fontSize = 12.sp)
                     if (spec.supportsNpuCandidate) {
-                        Text("Exynos AI Studio 변환 후 NPU 실행 후보로 검토할 수 있습니다. 현재 앱에서 NPU 실행을 보장하지는 않습니다.", color = TextSecondary, fontSize = 12.sp)
+                        Text(
+                            "Exynos AI Studio 변환 후 NPU 실행 후보로 검토할 수 있습니다. 현재 앱에서 NPU 실행은 보장되지 않습니다.",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
                     }
                     if (spec.officialUrl == null && spec.downloadUrl == null) {
                         Text("등록된 링크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
                     }
+                    if (!available) {
+                        Text(
+                            "이 모델은 현재 로컬 모델로 바로 선택할 수 없습니다.",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
                     Spacer(modifier = Modifier.height(16.dp))
                 }
 
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .navigationBarsPadding()
                         .padding(top = 4.dp, bottom = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FusionTextButton(enabled = available, onClick = onSelect) { Text("선택", fontSize = 13.sp) }
-                        FusionTextButton(onClick = onApplyRecommendedSettings) { Text("권장 설정", fontSize = 13.sp) }
+                    val menuItemColors = MenuDefaults.itemColors(
+                        textColor = TextPrimary,
+                        leadingIconColor = TextPrimary,
+                        trailingIconColor = TextPrimary,
+                        disabledTextColor = TextSecondary,
+                        disabledLeadingIconColor = TextSecondary,
+                        disabledTrailingIconColor = TextSecondary
+                    )
+                    FusionTextButton(enabled = available, onClick = onSelect) {
+                        Text("선택", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Start
-                    ) {
-                        FusionTextButton(onClick = onUploadCustomModel) { Text("파일 가져오기", fontSize = 12.sp) }
-                        if (!spec.directDownloadUrl.isNullOrBlank()) {
-                            FusionTextButton(onClick = onDirectDownload) { Text("파일 다운로드", fontSize = 12.sp) }
-                        } else {
-                            FusionTextButton(enabled = (spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl) != null, onClick = onOpenModelPage) { Text("다운로드 페이지 열기", fontSize = 12.sp) }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    FusionTextButton(onClick = onApplyRecommendedSettings) {
+                        Text("권장 설정", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Box {
+                        FusionTextButton(onClick = { overflowExpanded = true }) {
+                            Text("⋯", fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Clip)
                         }
-                        FusionTextButton(enabled = spec.officialUrl != null, onClick = onOpenOfficial) { Text("세부 정보", fontSize = 12.sp) }
-                        FusionTextButton(enabled = spec.downloadUrl != null || spec.officialUrl != null, onClick = onCopyLink) { Text("링크 복사", fontSize = 12.sp) }
-                    }
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-                        FusionTextButton(onClick = onDismiss) { Text("닫기", fontSize = 12.sp) }
+                        DropdownMenu(
+                            expanded = overflowExpanded,
+                            onDismissRequest = { overflowExpanded = false },
+                            containerColor = PanelBg
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("파일 가져오기", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    onUploadCustomModel()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("다운로드 페이지 열기", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                enabled = (spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl) != null,
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    onOpenModelPage()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("세부 정보", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    if (spec.officialUrl != null) {
+                                        onOpenOfficial()
+                                    } else {
+                                        Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("링크 복사", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    if (spec.downloadUrl != null || spec.officialUrl != null || spec.modelPageUrl != null) {
+                                        onCopyLink()
+                                    } else {
+                                        Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("모델 호환성 검사", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    compatibilityReport = FusionModelCompatibility.check(context, spec)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("모델 변환 안내", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    if (spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION || spec.availability == ModelAvailability.NEEDS_CONVERSION) {
+                                        showConversionGuide = true
+                                    } else {
+                                        Toast.makeText(context, "이 모델은 현재 변환 안내 대상이 아닙니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("닫기", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    onDismiss()
+                                }
+                            )
+                        }
                     }
                 }
             }
         }
     }
-}
 
+    compatibilityReport?.let { report ->
+        AlertDialog(
+            onDismissRequest = { compatibilityReport = null },
+            title = { Text("모델 호환성 검사") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(report.summary)
+                    DetailMetaRow("상태", report.localExecutionStatus)
+                    DetailMetaRow("형식", report.formatLabel)
+                    DetailMetaRow("계열", report.familyLabel)
+                    DetailMetaRow("권장 토큰", report.recommendedMaxTokens.takeIf { it > 0 }?.toString() ?: "해당 없음")
+                    DetailMetaRow("가속기", report.recommendedAccelerator.name)
+                    DetailMetaRow("MTP", report.mtpRecommendation)
+                    DetailMetaRow("NPU", report.npuCandidateStatus)
+                    report.memoryWarning?.let { Text(it, color = DangerRed, fontSize = 12.sp) }
+                }
+            },
+            confirmButton = {
+                FusionTextButton(onClick = { compatibilityReport = null }) { Text("확인", maxLines = 1) }
+            },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
+        )
+    }
+
+    if (showConversionGuide) {
+        AlertDialog(
+            onDismissRequest = { showConversionGuide = false },
+            title = { Text("모델 변환 안내") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DetailMetaRow("현재 형식", spec.runtimeFormat.name)
+                    DetailMetaRow("권장 형식", ".litertlm 또는 .task")
+                    DetailMetaRow("상태", if (spec.supportsNpuCandidate) "NPU 후보" else "변환 필요")
+                    Text("현재 앱에서 자동 변환은 지원하지 않습니다.", color = TextSecondary, fontSize = 12.sp)
+                    Text("변환 후 파일 가져오기로 모델 파일을 선택해 주세요.", color = TextSecondary, fontSize = 12.sp)
+                }
+            },
+            confirmButton = {
+                FusionTextButton(onClick = { showConversionGuide = false }) { Text("확인", maxLines = 1) }
+            },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
+        )
+    }
+}
 @Composable
 private fun DetailMetaRow(
     label: String,
