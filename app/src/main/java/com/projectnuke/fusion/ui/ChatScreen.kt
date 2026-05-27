@@ -172,6 +172,9 @@ private const val PrefWebSearchEnabled = "web_search_enabled"
 private const val PrefSelectedModel = "selected_model"
 private const val PrefSelectedModelPath = "selected_model_path"
 private const val PrefSpeculativeDecoding = "speculative_decoding_enabled"
+private const val PrefFavoriteModelIds = "favorite_model_ids"
+private const val PrefHiddenModelIds = "hidden_model_ids"
+private const val PrefShowHiddenModels = "show_hidden_models"
 private val QuickPromptPresets = listOf(
     "자세히 설명해 주세요.",
     "핵심만 요약해 주세요.",
@@ -2712,8 +2715,36 @@ private fun ModelSelectDialog(
     onToggleWebSearch: () -> Unit
 ) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE) }
+    var favoriteModelIds by remember { mutableStateOf(prefs.getStringSet(PrefFavoriteModelIds, emptySet())?.toSet() ?: emptySet()) }
+    var hiddenModelIds by remember { mutableStateOf(prefs.getStringSet(PrefHiddenModelIds, emptySet())?.toSet() ?: emptySet()) }
+    var showHiddenModels by remember { mutableStateOf(prefs.getBoolean(PrefShowHiddenModels, false)) }
     val models = builtInModels.toList() + customModels.toList()
     val catalogModels = FusionModelCatalog.all(context)
+    val selectedSpecId = remember(currentModel, catalogModels) {
+        catalogModels.firstOrNull { it.displayName == currentModel }?.id
+    }
+    val selectedHiddenSpec = remember(selectedSpecId, hiddenModelIds, catalogModels) {
+        selectedSpecId?.takeIf { it in hiddenModelIds }?.let { id -> catalogModels.firstOrNull { it.id == id } }
+    }
+    val visibleCatalogModels = remember(catalogModels, hiddenModelIds, showHiddenModels) {
+        if (showHiddenModels) catalogModels else catalogModels.filterNot { it.id in hiddenModelIds }
+    }
+    val favoriteVisibleSpecs = remember(visibleCatalogModels, favoriteModelIds) {
+        visibleCatalogModels.filter { it.id in favoriteModelIds }
+    }
+    fun persistFavorite(ids: Set<String>) {
+        favoriteModelIds = ids
+        prefs.edit().putStringSet(PrefFavoriteModelIds, ids).apply()
+    }
+    fun persistHidden(ids: Set<String>) {
+        hiddenModelIds = ids
+        prefs.edit().putStringSet(PrefHiddenModelIds, ids).apply()
+    }
+    fun setShowHidden(enabled: Boolean) {
+        showHiddenModels = enabled
+        prefs.edit().putBoolean(PrefShowHiddenModels, enabled).apply()
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -2740,10 +2771,93 @@ private fun ModelSelectDialog(
                         FusionTextButton(onClick = onLinkExternalModel) { Text("외부 모델 파일 연결", fontSize = 13.sp) }
                         FusionTextButton(onClick = onOpenStorageManager) { Text("모델 저장공간", fontSize = 13.sp) }
                     }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = PanelBg,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { setShowHidden(!showHiddenModels) }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("숨긴 모델 표시", color = TextPrimary, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (showHiddenModels) "켜짐" else "꺼짐", color = AccentBlue, fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+
+                    selectedHiddenSpec?.let { selectedSpec ->
+                        if (!showHiddenModels) {
+                            ModelZooSection(
+                                title = "현재 사용 중",
+                                specs = listOf(selectedSpec),
+                                currentModel = currentModel,
+                                onSelect = { spec ->
+                                    val model = LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)
+                                    onSelect(model)
+                                },
+                                onUploadCustomModel = onUploadCustomModel,
+                                onApplyRecommendedSettings = { spec ->
+                                    applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
+                                    Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
+                                },
+                                favoriteModelIds = favoriteModelIds,
+                                hiddenModelIds = hiddenModelIds,
+                                showHiddenBadge = true,
+                                onToggleFavorite = { spec ->
+                                    val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
+                                    persistFavorite(next)
+                                    Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                                },
+                                onHideModel = { spec ->
+                                    persistHidden(hiddenModelIds + spec.id)
+                                    Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
+                                },
+                                onUnhideModel = { spec ->
+                                    persistHidden(hiddenModelIds - spec.id)
+                                    Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
+                                }
+                            )
+                        }
+                    }
+
+                    if (favoriteVisibleSpecs.isNotEmpty()) {
+                        ModelZooSection(
+                            title = "즐겨찾기",
+                            specs = favoriteVisibleSpecs,
+                            currentModel = currentModel,
+                            onSelect = { spec ->
+                                val model = LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)
+                                onSelect(model)
+                            },
+                            onUploadCustomModel = onUploadCustomModel,
+                            onApplyRecommendedSettings = { spec ->
+                                applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
+                                Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
+                            },
+                            favoriteModelIds = favoriteModelIds,
+                            hiddenModelIds = hiddenModelIds,
+                            showHiddenBadge = showHiddenModels,
+                            onToggleFavorite = { spec ->
+                                val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
+                                persistFavorite(next)
+                                Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                            },
+                            onHideModel = { spec ->
+                                persistHidden(hiddenModelIds + spec.id)
+                                Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
+                            },
+                            onUnhideModel = { spec ->
+                                persistHidden(hiddenModelIds - spec.id)
+                                Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
 
                     ModelZooSection(
                         title = "사용 가능한 모델",
-                        specs = catalogModels.filter { isCatalogModelAvailable(context, it) },
+                        specs = visibleCatalogModels.filter { isCatalogModelAvailable(context, it) && it.id !in favoriteModelIds },
                         currentModel = currentModel,
                         onSelect = { spec ->
                             val model = LocalModel(
@@ -2756,36 +2870,99 @@ private fun ModelSelectDialog(
                         },
                         onUploadCustomModel = onUploadCustomModel,
                         onApplyRecommendedSettings = { spec ->
-                            val prefs = context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
                             applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
                             Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        favoriteModelIds = favoriteModelIds,
+                        hiddenModelIds = hiddenModelIds,
+                        showHiddenBadge = showHiddenModels,
+                        onToggleFavorite = { spec ->
+                            val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
+                            persistFavorite(next)
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onHideModel = { spec ->
+                            persistHidden(hiddenModelIds + spec.id)
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onUnhideModel = { spec ->
+                            persistHidden(hiddenModelIds - spec.id)
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         }
                     )
                     ModelZooSection(
                         title = "변환이 필요한 모델",
-                        specs = catalogModels.filter { it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE },
+                        specs = visibleCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && it.id !in favoriteModelIds },
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
-                        onApplyRecommendedSettings = {}
+                        onApplyRecommendedSettings = {},
+                        favoriteModelIds = favoriteModelIds,
+                        hiddenModelIds = hiddenModelIds,
+                        showHiddenBadge = showHiddenModels,
+                        onToggleFavorite = { spec ->
+                            val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
+                            persistFavorite(next)
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onHideModel = { spec ->
+                            persistHidden(hiddenModelIds + spec.id)
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onUnhideModel = { spec ->
+                            persistHidden(hiddenModelIds - spec.id)
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
+                        }
                     )
                     ModelZooSection(
                         title = "원격 모델",
-                        specs = catalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY },
+                        specs = visibleCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && it.id !in favoriteModelIds },
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
-                        onApplyRecommendedSettings = {}
+                        onApplyRecommendedSettings = {},
+                        favoriteModelIds = favoriteModelIds,
+                        hiddenModelIds = hiddenModelIds,
+                        showHiddenBadge = showHiddenModels,
+                        onToggleFavorite = { spec ->
+                            val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
+                            persistFavorite(next)
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onHideModel = { spec ->
+                            persistHidden(hiddenModelIds + spec.id)
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onUnhideModel = { spec ->
+                            persistHidden(hiddenModelIds - spec.id)
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
+                        }
                     )
                     ModelZooSection(
                         title = "가져온 모델",
-                        specs = catalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED },
+                        specs = visibleCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && it.id !in favoriteModelIds },
                         currentModel = currentModel,
                         onSelect = { spec ->
                             onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
                         },
                         onUploadCustomModel = onUploadCustomModel,
-                        onApplyRecommendedSettings = {}
+                        onApplyRecommendedSettings = {},
+                        favoriteModelIds = favoriteModelIds,
+                        hiddenModelIds = hiddenModelIds,
+                        showHiddenBadge = showHiddenModels,
+                        onToggleFavorite = { spec ->
+                            val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
+                            persistFavorite(next)
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onHideModel = { spec ->
+                            persistHidden(hiddenModelIds + spec.id)
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
+                        },
+                        onUnhideModel = { spec ->
+                            persistHidden(hiddenModelIds - spec.id)
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
+                        }
                     )
 
                     Text(
@@ -3014,7 +3191,13 @@ private fun ModelZooSection(
     currentModel: String,
     onSelect: (FusionModelSpec) -> Unit,
     onUploadCustomModel: () -> Unit,
-    onApplyRecommendedSettings: (FusionModelSpec) -> Unit
+    onApplyRecommendedSettings: (FusionModelSpec) -> Unit,
+    favoriteModelIds: Set<String>,
+    hiddenModelIds: Set<String>,
+    showHiddenBadge: Boolean,
+    onToggleFavorite: (FusionModelSpec) -> Unit,
+    onHideModel: (FusionModelSpec) -> Unit,
+    onUnhideModel: (FusionModelSpec) -> Unit
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -3046,6 +3229,14 @@ private fun ModelZooSection(
                     Text("${spec.sourceLabel ?: spec.family.name} · ${spec.parameterLabel} · ${modelFootprintLabel(spec)}", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(localSelectionMessage ?: compactCompatibilityLine(memoryInfo, tokenRecommendation), color = if (memoryInfo.warning != null) DangerRed else TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (spec.id in favoriteModelIds) {
+                    Text("★", color = AccentBlue, fontSize = 12.sp, maxLines = 1)
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                if (showHiddenBadge && spec.id in hiddenModelIds) {
+                    Text("숨김", color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(modifier = Modifier.width(6.dp))
                 }
                 if (spec.displayName == currentModel) {
                     Text("사용 중", color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -3081,6 +3272,18 @@ private fun ModelZooSection(
             },
             onDirectDownload = {
                 showDirectDownloadConfirm = true
+            },
+            isFavorite = spec.id in favoriteModelIds,
+            isHidden = spec.id in hiddenModelIds,
+            onToggleFavorite = {
+                onToggleFavorite(spec)
+            },
+            onHideModel = {
+                onHideModel(spec)
+                selectedSpec = null
+            },
+            onUnhideModel = {
+                onUnhideModel(spec)
             },
             onCopyLink = {
                 val link = spec.directDownloadUrl ?: spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl
@@ -3118,6 +3321,11 @@ private fun ModelZooDetailDialog(
     onOpenOfficial: () -> Unit,
     onOpenModelPage: () -> Unit,
     onDirectDownload: () -> Unit,
+    isFavorite: Boolean,
+    isHidden: Boolean,
+    onToggleFavorite: () -> Unit,
+    onHideModel: () -> Unit,
+    onUnhideModel: () -> Unit,
     onCopyLink: () -> Unit
 ) {
     val context = LocalContext.current
@@ -3233,6 +3441,38 @@ private fun ModelZooDetailDialog(
                             onDismissRequest = { overflowExpanded = false },
                             containerColor = PanelBg
                         ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (isFavorite) "즐겨찾기에서 제거" else "즐겨찾기에 추가",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    onToggleFavorite()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (isHidden) "숨김 해제" else "모델 숨기기",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    if (isHidden) {
+                                        onUnhideModel()
+                                    } else {
+                                        onHideModel()
+                                    }
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("파일 가져오기", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
