@@ -3767,6 +3767,7 @@ private fun ModelZooSection(
     val clipboard = LocalClipboardManager.current
     var selectedSpec by remember { mutableStateOf<FusionModelSpec?>(null) }
     var showDirectDownloadConfirm by remember { mutableStateOf(false) }
+    var selectionDecision by remember { mutableStateOf<ModelSelectionDecision?>(null) }
     if (specs.isEmpty()) return
     Text(title, color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
     specs.forEach { spec ->
@@ -3842,8 +3843,31 @@ private fun ModelZooSection(
             localSelectionMessage = buildLocalSelectionMessage(spec, available),
             onDismiss = { selectedSpec = null },
             onSelect = {
-                onSelect(spec)
-                selectedSpec = null
+                val decision = evaluateModelSelectionDecision(
+                    spec = spec,
+                    currentModel = currentModel,
+                    memoryInfo = memoryInfo,
+                    recommendation = recommendationMap[spec.id]
+                )
+                logModelSelectionDecision(spec, memoryInfo, recommendationMap[spec.id], decision)
+                when (decision.level) {
+                    ModelSelectRiskLevel.DIRECT -> {
+                        onSelect(spec)
+                        Toast.makeText(context, "모델을 선택했습니다.", Toast.LENGTH_SHORT).show()
+                        selectedSpec = null
+                    }
+                    ModelSelectRiskLevel.CAUTION -> {
+                        selectionDecision = decision
+                    }
+                    ModelSelectRiskLevel.BLOCKED -> {
+                        if (decision.reason == "already selected") {
+                            Toast.makeText(context, "이미 선택된 모델입니다.", Toast.LENGTH_SHORT).show()
+                            selectedSpec = null
+                        } else {
+                            selectionDecision = decision
+                        }
+                    }
+                }
             },
             onUploadCustomModel = onUploadCustomModel,
             onApplyRecommendedSettings = {
@@ -3887,6 +3911,59 @@ private fun ModelZooSection(
                 onOpenBenchmark(spec.displayName, openHistory)
             }
         )
+        selectionDecision?.let { decision ->
+            if (decision.level == ModelSelectRiskLevel.CAUTION) {
+                AlertDialog(
+                    onDismissRequest = { selectionDecision = null },
+                    title = { Text("이 모델을 선택하시겠습니까?") },
+                    text = {
+                        Text(
+                            "현재 기기에서 메모리 부담이 발생할 수 있습니다. 긴 응답이나 멀티태스킹 환경에서는 앱이 종료될 수 있습니다.\n\n" +
+                                "모델: ${decision.spec.displayName}\n" +
+                                "예상 크기: ${modelFootprintLabel(decision.spec)}\n" +
+                                "기기 RAM: ${decision.deviceRamClass}\n" +
+                                "권장 maxTokens: ${decision.recommendedMaxTokens}\n" +
+                                "권장 등급: ${decision.recommendationTier}"
+                        )
+                    },
+                    confirmButton = {
+                        FusionTextButton(onClick = {
+                            onSelect(decision.spec)
+                            applyDeviceAwareRecommendedSettings(context, context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE).edit(), decision.spec)
+                            Toast.makeText(context, "모델과 권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
+                            logModelSelectionDecision(decision.spec, memoryInfo, recommendationMap[decision.spec.id], decision.copy(level = ModelSelectRiskLevel.DIRECT, reason = "selected with recommended settings"))
+                            selectionDecision = null
+                            selectedSpec = null
+                        }) { Text("권장 설정과 함께 선택") }
+                    },
+                    dismissButton = {
+                        Row {
+                            FusionTextButton(onClick = {
+                                onSelect(decision.spec)
+                                Toast.makeText(context, "모델을 선택했습니다.", Toast.LENGTH_SHORT).show()
+                                logModelSelectionDecision(decision.spec, memoryInfo, recommendationMap[decision.spec.id], decision.copy(level = ModelSelectRiskLevel.DIRECT, reason = "selected directly"))
+                                selectionDecision = null
+                                selectedSpec = null
+                            }) { Text("모델만 선택") }
+                            FusionTextButton(onClick = { selectionDecision = null }) { Text("취소") }
+                        }
+                    },
+                    containerColor = PanelBg,
+                    titleContentColor = TextPrimary,
+                    textContentColor = TextPrimary
+                )
+            } else {
+                AlertDialog(
+                    onDismissRequest = { selectionDecision = null },
+                    title = { Text("로컬 실행을 권장하지 않습니다.") },
+                    text = { Text(decision.blockMessage ?: "이 모델은 현재 기기에서 로컬 실행하기에 너무 클 수 있습니다. 서버 또는 원격 실행을 권장합니다.") },
+                    confirmButton = { FusionTextButton(onClick = { selectionDecision = null }) { Text("확인") } },
+                    containerColor = PanelBg,
+                    titleContentColor = TextPrimary,
+                    textContentColor = TextPrimary
+                )
+            }
+        }
         if (showDirectDownloadConfirm) {
             DirectDownloadConfirmDialog(
                 onDismiss = { showDirectDownloadConfirm = false },
@@ -4332,6 +4409,81 @@ private fun ModelZooDetailDialog(
             textContentColor = TextPrimary
         )
     }
+}
+
+private enum class ModelSelectRiskLevel { DIRECT, CAUTION, BLOCKED }
+
+private data class ModelSelectionDecision(
+    val spec: FusionModelSpec,
+    val level: ModelSelectRiskLevel,
+    val reason: String,
+    val recommendationTier: String,
+    val recommendedMaxTokens: Int,
+    val deviceRamClass: String,
+    val blockMessage: String? = null
+)
+
+private fun evaluateModelSelectionDecision(
+    spec: FusionModelSpec,
+    currentModel: String,
+    memoryInfo: ModelMemoryUiInfo,
+    recommendation: ModelRecommendationEvaluation?
+): ModelSelectionDecision {
+    if (spec.displayName == currentModel) {
+        return ModelSelectionDecision(spec, ModelSelectRiskLevel.BLOCKED, "already selected", recommendation?.tier ?: memoryInfo.tier, 0, ramClassLabel(memoryInfo.totalRamGb), "이미 선택된 모델입니다.")
+    }
+    val tier = recommendation?.tier ?: memoryInfo.tier
+    val available = isSelectableLocally(spec)
+    if (!available) {
+        val msg = when (spec.availability) {
+            ModelAvailability.NEEDS_DOWNLOAD -> "모델 파일을 먼저 가져와야 합니다."
+            ModelAvailability.NEEDS_CONVERSION -> "이 모델은 변환 후 사용할 수 있습니다."
+            ModelAvailability.REMOTE_ONLY -> "이 모델은 원격 실행이 필요합니다."
+            ModelAvailability.UNSUPPORTED_ON_DEVICE -> "로컬 실행을 권장하지 않습니다.\n\n이 모델은 현재 기기에서 로컬 실행하기에 너무 클 수 있습니다. 서버 또는 원격 실행을 권장합니다."
+            else -> "로컬 실행을 권장하지 않습니다.\n\n이 모델은 현재 기기에서 로컬 실행하기에 너무 클 수 있습니다. 서버 또는 원격 실행을 권장합니다."
+        }
+        return ModelSelectionDecision(spec, ModelSelectRiskLevel.BLOCKED, "not locally available", tier, recommendation?.recommendedTokens ?: 0, ramClassLabel(memoryInfo.totalRamGb), msg)
+    }
+    val sizeGb = spec.modelSizeEstimateGb ?: 0f
+    val eightGbClass = memoryInfo.totalRamGb in 7.0f..8.5f
+    val lowAvailRam = memoryInfo.availableRamGb < 1.25f
+    val highRisk = tier == "주의 필요" || tier == "권장하지 않음" ||
+        spec.memoryClass == ModelMemoryClass.HIGH ||
+        spec.recommendedDeviceClass in listOf(ModelRecommendedDeviceClass.RAM_12GB_RECOMMENDED, ModelRecommendedDeviceClass.RAM_16GB_RECOMMENDED, ModelRecommendedDeviceClass.SERVER_ONLY) && eightGbClass ||
+        (eightGbClass && sizeGb >= 4.0f) || lowAvailRam || !memoryInfo.warning.isNullOrBlank()
+    return ModelSelectionDecision(
+        spec = spec,
+        level = if (highRisk) ModelSelectRiskLevel.CAUTION else ModelSelectRiskLevel.DIRECT,
+        reason = if (highRisk) "caution confirmation" else "selected directly",
+        recommendationTier = tier,
+        recommendedMaxTokens = recommendation?.recommendedTokens ?: buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb).value,
+        deviceRamClass = ramClassLabel(memoryInfo.totalRamGb)
+    )
+}
+
+private fun isSelectableLocally(spec: FusionModelSpec): Boolean {
+    return spec.availability == ModelAvailability.READY || spec.availability == ModelAvailability.CUSTOM_IMPORTED
+}
+
+private fun ramClassLabel(totalRamGb: Float): String = when {
+    totalRamGb in 7.0f..8.5f -> "8GB급"
+    totalRamGb <= 12.5f -> "12GB급"
+    totalRamGb <= 16.5f -> "16GB급"
+    else -> "고메모리"
+}
+
+private fun logModelSelectionDecision(
+    spec: FusionModelSpec,
+    memoryInfo: ModelMemoryUiInfo,
+    recommendation: ModelRecommendationEvaluation?,
+    decision: ModelSelectionDecision
+) {
+    Log.d(
+        "FusionModelSelect",
+        "id=${spec.id}, name=${spec.displayName}, risk=${decision.level}, recommendationTier=${recommendation?.tier ?: memoryInfo.tier}, " +
+            "availability=${spec.availability}, modelSizeEstimateGb=${spec.modelSizeEstimateGb}, totalRamGb=${memoryInfo.totalRamGb}, " +
+            "availableRamGb=${memoryInfo.availableRamGb}, decision=${decision.reason}"
+    )
 }
 @Composable
 private fun DetailMetaRow(
