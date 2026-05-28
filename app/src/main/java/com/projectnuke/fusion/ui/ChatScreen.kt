@@ -92,6 +92,7 @@ import com.projectnuke.fusion.modelzoo.FusionModelSpec
 import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.modelzoo.ModelFamily
 import com.projectnuke.fusion.modelzoo.ModelMemoryClass
+import com.projectnuke.fusion.modelzoo.ModelRecommendedDeviceClass
 import com.projectnuke.fusion.modelzoo.ModelRuntimeFormat
 import com.projectnuke.fusion.modelzoo.deviceLabel
 import com.projectnuke.fusion.modelzoo.statusLabel
@@ -100,6 +101,10 @@ import com.projectnuke.fusion.search.SearchIntent
 import com.projectnuke.fusion.search.toStructuredContext
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
 import com.projectnuke.fusion.util.buildEffectiveSettingsLine
+import com.projectnuke.fusion.util.collectFusionSocInfo
+import com.projectnuke.fusion.util.fusionNpuCandidateLabel
+import com.projectnuke.fusion.util.fusionNpuNoteText
+import com.projectnuke.fusion.util.fusionNpuNoteTitle
 import java.io.File
 import java.net.URL
 import java.net.URLEncoder
@@ -2719,6 +2724,10 @@ private fun ModelSelectDialog(
     var favoriteModelIds by remember { mutableStateOf(prefs.getStringSet(PrefFavoriteModelIds, emptySet())?.toSet() ?: emptySet()) }
     var hiddenModelIds by remember { mutableStateOf(prefs.getStringSet(PrefHiddenModelIds, emptySet())?.toSet() ?: emptySet()) }
     var showHiddenModels by remember { mutableStateOf(prefs.getBoolean(PrefShowHiddenModels, false)) }
+    var searchQuery by remember { mutableStateOf("") }
+    var activeStatusFilter by remember { mutableStateOf("전체") }
+    var activeFamilyFilter by remember { mutableStateOf("전체") }
+    var modelViewMode by remember { mutableStateOf("전체 모델") }
     val models = builtInModels.toList() + customModels.toList()
     val catalogModels = FusionModelCatalog.all(context)
     val selectedSpecId = remember(currentModel, catalogModels) {
@@ -2730,6 +2739,81 @@ private fun ModelSelectDialog(
     val visibleCatalogModels = remember(catalogModels, hiddenModelIds, showHiddenModels) {
         if (showHiddenModels) catalogModels else catalogModels.filterNot { it.id in hiddenModelIds }
     }
+    val baseModels = remember(catalogModels, visibleCatalogModels, activeStatusFilter, hiddenModelIds) {
+        when (activeStatusFilter) {
+            "숨긴 모델" -> catalogModels.filter { it.id in hiddenModelIds }
+            else -> visibleCatalogModels
+        }
+    }
+    val statusFilteredModels = remember(baseModels, activeStatusFilter, context, favoriteModelIds) {
+        when (activeStatusFilter) {
+            "전체" -> baseModels
+            "즐겨찾기" -> baseModels.filter { it.id in favoriteModelIds }
+            "로컬 가능" -> baseModels.filter { isCatalogModelAvailable(context, it) || it.availability == ModelAvailability.CUSTOM_IMPORTED }
+            "변환 필요" -> baseModels.filter { it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE }
+            "원격 전용" -> baseModels.filter { it.availability == ModelAvailability.REMOTE_ONLY }
+            "8GB 권장" -> baseModels.filter { (it.recommendedRamGb ?: 0) <= 8 && (it.recommendedRamGb ?: 0) > 0 }
+            "숨긴 모델" -> baseModels
+            else -> baseModels
+        }
+    }
+    val familyFilteredModels = remember(statusFilteredModels, activeFamilyFilter) {
+        if (activeFamilyFilter == "전체") statusFilteredModels
+        else statusFilteredModels.filter { it.family.name.equals(activeFamilyFilter, ignoreCase = true) }
+    }
+    val normalizedSearch = remember(searchQuery) { searchQuery.trim().lowercase(Locale.getDefault()) }
+    val filteredCatalogModels = remember(familyFilteredModels, normalizedSearch) {
+        if (normalizedSearch.isBlank()) {
+            familyFilteredModels
+        } else {
+            familyFilteredModels.filter { spec ->
+                listOf(
+                    spec.displayName,
+                    spec.family.name,
+                    spec.parameterLabel,
+                    spec.runtimeFormat.name,
+                    spec.sourceLabel ?: "",
+                    spec.notes
+                ).any { it.lowercase(Locale.getDefault()).contains(normalizedSearch) }
+            }
+        }
+    }
+    val deviceSummary = remember(catalogModels) {
+        val info = ActivityManager.MemoryInfo()
+        (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.getMemoryInfo(info)
+        val total = info.totalMem / (1024f * 1024f * 1024f)
+        val avail = info.availMem / (1024f * 1024f * 1024f)
+        Triple(total, avail, info.lowMemory)
+    }
+    val recommendedEvaluations = remember(filteredCatalogModels, deviceSummary, currentModel) {
+        filteredCatalogModels.map { spec ->
+            evaluateModelRecommendation(
+                spec = spec,
+                totalRamGb = deviceSummary.first,
+                availableRamGb = deviceSummary.second,
+                lowMemory = deviceSummary.third,
+                isCurrentSelected = spec.displayName == currentModel,
+                isFavorite = spec.id in favoriteModelIds,
+                isLocalAvailable = isCatalogModelAvailable(context, spec)
+            )
+        }
+    }
+    recommendedEvaluations.forEach { evaluation ->
+        val spec = evaluation.spec
+        Log.d(
+            "FusionModelRecommend",
+            "id=${spec.id}, name=${spec.displayName}, availability=${spec.availability}, memoryClass=${spec.memoryClass}, " +
+                "recommendedDeviceClass=${spec.recommendedDeviceClass}, minRam=${spec.minRecommendedRamGb}, " +
+                "recommendedRam=${spec.recommendedRamGb}, sizeGb=${spec.modelSizeEstimateGb}, totalRam=${deviceSummary.first}, " +
+                "availableRam=${deviceSummary.second}, hidden=${spec.id in hiddenModelIds}, favorite=${spec.id in favoriteModelIds}, " +
+                "current=${spec.displayName == currentModel}, tier=${evaluation.tier}, ramClass=${evaluation.deviceRamClass}, included=${evaluation.includedInRecommendedLocal}, includeReason=${evaluation.includeReason}, reason=${evaluation.reason}"
+        )
+    }
+    val recommendedBest = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "권장" } }
+    val recommendedExperimental = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "실험 가능" } }
+    val recommendedTop = remember(recommendedBest, recommendedExperimental) { recommendedBest + recommendedExperimental }
+    val recommendedCaution = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "주의 필요" } }
+    val recommendedNot = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.tier == "권장하지 않음" || it.tier == "원격 전용" } }
     val favoriteVisibleSpecs = remember(visibleCatalogModels, favoriteModelIds) {
         visibleCatalogModels.filter { it.id in favoriteModelIds }
     }
@@ -2770,6 +2854,76 @@ private fun ModelSelectDialog(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FusionTextButton(onClick = onLinkExternalModel) { Text("외부 모델 파일 연결", fontSize = 13.sp) }
                         FusionTextButton(onClick = onOpenStorageManager) { Text("모델 저장공간", fontSize = 13.sp) }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("전체 모델", "내 기기에 추천").forEach { label ->
+                            CompactFilterChip(
+                                label = label,
+                                selected = modelViewMode == label,
+                                onClick = { modelViewMode = label }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = { Text("모델을 검색합니다.", color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        singleLine = true,
+                        textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentBlue,
+                            unfocusedBorderColor = LineColor,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = AccentBlue
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("전체", "즐겨찾기", "로컬 가능", "변환 필요", "원격 전용", "8GB 권장", "숨긴 모델").forEach { label ->
+                            CompactFilterChip(
+                                label = label,
+                                selected = activeStatusFilter == label,
+                                onClick = {
+                                    activeStatusFilter = label
+                                    if (label == "전체") activeFamilyFilter = "전체"
+                                }
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(
+                            "전체" to "전체",
+                            "GEMMA" to "Gemma",
+                            "QWEN" to "Qwen",
+                            "LLAMA" to "Llama",
+                            "PHI" to "Phi",
+                            "DEEPSEEK" to "DeepSeek",
+                            "MISTRAL" to "Mistral",
+                            "KIMI" to "Kimi",
+                            "CUSTOM" to "Custom"
+                        ).forEach { (key, label) ->
+                            CompactFilterChip(
+                                label = label,
+                                selected = activeFamilyFilter == key,
+                                onClick = { activeFamilyFilter = key }
+                            )
+                        }
                     }
                     Surface(
                         shape = RoundedCornerShape(10.dp),
@@ -2822,10 +2976,96 @@ private fun ModelSelectDialog(
                         }
                     }
 
-                    if (favoriteVisibleSpecs.isNotEmpty()) {
+                    val favoriteVisibleSpecs = filteredCatalogModels.filter { it.id in favoriteModelIds }
+                    if (modelViewMode == "내 기기에 추천") {
+                        Surface(shape = RoundedCornerShape(10.dp), color = PanelBg, modifier = Modifier.fillMaxWidth()) {
+                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text("기기 메모리: 약 ${formatGb(deviceSummary.first)}GB", color = TextSecondary, fontSize = 12.sp)
+                                Text("현재 사용 가능: 약 ${formatGb(deviceSummary.second)}GB", color = TextSecondary, fontSize = 12.sp)
+                                if (deviceSummary.third) Text("저메모리 모드를 권장합니다.", color = DangerRed, fontSize = 12.sp)
+                            }
+                        }
+                        val selectedEval = recommendedEvaluations.firstOrNull { it.spec.displayName == currentModel && it.tier !in listOf("권장", "실험 가능") }
+                        selectedEval?.let {
+                            ModelZooSection(
+                                title = "현재 사용 중",
+                                specs = listOf(it.spec),
+                                currentModel = currentModel,
+                                onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
+                                onUploadCustomModel = onUploadCustomModel,
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
+                                favoriteModelIds = favoriteModelIds,
+                                hiddenModelIds = hiddenModelIds,
+                                showHiddenBadge = showHiddenModels,
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
+                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                            )
+                            Text("현재 선택된 모델은 이 기기에서 안정적으로 실행되지 않을 수 있습니다.", color = DangerRed, fontSize = 12.sp)
+                        }
+                        if (recommendedBest.isNotEmpty()) {
+                            ModelZooSection(
+                                title = "권장 모델",
+                                specs = recommendedBest.map { it.spec },
+                                currentModel = currentModel,
+                                onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
+                                onUploadCustomModel = onUploadCustomModel,
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
+                                favoriteModelIds = favoriteModelIds,
+                                hiddenModelIds = hiddenModelIds,
+                                showHiddenBadge = showHiddenModels,
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
+                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                            )
+                        }
+                        if (recommendedExperimental.isNotEmpty()) {
+                            ModelZooSection(
+                                title = "실험 가능한 모델",
+                                specs = recommendedExperimental.map { it.spec },
+                                currentModel = currentModel,
+                                onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
+                                onUploadCustomModel = onUploadCustomModel,
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
+                                favoriteModelIds = favoriteModelIds,
+                                hiddenModelIds = hiddenModelIds,
+                                showHiddenBadge = showHiddenModels,
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
+                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                            )
+                        }
+                        if (recommendedCaution.isNotEmpty()) {
+                            ModelZooSection(
+                                title = "주의가 필요한 모델",
+                                specs = recommendedCaution.map { it.spec },
+                                currentModel = currentModel,
+                                onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
+                                onUploadCustomModel = onUploadCustomModel,
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
+                                favoriteModelIds = favoriteModelIds,
+                                hiddenModelIds = hiddenModelIds,
+                                showHiddenBadge = showHiddenModels,
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
+                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                            )
+                        }
+                        if (recommendedTop.isEmpty() && recommendedCaution.isEmpty()) {
+                            Text("현재 기기에 추천할 수 있는 로컬 모델이 없습니다.", color = TextSecondary, fontSize = 13.sp)
+                            Text("전체 모델에서 변환 필요 또는 원격 모델을 확인해 주세요.", color = TextSecondary, fontSize = 12.sp)
+                        }
+                        FusionTextButton(onClick = { activeStatusFilter = "전체"; activeFamilyFilter = "전체"; modelViewMode = "전체 모델" }) {
+                            Text("전체 모델로 보기", fontSize = 12.sp)
+                        }
+                    } else if (favoriteVisibleSpecs.isNotEmpty() && activeStatusFilter == "전체") {
                         ModelZooSection(
                             title = "즐겨찾기",
-                            specs = favoriteVisibleSpecs,
+                        specs = favoriteVisibleSpecs,
                             currentModel = currentModel,
                             onSelect = { spec ->
                                 val model = LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)
@@ -2855,9 +3095,10 @@ private fun ModelSelectDialog(
                         )
                     }
 
+                    if (modelViewMode != "내 기기에 추천") {
                     ModelZooSection(
                         title = "사용 가능한 모델",
-                        specs = visibleCatalogModels.filter { isCatalogModelAvailable(context, it) && it.id !in favoriteModelIds },
+                        specs = filteredCatalogModels.filter { isCatalogModelAvailable(context, it) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
                         currentModel = currentModel,
                         onSelect = { spec ->
                             val model = LocalModel(
@@ -2888,11 +3129,12 @@ private fun ModelSelectDialog(
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
-                        }
+                        },
+                        recommendationMap = emptyMap()
                     )
                     ModelZooSection(
                         title = "변환이 필요한 모델",
-                        specs = visibleCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && it.id !in favoriteModelIds },
+                        specs = filteredCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -2916,7 +3158,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "원격 모델",
-                        specs = visibleCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && it.id !in favoriteModelIds },
+                        specs = filteredCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -2940,7 +3182,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "가져온 모델",
-                        specs = visibleCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && it.id !in favoriteModelIds },
+                        specs = filteredCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
                         currentModel = currentModel,
                         onSelect = { spec ->
                             onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
@@ -2964,6 +3206,31 @@ private fun ModelSelectDialog(
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         }
                     )
+                    if (searchQuery.isNotBlank() && filteredCatalogModels.isEmpty()) {
+                        Text(
+                            text = "검색 결과가 없습니다.",
+                            color = TextSecondary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text("다른 키워드로 검색해 보세요.", color = TextSecondary, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp)
+                                .height(1.dp)
+                                .background(LineColor)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "전체 모델",
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    }
 
                     Text(
                         text = "기존 Gemma 다운로드",
@@ -3185,6 +3452,32 @@ private fun CompactToggleChip(
 }
 
 @Composable
+private fun CompactFilterChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) AccentBlue.copy(alpha = 0.18f) else PanelBg,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (selected) AccentBlue.copy(alpha = 0.65f) else LineColor
+        ),
+        modifier = Modifier.clickable { onClick() }
+    ) {
+        Text(
+            text = label,
+            color = if (selected) AccentBlue else TextSecondary,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+        )
+    }
+}
+
+@Composable
 private fun ModelZooSection(
     title: String,
     specs: List<FusionModelSpec>,
@@ -3197,7 +3490,8 @@ private fun ModelZooSection(
     showHiddenBadge: Boolean,
     onToggleFavorite: (FusionModelSpec) -> Unit,
     onHideModel: (FusionModelSpec) -> Unit,
-    onUnhideModel: (FusionModelSpec) -> Unit
+    onUnhideModel: (FusionModelSpec) -> Unit,
+    recommendationMap: Map<String, ModelRecommendationEvaluation> = emptyMap()
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -3228,7 +3522,18 @@ private fun ModelZooSection(
                     Spacer(modifier = Modifier.height(2.dp))
                     Text("${spec.sourceLabel ?: spec.family.name} · ${spec.parameterLabel} · ${modelFootprintLabel(spec)}", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.height(2.dp))
-                    Text(localSelectionMessage ?: compactCompatibilityLine(memoryInfo, tokenRecommendation), color = if (memoryInfo.warning != null) DangerRed else TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val rec = recommendationMap[spec.id]
+                    Text(
+                        rec?.reason ?: (localSelectionMessage ?: compactCompatibilityLine(memoryInfo, tokenRecommendation)),
+                        color = if (rec?.tier == "주의 필요" || memoryInfo.warning != null) DangerRed else TextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    rec?.let {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text("권장 설정: maxTokens ${it.recommendedTokens} · ${it.hint}", color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
                 if (spec.id in favoriteModelIds) {
                     Text("★", color = AccentBlue, fontSize = 12.sp, maxLines = 1)
@@ -3329,6 +3634,30 @@ private fun ModelZooDetailDialog(
     onCopyLink: () -> Unit
 ) {
     val context = LocalContext.current
+    val socInfo = remember { collectFusionSocInfo() }
+    LaunchedEffect(spec.id, memoryInfo.totalRamGb, memoryInfo.availableRamGb, memoryInfo.tier, memoryInfo.warning) {
+        val ramClass = when {
+            memoryInfo.totalRamGb in 7.0f..8.5f -> "8GB"
+            memoryInfo.totalRamGb <= 12.5f -> "12GB"
+            memoryInfo.totalRamGb <= 16.5f -> "16GB"
+            else -> "HIGH"
+        }
+        val warningCategory = when {
+            memoryInfo.warning.isNullOrBlank() -> "none"
+            memoryInfo.warning.contains("원격", ignoreCase = false) -> "remote"
+            memoryInfo.warning.contains("권장하지 않습니다") -> "not_recommended"
+            memoryInfo.warning.contains("변환") -> "conversion"
+            memoryInfo.warning.contains("메모리", ignoreCase = false) -> "memory"
+            else -> "general"
+        }
+        Log.d(
+            "FusionModelRecommend",
+            "detail id=${spec.id}, name=${spec.displayName}, sizeGb=${spec.modelSizeEstimateGb}, memoryClass=${spec.memoryClass}, " +
+                "recommendedDeviceClass=${spec.recommendedDeviceClass}, availability=${spec.availability}, minRam=${spec.minRecommendedRamGb}, " +
+                "recommendedRam=${spec.recommendedRamGb}, totalRam=${memoryInfo.totalRamGb}, availableRam=${memoryInfo.availableRamGb}, " +
+                "ramClass=$ramClass, tier=${memoryInfo.tier}, warningCategory=$warningCategory, warning=${memoryInfo.warning}"
+        )
+    }
     var overflowExpanded by remember { mutableStateOf(false) }
     var compatibilityReport by remember { mutableStateOf<FusionModelCompatibilityReport?>(null) }
     var showConversionGuide by remember { mutableStateOf(false) }
@@ -3367,6 +3696,7 @@ private fun ModelZooDetailDialog(
                     DetailMetaRow("기기 메모리", "약 ${formatGb(memoryInfo.totalRamGb)}GB")
                     DetailMetaRow("현재 사용 가능", "약 ${formatGb(memoryInfo.availableRamGb)}GB")
                     DetailMetaRow("권장 메모리", spec.recommendedRamGb?.let { "${it}GB 이상" } ?: "정보 없음")
+                    DetailMetaRow("권장 등급", memoryInfo.tier)
                     DetailMetaRow("권장 토큰 수", tokenRecommendation.label.removePrefix("권장 토큰 수 ").trim())
                     if (spec.notes.isNotBlank()) Text(spec.notes, color = TextPrimary, fontSize = 13.sp)
                     Text(tokenRecommendation.explanation, color = TextSecondary, fontSize = 12.sp)
@@ -3386,15 +3716,16 @@ private fun ModelZooDetailDialog(
                     }
                     spec.localExecutionWarning?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
                     localSelectionMessage?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
-                    Text("NPU/GPU/CPU 참고", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text(fusionNpuNoteTitle(socInfo.detectedSocVendor), color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    DetailMetaRow("감지된 AP", socInfo.vendorLabel)
+                    DetailMetaRow("SoC", socInfo.compactSocLabel)
                     Text(buildRuntimeNote(spec), color = TextSecondary, fontSize = 12.sp)
-                    if (spec.supportsNpuCandidate) {
-                        Text(
-                            "Exynos AI Studio 변환 후 NPU 실행 후보로 검토할 수 있습니다. 현재 앱에서 NPU 실행은 보장되지 않습니다.",
-                            color = TextSecondary,
-                            fontSize = 12.sp
-                        )
-                    }
+                    Text(fusionNpuNoteText(socInfo.detectedSocVendor), color = TextSecondary, fontSize = 12.sp)
+                    Text(
+                        fusionNpuCandidateLabel(socInfo.detectedSocVendor, spec.supportsNpuCandidate),
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
                     if (spec.officialUrl == null && spec.downloadUrl == null) {
                         Text("등록된 링크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
                     }
@@ -3711,7 +4042,8 @@ private fun isCatalogModelAvailable(context: Context, spec: FusionModelSpec): Bo
 private data class ModelMemoryUiInfo(
     val totalRamGb: Float,
     val availableRamGb: Float,
-    val warning: String?
+    val warning: String?,
+    val tier: String
 )
 
 private data class TokenRecommendation(
@@ -3719,6 +4051,120 @@ private data class TokenRecommendation(
     val label: String,
     val explanation: String
 )
+
+private data class ModelRecommendationEvaluation(
+    val spec: FusionModelSpec,
+    val tier: String,
+    val reason: String,
+    val recommendedTokens: Int,
+    val hint: String,
+    val deviceRamClass: String,
+    val includedInRecommendedLocal: Boolean,
+    val includeReason: String
+)
+
+private fun evaluateModelRecommendation(
+    spec: FusionModelSpec,
+    totalRamGb: Float,
+    availableRamGb: Float,
+    lowMemory: Boolean,
+    isCurrentSelected: Boolean,
+    isFavorite: Boolean,
+    isLocalAvailable: Boolean
+): ModelRecommendationEvaluation {
+    val token = buildDeviceAwareTokenRecommendation(spec, totalRamGb, availableRamGb).value.coerceAtLeast(1024)
+    val hintParts = mutableListOf("MTP 끔")
+    if (!spec.recommendedReasoningEnabled || totalRamGb <= 8.5f) hintParts += "Reasoning 끔"
+    val hint = hintParts.distinct().joinToString(" · ")
+    val effectiveTotalRamGb = when {
+        totalRamGb >= 7.0f && totalRamGb <= 8.5f -> 8.0f
+        totalRamGb <= 12.5f -> 12.0f
+        totalRamGb <= 16.5f -> 16.0f
+        else -> totalRamGb
+    }
+    val ramClass = when {
+        totalRamGb in 7.0f..8.5f -> "8GB"
+        totalRamGb <= 12.5f -> "12GB"
+        totalRamGb <= 16.5f -> "16GB"
+        else -> "HIGH"
+    }
+    val minRam = spec.minRecommendedRamGb ?: 0
+    val recommendedRam = spec.recommendedRamGb ?: minRam
+    val isEightGbSafe = spec.recommendedDeviceClass == ModelRecommendedDeviceClass.RAM_8GB_SAFE
+    val isSmallModel = spec.memoryClass == ModelMemoryClass.LOW || (spec.modelSizeEstimateGb ?: Float.MAX_VALUE) <= 2.5f
+    val meetsMinimum = minRam <= 0 || effectiveTotalRamGb >= minRam || (minRam == 8 && totalRamGb >= 7.0f)
+    val slightlyBelowMinimum = minRam > 0 && effectiveTotalRamGb + 2.0f >= minRam
+    val sizeGb = spec.modelSizeEstimateGb ?: when (spec.memoryClass) {
+        ModelMemoryClass.LOW -> 1.5f
+        ModelMemoryClass.MEDIUM -> 3.5f
+        ModelMemoryClass.HIGH -> 7.0f
+        ModelMemoryClass.SERVER -> 32.0f
+    }
+    val sizeTier = when (ramClass) {
+        "8GB" -> when {
+            sizeGb >= 5.0f -> "권장하지 않음"
+            sizeGb >= 4.0f -> "주의 필요"
+            sizeGb > 3.0f -> "주의 필요"
+            sizeGb > 1.5f -> "실험 가능"
+            else -> "권장"
+        }
+        "12GB" -> when {
+            sizeGb > 7.0f -> "권장하지 않음"
+            sizeGb > 5.0f -> "주의 필요"
+            sizeGb > 3.0f -> "실험 가능"
+            else -> "권장"
+        }
+        "16GB" -> when {
+            sizeGb > 10.0f -> "권장하지 않음"
+            sizeGb > 5.0f -> "실험 가능"
+            else -> "권장"
+        }
+        else -> if (sizeGb > 12.0f) "주의 필요" else "권장"
+    }
+    val tier = when {
+        spec.availability == ModelAvailability.REMOTE_ONLY || spec.recommendedDeviceClass == ModelRecommendedDeviceClass.SERVER_ONLY -> "원격 전용"
+        spec.memoryClass == ModelMemoryClass.SERVER -> "권장하지 않음"
+        spec.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "권장하지 않음"
+        sizeTier == "권장하지 않음" -> "권장하지 않음"
+        sizeTier == "주의 필요" -> "주의 필요"
+        isEightGbSafe && effectiveTotalRamGb >= 8.0f && isSmallModel -> "권장"
+        isEightGbSafe && effectiveTotalRamGb >= 8.0f -> "실험 가능"
+        spec.availability == ModelAvailability.READY && isSmallModel && meetsMinimum -> "권장"
+        spec.availability == ModelAvailability.CUSTOM_IMPORTED && isSmallModel && meetsMinimum -> "권장"
+        recommendedRam > 0 && effectiveTotalRamGb >= recommendedRam -> "권장"
+        meetsMinimum -> "실험 가능"
+        slightlyBelowMinimum -> "주의 필요"
+        else -> "권장하지 않음"
+    }
+    val availableMemoryVeryLow = lowMemory || availableRamGb < 1.25f
+    val shouldDowngradeForAvailableMemory = availableMemoryVeryLow && !isCurrentSelected && !(isEightGbSafe && isSmallModel)
+    val downgradedTier = when {
+        shouldDowngradeForAvailableMemory && tier == "권장" -> "실험 가능"
+        shouldDowngradeForAvailableMemory && tier == "실험 가능" -> "주의 필요"
+        else -> tier
+    }
+    val reason = when (downgradedTier) {
+        "권장" -> if (availableRamGb < 2.0f) "현재 사용 가능한 메모리가 낮아 실행 전에 다른 앱을 정리하는 것이 좋습니다." else "현재 기기 메모리 기준으로 안정적인 소형 모델입니다."
+        "실험 가능" -> if (spec.availability == ModelAvailability.NEEDS_CONVERSION) "변환이 필요하지만 메모리 기준은 충족합니다." else "8GB 기기에서 실험하기 적합합니다."
+        "주의 필요" -> if (availableRamGb < 2.0f) "현재 사용 가능한 메모리가 낮아 실행 전에 다른 앱을 정리하는 것이 좋습니다." else "긴 응답 또는 멀티태스킹 환경에서 종료될 수 있습니다. 가능하면 낮은 최대 토큰 수를 권장합니다."
+        "권장하지 않음" -> "현재 기기 메모리 대비 모델 요구사항이 높습니다."
+        else -> "이 모델은 원격 실행을 권장합니다."
+    }
+    val includeBySizeRule = when (ramClass) {
+        "8GB" -> when {
+            sizeGb >= 5.0f -> false
+            sizeGb >= 4.0f -> isCurrentSelected || isFavorite || isLocalAvailable
+            else -> true
+        }
+        "12GB" -> sizeGb <= 7.0f
+        "16GB" -> sizeGb <= 10.0f
+        else -> true
+    }
+    val includeByAvailability = downgradedTier in listOf("권장", "실험 가능", "주의 필요")
+    val included = includeByAvailability && includeBySizeRule
+    val includeReason = if (included) "included" else if (!includeByAvailability) "tier_excluded" else "size_cutoff"
+    return ModelRecommendationEvaluation(spec, downgradedTier, reason, token, hint, ramClass, included, includeReason)
+}
 
 private fun getTotalRamGb(context: Context): Float {
     val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
@@ -3735,37 +4181,57 @@ private fun getAvailableRamGb(context: Context): Float {
 }
 
 private fun buildModelMemoryInfo(context: Context, spec: FusionModelSpec): ModelMemoryUiInfo {
+    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+    val memoryInfo = ActivityManager.MemoryInfo()
+    activityManager?.getMemoryInfo(memoryInfo)
     val totalRamGb = getTotalRamGb(context)
     val availableRamGb = getAvailableRamGb(context)
+    val evaluation = evaluateModelRecommendation(
+        spec = spec,
+        totalRamGb = totalRamGb,
+        availableRamGb = availableRamGb,
+        lowMemory = memoryInfo.lowMemory,
+        isCurrentSelected = false,
+        isFavorite = false,
+        isLocalAvailable = isCatalogModelAvailable(context, spec)
+    )
     return ModelMemoryUiInfo(
         totalRamGb = totalRamGb,
         availableRamGb = availableRamGb,
-        warning = buildModelMemoryWarning(spec, totalRamGb, availableRamGb)
+        warning = buildModelMemoryWarning(spec, totalRamGb, availableRamGb, evaluation),
+        tier = evaluation.tier
     )
 }
 
 private fun buildModelMemoryWarning(
     spec: FusionModelSpec,
     totalRamGb: Float,
-    availableRamGb: Float
+    availableRamGb: Float,
+    evaluation: ModelRecommendationEvaluation
 ): String? {
-    if (spec.memoryClass == ModelMemoryClass.SERVER || spec.availability == ModelAvailability.REMOTE_ONLY) {
+    if (evaluation.tier == "원격 전용") {
         return "이 모델은 모바일 로컬 실행용이 아닙니다."
     }
-    spec.minRecommendedRamGb?.let { minRam ->
-        if (totalRamGb < minRam) {
-            return "현재 기기 메모리로는 이 모델의 로컬 실행을 권장하지 않습니다."
+    if (spec.availability == ModelAvailability.NEEDS_CONVERSION) {
+        return if (evaluation.tier == "권장하지 않음") {
+            "이 모델은 변환이 필요하며 현재 기기 메모리로는 로컬 실행을 권장하지 않습니다."
+        } else {
+            "이 모델은 변환 후 사용할 수 있습니다. ${evaluation.reason}"
         }
     }
-    spec.recommendedRamGb?.let { recommendedRam ->
-        if (totalRamGb < recommendedRam) {
-            return "이 모델은 현재 기기에서 메모리 압박이 발생할 수 있습니다."
+    if (evaluation.tier == "권장하지 않음") {
+        if (evaluation.deviceRamClass == "8GB" && (spec.modelSizeEstimateGb ?: 0f) >= 5.0f) {
+            return "현재 기기에서는 이 모델의 로컬 실행을 권장하지 않습니다."
         }
+        return "현재 기기 메모리로는 이 모델의 로컬 실행을 권장하지 않습니다."
     }
-    if (availableRamGb > 0f && availableRamGb < 2f) {
-        return "현재 사용 가능한 메모리가 낮아 실행 전에 다른 작업을 정리하는 것이 좋습니다."
+    if (availableRamGb > 0f && availableRamGb < 2f && evaluation.tier == "권장") {
+        return "현재 사용 가능한 메모리가 낮아 실행 전에 다른 앱을 정리하는 것이 좋습니다."
     }
-    return null
+    if (totalRamGb in 7.0f..8.5f && (spec.memoryClass == ModelMemoryClass.LOW || (spec.modelSizeEstimateGb ?: 99f) <= 1.5f)) {
+        return "현재 기기에서 실험하기 적합한 소형 모델입니다."
+    }
+    return evaluation.reason
 }
 
 private fun buildDeviceAwareTokenRecommendation(

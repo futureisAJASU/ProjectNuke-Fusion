@@ -61,6 +61,7 @@ import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.AttachmentStorageStats
+import com.projectnuke.fusion.util.collectFusionSocInfo
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -1431,6 +1432,7 @@ private suspend fun buildFusionDebugInfo(
 ): String {
     val appInfo = getAppInfoSummary(context)
     val latestBenchmark = runCatching { benchmarkDao.getLatest() }.getOrNull()
+    val socInfo = collectFusionSocInfo()
 
     val modelFile = modelPath?.let { File(it) }
     val modelExists = modelFile?.exists() == true
@@ -1454,6 +1456,11 @@ private suspend fun buildFusionDebugInfo(
         appendLine("App version: ${appInfo.versionName} (${appInfo.versionCode})")
         appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
+        appendLine("Hardware: ${socInfo.hardware.ifBlank { "unknown" }}")
+        appendLine("Board: ${socInfo.board.ifBlank { "unknown" }}")
+        appendLine("SoC manufacturer: ${socInfo.socManufacturer.ifBlank { "unknown" }}")
+        appendLine("SoC model: ${socInfo.socModel.ifBlank { "unknown" }}")
+        appendLine("Detected SoC vendor: ${socInfo.detectedSocVendor.name}")
         appendLine()
         appendLine("Model")
         appendLine("- Name: $modelName")
