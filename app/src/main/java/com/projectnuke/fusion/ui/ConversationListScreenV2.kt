@@ -1,6 +1,5 @@
 package com.projectnuke.fusion.ui
 
-import android.content.Intent
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -9,6 +8,8 @@ import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
 import android.os.CancellationSignal
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -128,6 +129,10 @@ fun ConversationListScreenV2(
     var archiveUnlockedForSession by remember { mutableStateOf(false) }
     var pendingBenchmarkModelFilter by remember { mutableStateOf<String?>(null) }
     var pendingBenchmarkOpenHistory by remember { mutableStateOf(false) }
+    var showChatMarkdownExportPicker by remember { mutableStateOf(false) }
+    var includeArchivedInMarkdownExport by remember { mutableStateOf(false) }
+    var markdownExportSearchQuery by remember { mutableStateOf("") }
+    var pendingChatMarkdownExport by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(isDrawerOpen) {
         if (!isDrawerOpen) {
@@ -164,6 +169,26 @@ fun ConversationListScreenV2(
             val ids = matchingMessageConversationIds.toSet()
             conversations.filter { it.title.contains(trimmedSearchQuery, true) || it.id in ids }
         }
+    }
+    val chatMarkdownExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/markdown")
+    ) { uri ->
+        val markdown = pendingChatMarkdownExport
+        if (uri == null || markdown.isNullOrBlank()) {
+            pendingChatMarkdownExport = null
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            val stream = context.contentResolver.openOutputStream(uri)
+                ?: error("Unable to open export target")
+            stream.bufferedWriter().use { it.write(markdown) }
+        }.onSuccess {
+            Toast.makeText(context, "채팅 Markdown을 내보냈습니다.", Toast.LENGTH_SHORT).show()
+        }.onFailure {
+            clipboard.setText(AnnotatedString(markdown))
+            Toast.makeText(context, "채팅 Markdown을 클립보드에 복사했습니다.", Toast.LENGTH_SHORT).show()
+        }
+        pendingChatMarkdownExport = null
     }
 
     fun saveSettings() {
@@ -675,31 +700,8 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
-                        DrawerSettingActionRow("채팅 내보내기", "현재 채팅을 Markdown 텍스트로 공유합니다.") {
-                            if (currentConversationId == 0L) {
-                                Toast.makeText(context, "내보낼 채팅이 없습니다.", Toast.LENGTH_SHORT).show()
-                            } else {
-                                scope.launch {
-                                    val conversation = dao.getConversationById(currentConversationId)
-                                    val messages = dao.getMessagesForConversation(currentConversationId)
-                                    if (conversation == null || messages.isEmpty()) {
-                                        Toast.makeText(context, "내보낼 채팅이 없습니다.", Toast.LENGTH_SHORT).show()
-                                        return@launch
-                                    }
-
-                                    val markdown = buildChatExportMarkdown(
-                                        title = conversation.title.ifBlank { "새 대화" },
-                                        messages = messages
-                                    )
-
-                                    val intent = Intent(Intent.ACTION_SEND).apply {
-                                        type = "text/markdown"
-                                        putExtra(Intent.EXTRA_SUBJECT, "Fusion 채팅 내보내기")
-                                        putExtra(Intent.EXTRA_TEXT, markdown)
-                                    }
-                                    context.startActivity(Intent.createChooser(intent, "채팅 내보내기"))
-                                }
-                            }
+                        DrawerSettingActionRow("채팅 Markdown 내보내기", "Markdown 파일로 저장할 채팅을 선택해 주세요.") {
+                            showChatMarkdownExportPicker = true
                         }
                     }
 
@@ -759,6 +761,130 @@ fun ConversationListScreenV2(
                 }
             }
         }
+    }
+
+    if (showChatMarkdownExportPicker) {
+        val exportConversations = remember(
+            conversations,
+            archivedConversations,
+            includeArchivedInMarkdownExport,
+            markdownExportSearchQuery
+        ) {
+            val base = if (includeArchivedInMarkdownExport) conversations + archivedConversations else conversations
+            val query = markdownExportSearchQuery.trim()
+            if (query.isBlank()) base else base.filter { it.title.contains(query, ignoreCase = true) }
+        }
+        AlertDialog(
+            onDismissRequest = {
+                showChatMarkdownExportPicker = false
+                markdownExportSearchQuery = ""
+            },
+            title = { Text("내보낼 채팅 선택") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Markdown 파일로 저장할 채팅을 선택해 주세요.", color = DrawerTextSecondary, fontSize = 12.sp)
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = DrawerCardBg,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 8.dp)
+                        ) {
+                            if (markdownExportSearchQuery.isBlank()) {
+                                Text("채팅을 검색합니다.", color = DrawerTextSecondary, fontSize = 13.sp)
+                            }
+                            BasicTextField(
+                                value = markdownExportSearchQuery,
+                                onValueChange = { markdownExportSearchQuery = it },
+                                singleLine = true,
+                                textStyle = TextStyle(color = DrawerTextPrimary, fontSize = 13.sp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("아카이브 포함", color = DrawerTextPrimary, fontSize = 12.sp)
+                        Switch(
+                            checked = includeArchivedInMarkdownExport,
+                            onCheckedChange = { includeArchivedInMarkdownExport = it }
+                        )
+                    }
+                    if (exportConversations.isEmpty()) {
+                        Text("내보낼 채팅이 없습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(280.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(exportConversations, key = { it.id }) { conversation ->
+                                Surface(
+                                    color = DrawerCardBg,
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            scope.launch {
+                                                val messages = runCatching {
+                                                    dao.getMessagesForConversation(conversation.id)
+                                                }.getOrElse {
+                                                    Toast.makeText(context, "채팅을 내보낼 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                                    return@launch
+                                                }
+                                                if (messages.isEmpty()) {
+                                                    Toast.makeText(context, "이 채팅에는 내보낼 메시지가 없습니다.", Toast.LENGTH_SHORT).show()
+                                                    return@launch
+                                                }
+                                                val title = conversation.title.ifBlank { "새 대화" }
+                                                pendingChatMarkdownExport = buildChatExportMarkdown(title, messages)
+                                                chatMarkdownExportLauncher.launch("fusion-chat-${safeMarkdownExportTitle(title)}.md")
+                                                showChatMarkdownExportPicker = false
+                                                markdownExportSearchQuery = ""
+                                            }
+                                        }
+                                ) {
+                                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                                        Text(
+                                            text = exportConversationTitle(conversation),
+                                            color = DrawerTextPrimary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(conversation.updatedAt)),
+                                            color = DrawerTextSecondary,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = {
+                    showChatMarkdownExportPicker = false
+                    markdownExportSearchQuery = ""
+                }) {
+                    Text("취소")
+                }
+            },
+            containerColor = DrawerPanelBg,
+            titleContentColor = DrawerTextPrimary,
+            textContentColor = DrawerTextPrimary
+        )
     }
 
     if (showAppInfoDialog) {
@@ -1293,7 +1419,9 @@ private fun buildChatExportMarkdown(
 
     val body = buildString {
         appendLine("# $title")
-        appendLine(dateText)
+        appendLine()
+        appendLine("- 내보낸 날짜: $dateText")
+        appendLine("- 메시지 수: ${messages.size}")
         appendLine()
         messages.forEach { message ->
             val heading = if (message.role == "user") "사용자" else "Fusion"
@@ -1309,11 +1437,28 @@ private fun buildChatExportMarkdown(
     return body.trimEnd()
 }
 
+private fun exportConversationTitle(conversation: ConversationEntity): String {
+    return buildString {
+        append(conversation.title.ifBlank { "새 대화" })
+        if (conversation.isPinned) append(" · 고정")
+        if (conversation.isArchived) append(" · 아카이브")
+    }
+}
+
+private fun safeMarkdownExportTitle(title: String): String {
+    val normalized = title.trim().ifBlank { "chat" }
+        .replace(Regex("""[\\/:*?"<>|]"""), "-")
+        .replace(Regex("""\s+"""), "-")
+        .trim('-')
+    return normalized.take(48).ifBlank { "chat" }
+}
+
 private fun stripHiddenFusionBlocks(content: String): String {
     val withAttachmentPlaceholders = replaceAttachmentTagsWithPlaceholders(content)
     return withAttachmentPlaceholders
         .replace(Regex("""(?is)<fusion_metrics>.*?</fusion_metrics>"""), "")
         .replace(Regex("""(?is)<fusion_thinking>.*?</fusion_thinking>"""), "")
+        .replace(Regex("""(?is)</?fusion_answer>"""), "")
         .replace(Regex("""\n{3,}"""), "\n\n")
         .trim()
 }
