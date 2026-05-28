@@ -117,6 +117,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ActivityNotFoundException
 import android.graphics.BitmapFactory
@@ -182,6 +183,8 @@ private const val PrefFavoriteModelIds = "favorite_model_ids"
 private const val PrefHiddenModelIds = "hidden_model_ids"
 private const val PrefShowHiddenModels = "show_hidden_models"
 private const val PrefModelLibrarySortMode = "model_library_sort_mode"
+private const val PrefRecentModels = "recent_models"
+private const val MaxRecentModels = 10
 
 private enum class ModelLibrarySortMode(val key: String, val label: String) {
     RECOMMENDATION("recommendation", "추천순"),
@@ -197,6 +200,13 @@ private enum class ModelLibrarySortMode(val key: String, val label: String) {
         }
     }
 }
+
+private data class RecentModelEntry(
+    val modelId: String,
+    val displayName: String,
+    val lastUsedAt: Long,
+    val useCount: Int
+)
 private val QuickPromptPresets = listOf(
     "자세히 설명해 주세요.",
     "핵심만 요약해 주세요.",
@@ -1428,6 +1438,11 @@ fun ChatScreen(
                 }
 
                 if (didSelectModel) {
+                    val catalog = FusionModelCatalog.all(context)
+                    val selectedId = catalog.firstOrNull {
+                        it.displayName == selectedModel && (selectedModelPath == null || it.localPath == selectedModelPath)
+                    }?.id ?: ("custom:" + (selectedModelPath ?: selectedModel))
+                    recordRecentModel(settingsPrefs, selectedId, selectedModel)
                     saveFusionSettings(
                         prefs = settingsPrefs,
                         settings = generationSettings,
@@ -2747,6 +2762,8 @@ private fun ModelSelectDialog(
     var activeFamilyFilter by remember { mutableStateOf("전체") }
     var modelViewMode by remember { mutableStateOf("전체 모델") }
     var sortMenuExpanded by remember { mutableStateOf(false) }
+    var showClearRecentConfirm by remember { mutableStateOf(false) }
+    var recentHistory by remember { mutableStateOf(loadRecentModels(prefs)) }
     val models = builtInModels.toList() + customModels.toList()
     val catalogModels = FusionModelCatalog.all(context)
     val selectedSpecId = remember(currentModel, catalogModels) {
@@ -2848,6 +2865,16 @@ private fun ModelSelectDialog(
     }
     val sortedRecommendedCautionSpecs = remember(recommendedCaution, sortMode, currentModel, favoriteModelIds) {
         sortModelSpecs(recommendedCaution.map { it.spec }, sortMode, currentModel, favoriteModelIds)
+    }
+    val recentModels = remember(recentHistory, catalogModels, hiddenModelIds, showHiddenModels) {
+        recentHistory.mapNotNull { entry ->
+            val spec = catalogModels.firstOrNull { it.id == entry.modelId } ?: return@mapNotNull null
+            if (!showHiddenModels && spec.id in hiddenModelIds) return@mapNotNull null
+            spec to entry
+        }
+    }
+    val showRecentSection = remember(searchQuery, activeStatusFilter, activeFamilyFilter, modelViewMode, recentModels) {
+        searchQuery.isBlank() && activeStatusFilter == "전체" && activeFamilyFilter == "전체" && modelViewMode == "전체 모델" && recentModels.isNotEmpty()
     }
     fun persistFavorite(ids: Set<String>) {
         favoriteModelIds = ids
@@ -3054,6 +3081,59 @@ private fun ModelSelectDialog(
                     }
 
                     val favoriteVisibleSpecs = filteredCatalogModels.filter { it.id in favoriteModelIds }
+                    val recentSpecs = recentModels.map { it.first }
+                    val recentSpecIds = recentSpecs.map { it.id }.toSet()
+                    if (showRecentSection) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "최근 사용 모델",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            FusionTextButton(onClick = { showClearRecentConfirm = true }) {
+                                Text("최근 사용 기록 지우기", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        ModelZooSection(
+                            title = "최근 사용 모델",
+                            specs = sortModelSpecs(recentSpecs, sortMode, currentModel, favoriteModelIds),
+                            currentModel = currentModel,
+                            onSelect = { spec ->
+                                val model = LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)
+                                onSelect(model)
+                            },
+                            onUploadCustomModel = onUploadCustomModel,
+                            onApplyRecommendedSettings = { spec ->
+                                applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
+                                Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
+                            },
+                            favoriteModelIds = favoriteModelIds,
+                            hiddenModelIds = hiddenModelIds,
+                            showHiddenBadge = showHiddenModels,
+                            onToggleFavorite = { spec ->
+                                val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
+                                persistFavorite(next)
+                                Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                            },
+                            onHideModel = { spec ->
+                                persistHidden(hiddenModelIds + spec.id)
+                                Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
+                            },
+                            onUnhideModel = { spec ->
+                                persistHidden(hiddenModelIds - spec.id)
+                                Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                        val latestRecent = recentModels.firstOrNull()?.second
+                        latestRecent?.let {
+                            Text(formatRecentUsedLabel(it.lastUsedAt), color = TextSecondary, fontSize = 12.sp)
+                        }
+                    }
                     if (modelViewMode == "내 기기에 추천") {
                         Surface(shape = RoundedCornerShape(10.dp), color = PanelBg, modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -3142,7 +3222,7 @@ private fun ModelSelectDialog(
                     } else if (favoriteVisibleSpecs.isNotEmpty() && activeStatusFilter == "전체") {
                         ModelZooSection(
                             title = "즐겨찾기",
-                            specs = sortedFavoriteVisibleSpecs,
+                            specs = sortedFavoriteVisibleSpecs.filterNot { it.id in recentSpecIds },
                             currentModel = currentModel,
                             onSelect = { spec ->
                                 val model = LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)
@@ -3175,7 +3255,7 @@ private fun ModelSelectDialog(
                     if (modelViewMode != "내 기기에 추천") {
                     ModelZooSection(
                         title = "사용 가능한 모델",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { isCatalogModelAvailable(context, it) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
+                        specs = sortModelSpecs(filteredCatalogModels.filter { isCatalogModelAvailable(context, it) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = { spec ->
                             val model = LocalModel(
@@ -3211,7 +3291,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "변환이 필요한 모델",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
+                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -3235,7 +3315,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "원격 모델",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
+                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -3259,7 +3339,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "가져온 모델",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
+                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = { spec ->
                             onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
@@ -3425,6 +3505,31 @@ private fun ModelSelectDialog(
         textContentColor = TextPrimary
     )
 
+    if (showClearRecentConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearRecentConfirm = false },
+            title = { Text("최근 사용 기록을 지우시겠습니까?") },
+            text = { Text("모델 파일이나 설정은 삭제되지 않습니다.") },
+            confirmButton = {
+                FusionTextButton(
+                    onClick = {
+                        showClearRecentConfirm = false
+                        saveRecentModels(prefs, emptyList())
+                        recentHistory = emptyList()
+                        Toast.makeText(context, "최근 사용 기록을 지웠습니다.", Toast.LENGTH_SHORT).show()
+                    }
+                ) { Text("지우기", maxLines = 1) }
+            },
+            dismissButton = {
+                FusionTextButton(onClick = { showClearRecentConfirm = false }) {
+                    Text("취소", maxLines = 1)
+                }
+            },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
+        )
+    }
 }
 
 @Composable
@@ -3488,6 +3593,7 @@ private fun ModelLibrarySettingsDock(
             }
         }
     }
+
 }
 
 @Composable
@@ -4045,6 +4151,7 @@ private fun DirectDownloadConfirmDialog(
         titleContentColor = TextPrimary,
         textContentColor = TextPrimary
     )
+
 }
 
 @Composable
@@ -4461,6 +4568,70 @@ private fun sortModelSpecs(
                 .thenBy(sizeKey)
                 .thenBy(nameKey)
         )
+    }
+}
+
+private fun loadRecentModels(prefs: SharedPreferences): List<RecentModelEntry> {
+    val raw = prefs.getString(PrefRecentModels, null) ?: return emptyList()
+    return runCatching {
+        val arr = JSONArray(raw)
+        buildList {
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id")
+                if (id.isBlank()) continue
+                add(
+                    RecentModelEntry(
+                        modelId = id,
+                        displayName = obj.optString("name"),
+                        lastUsedAt = obj.optLong("lastUsedAt", 0L),
+                        useCount = obj.optInt("useCount", 1)
+                    )
+                )
+            }
+        }.sortedByDescending { it.lastUsedAt }.take(MaxRecentModels)
+    }.getOrDefault(emptyList())
+}
+
+private fun saveRecentModels(prefs: SharedPreferences, items: List<RecentModelEntry>) {
+    val arr = JSONArray()
+    items.take(MaxRecentModels).forEach { item ->
+        arr.put(
+            JSONObject().apply {
+                put("id", item.modelId)
+                put("name", item.displayName)
+                put("lastUsedAt", item.lastUsedAt)
+                put("useCount", item.useCount)
+            }
+        )
+    }
+    prefs.edit().putString(PrefRecentModels, arr.toString()).apply()
+}
+
+private fun recordRecentModel(prefs: SharedPreferences, modelId: String, displayName: String) {
+    if (modelId.isBlank()) return
+    val now = System.currentTimeMillis()
+    val current = loadRecentModels(prefs)
+    val existing = current.firstOrNull { it.modelId == modelId }
+    val updated = RecentModelEntry(
+        modelId = modelId,
+        displayName = displayName.ifBlank { existing?.displayName ?: modelId },
+        lastUsedAt = now,
+        useCount = (existing?.useCount ?: 0) + 1
+    )
+    val next = listOf(updated) + current.filterNot { it.modelId == modelId }
+    saveRecentModels(prefs, next)
+}
+
+private fun formatRecentUsedLabel(lastUsedAt: Long): String {
+    if (lastUsedAt <= 0L) return "최근 사용: 정보 없음"
+    val now = System.currentTimeMillis()
+    val today = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(now))
+    val usedDay = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(lastUsedAt))
+    return if (today == usedDay) {
+        "최근 사용: 오늘"
+    } else {
+        "최근 사용: ${SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(lastUsedAt))}"
     }
 }
 
