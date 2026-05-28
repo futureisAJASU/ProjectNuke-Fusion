@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.AddComment
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -180,6 +181,22 @@ private const val PrefSpeculativeDecoding = "speculative_decoding_enabled"
 private const val PrefFavoriteModelIds = "favorite_model_ids"
 private const val PrefHiddenModelIds = "hidden_model_ids"
 private const val PrefShowHiddenModels = "show_hidden_models"
+private const val PrefModelLibrarySortMode = "model_library_sort_mode"
+
+private enum class ModelLibrarySortMode(val key: String, val label: String) {
+    RECOMMENDATION("recommendation", "추천순"),
+    NAME("name", "이름순"),
+    LIGHTWEIGHT("lightweight", "모델 크기 작은 순"),
+    MEMORY_LOW("memory_low", "권장 사양 낮은 순"),
+    LOCAL_EXECUTION("local_execution", "로컬 실행 가능 우선"),
+    FAVORITES_FIRST("favorites_first", "즐겨찾기 우선");
+
+    companion object {
+        fun fromKey(value: String?): ModelLibrarySortMode {
+            return values().firstOrNull { it.key == value } ?: RECOMMENDATION
+        }
+    }
+}
 private val QuickPromptPresets = listOf(
     "자세히 설명해 주세요.",
     "핵심만 요약해 주세요.",
@@ -2724,10 +2741,12 @@ private fun ModelSelectDialog(
     var favoriteModelIds by remember { mutableStateOf(prefs.getStringSet(PrefFavoriteModelIds, emptySet())?.toSet() ?: emptySet()) }
     var hiddenModelIds by remember { mutableStateOf(prefs.getStringSet(PrefHiddenModelIds, emptySet())?.toSet() ?: emptySet()) }
     var showHiddenModels by remember { mutableStateOf(prefs.getBoolean(PrefShowHiddenModels, false)) }
+    var sortMode by remember { mutableStateOf(ModelLibrarySortMode.fromKey(prefs.getString(PrefModelLibrarySortMode, null))) }
     var searchQuery by remember { mutableStateOf("") }
     var activeStatusFilter by remember { mutableStateOf("전체") }
     var activeFamilyFilter by remember { mutableStateOf("전체") }
     var modelViewMode by remember { mutableStateOf("전체 모델") }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
     val models = builtInModels.toList() + customModels.toList()
     val catalogModels = FusionModelCatalog.all(context)
     val selectedSpecId = remember(currentModel, catalogModels) {
@@ -2817,6 +2836,19 @@ private fun ModelSelectDialog(
     val favoriteVisibleSpecs = remember(visibleCatalogModels, favoriteModelIds) {
         visibleCatalogModels.filter { it.id in favoriteModelIds }
     }
+    val sortedFavoriteVisibleSpecs = remember(favoriteVisibleSpecs, sortMode, currentModel, favoriteModelIds) {
+        sortModelSpecs(favoriteVisibleSpecs, sortMode, currentModel, favoriteModelIds)
+    }
+    val recommendedEvaluationMap = remember(recommendedEvaluations) { recommendedEvaluations.associateBy { it.spec.id } }
+    val sortedRecommendedBestSpecs = remember(recommendedBest, sortMode, currentModel, favoriteModelIds) {
+        sortModelSpecs(recommendedBest.map { it.spec }, sortMode, currentModel, favoriteModelIds)
+    }
+    val sortedRecommendedExperimentalSpecs = remember(recommendedExperimental, sortMode, currentModel, favoriteModelIds) {
+        sortModelSpecs(recommendedExperimental.map { it.spec }, sortMode, currentModel, favoriteModelIds)
+    }
+    val sortedRecommendedCautionSpecs = remember(recommendedCaution, sortMode, currentModel, favoriteModelIds) {
+        sortModelSpecs(recommendedCaution.map { it.spec }, sortMode, currentModel, favoriteModelIds)
+    }
     fun persistFavorite(ids: Set<String>) {
         favoriteModelIds = ids
         prefs.edit().putStringSet(PrefFavoriteModelIds, ids).apply()
@@ -2828,6 +2860,10 @@ private fun ModelSelectDialog(
     fun setShowHidden(enabled: Boolean) {
         showHiddenModels = enabled
         prefs.edit().putBoolean(PrefShowHiddenModels, enabled).apply()
+    }
+    fun persistSort(mode: ModelLibrarySortMode) {
+        sortMode = mode
+        prefs.edit().putString(PrefModelLibrarySortMode, mode.key).apply()
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2867,6 +2903,47 @@ private fun ModelSelectDialog(
                                 selected = modelViewMode == label,
                                 onClick = { modelViewMode = label }
                             )
+                        }
+                    }
+                    Box {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = PanelBg,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, LineColor),
+                            modifier = Modifier.clickable { sortMenuExpanded = true }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text("정렬: ${sortMode.label}", color = TextPrimary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Icon(Icons.Rounded.ArrowDropDown, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                        DropdownMenu(
+                            expanded = sortMenuExpanded,
+                            onDismissRequest = { sortMenuExpanded = false },
+                            containerColor = PanelBg
+                        ) {
+                            val menuItemColors = MenuDefaults.itemColors(
+                                textColor = TextPrimary,
+                                leadingIconColor = TextPrimary,
+                                trailingIconColor = TextPrimary,
+                                disabledTextColor = TextSecondary,
+                                disabledLeadingIconColor = TextSecondary,
+                                disabledTrailingIconColor = TextSecondary
+                            )
+                            ModelLibrarySortMode.values().forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    colors = menuItemColors,
+                                    onClick = {
+                                        sortMenuExpanded = false
+                                        persistSort(mode)
+                                    }
+                                )
+                            }
                         }
                     }
                     OutlinedTextField(
@@ -3007,7 +3084,7 @@ private fun ModelSelectDialog(
                         if (recommendedBest.isNotEmpty()) {
                             ModelZooSection(
                                 title = "권장 모델",
-                                specs = recommendedBest.map { it.spec },
+                                specs = sortedRecommendedBestSpecs,
                                 currentModel = currentModel,
                                 onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
                                 onUploadCustomModel = onUploadCustomModel,
@@ -3018,13 +3095,13 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
                                 onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
-                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                                recommendationMap = recommendedEvaluationMap
                             )
                         }
                         if (recommendedExperimental.isNotEmpty()) {
                             ModelZooSection(
                                 title = "실험 가능한 모델",
-                                specs = recommendedExperimental.map { it.spec },
+                                specs = sortedRecommendedExperimentalSpecs,
                                 currentModel = currentModel,
                                 onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
                                 onUploadCustomModel = onUploadCustomModel,
@@ -3035,13 +3112,13 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
                                 onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
-                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                                recommendationMap = recommendedEvaluationMap
                             )
                         }
                         if (recommendedCaution.isNotEmpty()) {
                             ModelZooSection(
                                 title = "주의가 필요한 모델",
-                                specs = recommendedCaution.map { it.spec },
+                                specs = sortedRecommendedCautionSpecs,
                                 currentModel = currentModel,
                                 onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
                                 onUploadCustomModel = onUploadCustomModel,
@@ -3052,7 +3129,7 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
                                 onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
-                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                                recommendationMap = recommendedEvaluationMap
                             )
                         }
                         if (recommendedTop.isEmpty() && recommendedCaution.isEmpty()) {
@@ -3065,7 +3142,7 @@ private fun ModelSelectDialog(
                     } else if (favoriteVisibleSpecs.isNotEmpty() && activeStatusFilter == "전체") {
                         ModelZooSection(
                             title = "즐겨찾기",
-                        specs = favoriteVisibleSpecs,
+                            specs = sortedFavoriteVisibleSpecs,
                             currentModel = currentModel,
                             onSelect = { spec ->
                                 val model = LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)
@@ -3098,7 +3175,7 @@ private fun ModelSelectDialog(
                     if (modelViewMode != "내 기기에 추천") {
                     ModelZooSection(
                         title = "사용 가능한 모델",
-                        specs = filteredCatalogModels.filter { isCatalogModelAvailable(context, it) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
+                        specs = sortModelSpecs(filteredCatalogModels.filter { isCatalogModelAvailable(context, it) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = { spec ->
                             val model = LocalModel(
@@ -3134,7 +3211,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "변환이 필요한 모델",
-                        specs = filteredCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
+                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -3158,7 +3235,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "원격 모델",
-                        specs = filteredCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
+                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -3182,7 +3259,7 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "가져온 모델",
-                        specs = filteredCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) },
+                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = { spec ->
                             onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
@@ -4329,6 +4406,83 @@ private fun buildLocalSelectionMessage(spec: FusionModelSpec, available: Boolean
         ModelAvailability.REMOTE_ONLY -> "이 모델은 원격 실행이 필요합니다."
         ModelAvailability.UNSUPPORTED_ON_DEVICE -> "현재 기기에서는 로컬 실행을 권장하지 않습니다."
         else -> "모델 파일을 먼저 가져와야 합니다."
+    }
+}
+
+private fun sortModelSpecs(
+    specs: List<FusionModelSpec>,
+    sortMode: ModelLibrarySortMode,
+    currentModel: String,
+    favoriteModelIds: Set<String>
+): List<FusionModelSpec> {
+    val nameKey: (FusionModelSpec) -> String = { it.displayName.lowercase(Locale.getDefault()) }
+    val sizeKey: (FusionModelSpec) -> Float = { it.modelSizeEstimateGb ?: Float.MAX_VALUE }
+    val minRamKey: (FusionModelSpec) -> Float = { it.minRecommendedRamGb?.toFloat() ?: Float.MAX_VALUE }
+    val recRamKey: (FusionModelSpec) -> Float = { it.recommendedRamGb?.toFloat() ?: Float.MAX_VALUE }
+    val favoriteKey: (FusionModelSpec) -> Int = { if (it.id in favoriteModelIds) 0 else 1 }
+    val localReadyKey: (FusionModelSpec) -> Int = {
+        if (it.availability == ModelAvailability.READY || it.availability == ModelAvailability.CUSTOM_IMPORTED) 0 else 1
+    }
+    val currentKey: (FusionModelSpec) -> Int = { if (it.displayName == currentModel) 0 else 1 }
+
+    return when (sortMode) {
+        ModelLibrarySortMode.NAME -> specs.sortedBy(nameKey)
+        ModelLibrarySortMode.MEMORY_LOW -> specs.sortedWith(
+            compareBy<FusionModelSpec>(minRamKey)
+                .thenBy(recRamKey)
+                .thenBy(sizeKey)
+                .thenBy(nameKey)
+        )
+        ModelLibrarySortMode.LIGHTWEIGHT -> specs.sortedWith(
+            compareBy<FusionModelSpec>(sizeKey)
+                .thenBy(minRamKey)
+                .thenBy(recRamKey)
+                .thenBy(nameKey)
+        )
+        ModelLibrarySortMode.RECOMMENDATION -> specs.sortedWith(
+            compareBy<FusionModelSpec> { recommendationSortRank(it, favoriteModelIds) }
+                .thenBy(favoriteKey)
+                .thenBy(localReadyKey)
+                .thenBy(sizeKey)
+                .thenBy(recRamKey)
+                .thenBy(nameKey)
+        )
+        ModelLibrarySortMode.LOCAL_EXECUTION -> specs.sortedWith(
+            compareBy<FusionModelSpec>(::localExecutionSortRank)
+                .thenBy(favoriteKey)
+                .thenBy(sizeKey)
+                .thenBy(recRamKey)
+                .thenBy(nameKey)
+        )
+        ModelLibrarySortMode.FAVORITES_FIRST -> specs.sortedWith(
+            compareBy<FusionModelSpec>(favoriteKey)
+                .thenBy(currentKey)
+                .thenBy { recommendationSortRank(it, favoriteModelIds) }
+                .thenBy(sizeKey)
+                .thenBy(nameKey)
+        )
+    }
+}
+
+private fun recommendationSortRank(model: FusionModelSpec, favoriteModelIds: Set<String>): Int {
+    return when {
+        model.availability == ModelAvailability.READY || model.availability == ModelAvailability.CUSTOM_IMPORTED -> 1
+        (model.memoryClass == ModelMemoryClass.LOW || (model.modelSizeEstimateGb ?: Float.MAX_VALUE) <= 1.5f || model.recommendedDeviceClass == ModelRecommendedDeviceClass.RAM_8GB_SAFE) -> 2
+        model.id in favoriteModelIds -> 3
+        model.availability == ModelAvailability.NEEDS_DOWNLOAD || model.availability == ModelAvailability.NEEDS_CONVERSION -> 4
+        model.availability == ModelAvailability.REMOTE_ONLY || model.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE || model.memoryClass == ModelMemoryClass.SERVER -> 5
+        else -> 6
+    }
+}
+
+private fun localExecutionSortRank(model: FusionModelSpec): Int {
+    return when (model.availability) {
+        ModelAvailability.READY -> 1
+        ModelAvailability.CUSTOM_IMPORTED -> 2
+        ModelAvailability.NEEDS_DOWNLOAD -> 3
+        ModelAvailability.NEEDS_CONVERSION -> 4
+        ModelAvailability.REMOTE_ONLY -> 5
+        ModelAvailability.UNSUPPORTED_ON_DEVICE -> 6
     }
 }
 
