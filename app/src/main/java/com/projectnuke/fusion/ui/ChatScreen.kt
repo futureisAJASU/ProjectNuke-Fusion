@@ -184,6 +184,7 @@ private const val PrefHiddenModelIds = "hidden_model_ids"
 private const val PrefShowHiddenModels = "show_hidden_models"
 private const val PrefModelLibrarySortMode = "model_library_sort_mode"
 private const val PrefRecentModels = "recent_models"
+private const val PrefModelNotes = "model_notes"
 private const val MaxRecentModels = 10
 
 private enum class ModelLibrarySortMode(val key: String, val label: String) {
@@ -206,6 +207,12 @@ private data class RecentModelEntry(
     val displayName: String,
     val lastUsedAt: Long,
     val useCount: Int
+)
+
+private data class ModelNoteEditState(
+    val modelId: String,
+    val displayName: String,
+    val initialNote: String
 )
 private val QuickPromptPresets = listOf(
     "자세히 설명해 주세요.",
@@ -2764,6 +2771,7 @@ private fun ModelSelectDialog(
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var showClearRecentConfirm by remember { mutableStateOf(false) }
     var recentHistory by remember { mutableStateOf(loadRecentModels(prefs)) }
+    var modelNotes by remember { mutableStateOf(loadModelNotes(prefs)) }
     val models = builtInModels.toList() + customModels.toList()
     val catalogModels = FusionModelCatalog.all(context)
     val selectedSpecId = remember(currentModel, catalogModels) {
@@ -2809,7 +2817,8 @@ private fun ModelSelectDialog(
                     spec.parameterLabel,
                     spec.runtimeFormat.name,
                     spec.sourceLabel ?: "",
-                    spec.notes
+                    spec.notes,
+                    modelNotes[spec.id].orEmpty()
                 ).any { it.lowercase(Locale.getDefault()).contains(normalizedSearch) }
             }
         }
@@ -2891,6 +2900,13 @@ private fun ModelSelectDialog(
     fun persistSort(mode: ModelLibrarySortMode) {
         sortMode = mode
         prefs.edit().putString(PrefModelLibrarySortMode, mode.key).apply()
+    }
+    fun persistModelNote(modelId: String, note: String?) {
+        val next = modelNotes.toMutableMap()
+        val trimmed = note?.trim().orEmpty()
+        if (trimmed.isBlank()) next.remove(modelId) else next[modelId] = trimmed
+        modelNotes = next
+        saveModelNotes(prefs, next)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -3075,7 +3091,9 @@ private fun ModelSelectDialog(
                                 onUnhideModel = { spec ->
                                     persistHidden(hiddenModelIds - spec.id)
                                     Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
-                                }
+                                },
+                                modelNotes = modelNotes,
+                                onSaveModelNote = ::persistModelNote
                             )
                         }
                     }
@@ -3157,7 +3175,9 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
                                 onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
-                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev }
+                                recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev },
+                                modelNotes = modelNotes,
+                                onSaveModelNote = ::persistModelNote
                             )
                             Text("현재 선택된 모델은 이 기기에서 안정적으로 실행되지 않을 수 있습니다.", color = DangerRed, fontSize = 12.sp)
                         }
@@ -3175,7 +3195,9 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
                                 onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
-                                recommendationMap = recommendedEvaluationMap
+                                recommendationMap = recommendedEvaluationMap,
+                                modelNotes = modelNotes,
+                                onSaveModelNote = ::persistModelNote
                             )
                         }
                         if (recommendedExperimental.isNotEmpty()) {
@@ -3192,7 +3214,9 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
                                 onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
-                                recommendationMap = recommendedEvaluationMap
+                                recommendationMap = recommendedEvaluationMap,
+                                modelNotes = modelNotes,
+                                onSaveModelNote = ::persistModelNote
                             )
                         }
                         if (recommendedCaution.isNotEmpty()) {
@@ -3209,7 +3233,9 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
                                 onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
-                                recommendationMap = recommendedEvaluationMap
+                                recommendationMap = recommendedEvaluationMap,
+                                modelNotes = modelNotes,
+                                onSaveModelNote = ::persistModelNote
                             )
                         }
                         if (recommendedTop.isEmpty() && recommendedCaution.isEmpty()) {
@@ -3248,7 +3274,9 @@ private fun ModelSelectDialog(
                             onUnhideModel = { spec ->
                                 persistHidden(hiddenModelIds - spec.id)
                                 Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
-                            }
+                            },
+                            modelNotes = modelNotes,
+                            onSaveModelNote = ::persistModelNote
                         )
                     }
 
@@ -3287,7 +3315,9 @@ private fun ModelSelectDialog(
                             persistHidden(hiddenModelIds - spec.id)
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
-                        recommendationMap = emptyMap()
+                        recommendationMap = emptyMap(),
+                        modelNotes = modelNotes,
+                        onSaveModelNote = ::persistModelNote
                     )
                     ModelZooSection(
                         title = "변환이 필요한 모델",
@@ -3311,7 +3341,9 @@ private fun ModelSelectDialog(
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
-                        }
+                        },
+                        modelNotes = modelNotes,
+                        onSaveModelNote = ::persistModelNote
                     )
                     ModelZooSection(
                         title = "원격 모델",
@@ -3335,7 +3367,9 @@ private fun ModelSelectDialog(
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
-                        }
+                        },
+                        modelNotes = modelNotes,
+                        onSaveModelNote = ::persistModelNote
                     )
                     ModelZooSection(
                         title = "가져온 모델",
@@ -3361,7 +3395,9 @@ private fun ModelSelectDialog(
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
-                        }
+                        },
+                        modelNotes = modelNotes,
+                        onSaveModelNote = ::persistModelNote
                     )
                     if (searchQuery.isNotBlank() && filteredCatalogModels.isEmpty()) {
                         Text(
@@ -3674,7 +3710,9 @@ private fun ModelZooSection(
     onToggleFavorite: (FusionModelSpec) -> Unit,
     onHideModel: (FusionModelSpec) -> Unit,
     onUnhideModel: (FusionModelSpec) -> Unit,
-    recommendationMap: Map<String, ModelRecommendationEvaluation> = emptyMap()
+    recommendationMap: Map<String, ModelRecommendationEvaluation> = emptyMap(),
+    modelNotes: Map<String, String> = emptyMap(),
+    onSaveModelNote: (String, String?) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -3689,6 +3727,7 @@ private fun ModelZooSection(
         val tokenRecommendation = remember(spec.id, memoryInfo.totalRamGb, memoryInfo.availableRamGb) {
             buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb)
         }
+        val hasNote = !modelNotes[spec.id].isNullOrBlank()
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = if (spec.displayName == currentModel) BubbleBg else Color.Transparent,
@@ -3720,6 +3759,10 @@ private fun ModelZooSection(
                 }
                 if (spec.id in favoriteModelIds) {
                     Text("★", color = AccentBlue, fontSize = 12.sp, maxLines = 1)
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                if (hasNote) {
+                    Text("메모", color = AccentBlue, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.width(6.dp))
                 }
                 if (showHiddenBadge && spec.id in hiddenModelIds) {
@@ -3781,7 +3824,9 @@ private fun ModelZooSection(
                     clipboard.setText(AnnotatedString(link))
                     Toast.makeText(context, "모델 링크를 복사했습니다.", Toast.LENGTH_SHORT).show()
                 }
-            }
+            },
+            modelNote = modelNotes[spec.id].orEmpty(),
+            onSaveModelNote = { note -> onSaveModelNote(spec.id, note) }
         )
         if (showDirectDownloadConfirm) {
             DirectDownloadConfirmDialog(
@@ -3814,10 +3859,15 @@ private fun ModelZooDetailDialog(
     onToggleFavorite: () -> Unit,
     onHideModel: () -> Unit,
     onUnhideModel: () -> Unit,
-    onCopyLink: () -> Unit
+    onCopyLink: () -> Unit,
+    modelNote: String,
+    onSaveModelNote: (String?) -> Unit
 ) {
     val context = LocalContext.current
     val socInfo = remember { collectFusionSocInfo() }
+    var noteEditorOpen by remember { mutableStateOf(false) }
+    var noteDeleteConfirmOpen by remember { mutableStateOf(false) }
+    var noteDraft by remember(modelNote) { mutableStateOf(modelNote) }
     LaunchedEffect(spec.id, memoryInfo.totalRamGb, memoryInfo.availableRamGb, memoryInfo.tier, memoryInfo.warning) {
         val ramClass = when {
             memoryInfo.totalRamGb in 7.0f..8.5f -> "8GB"
@@ -3899,6 +3949,25 @@ private fun ModelZooDetailDialog(
                     }
                     spec.localExecutionWarning?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
                     localSelectionMessage?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
+                    Text("모델 메모", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    if (modelNote.isBlank()) {
+                        Text("저장된 메모가 없습니다.", color = TextSecondary, fontSize = 12.sp)
+                    } else {
+                        Text(modelNote, color = TextSecondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FusionTextButton(onClick = {
+                            noteDraft = modelNote
+                            noteEditorOpen = true
+                        }) {
+                            Text(if (modelNote.isBlank()) "메모 작성" else "메모 수정", fontSize = 12.sp, maxLines = 1)
+                        }
+                        if (modelNote.isNotBlank()) {
+                            FusionTextButton(onClick = { noteDeleteConfirmOpen = true }) {
+                                Text("메모 삭제", fontSize = 12.sp, maxLines = 1)
+                            }
+                        }
+                    }
                     Text(fusionNpuNoteTitle(socInfo.detectedSocVendor), color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     DetailMetaRow("감지된 AP", socInfo.vendorLabel)
                     DetailMetaRow("SoC", socInfo.compactSocLabel)
@@ -4104,6 +4173,66 @@ private fun ModelZooDetailDialog(
             },
             confirmButton = {
                 FusionTextButton(onClick = { showConversionGuide = false }) { Text("확인", maxLines = 1) }
+            },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
+        )
+    }
+
+    if (noteEditorOpen) {
+        AlertDialog(
+            onDismissRequest = { noteEditorOpen = false },
+            title = { Text("모델 메모") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("이 모델에 대한 개인 메모를 저장합니다.", color = TextSecondary, fontSize = 12.sp)
+                    OutlinedTextField(
+                        value = noteDraft,
+                        onValueChange = { noteDraft = it },
+                        placeholder = { Text("예: S24에서는 MTP 끔이 더 빠릅니다.", color = TextSecondary) },
+                        textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentBlue,
+                            unfocusedBorderColor = LineColor,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            cursorColor = AccentBlue
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                FusionTextButton(onClick = {
+                    onSaveModelNote(noteDraft)
+                    noteEditorOpen = false
+                    Toast.makeText(context, "모델 메모를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                }) { Text("저장", maxLines = 1) }
+            },
+            dismissButton = {
+                FusionTextButton(onClick = { noteEditorOpen = false }) { Text("취소", maxLines = 1) }
+            },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
+        )
+    }
+
+    if (noteDeleteConfirmOpen) {
+        AlertDialog(
+            onDismissRequest = { noteDeleteConfirmOpen = false },
+            title = { Text("모델 메모를 삭제하시겠습니까?") },
+            text = { Text("이 모델에 저장된 메모만 삭제됩니다.") },
+            confirmButton = {
+                FusionTextButton(onClick = {
+                    onSaveModelNote(null)
+                    noteDeleteConfirmOpen = false
+                    Toast.makeText(context, "모델 메모를 삭제했습니다.", Toast.LENGTH_SHORT).show()
+                }) { Text("삭제", maxLines = 1) }
+            },
+            dismissButton = {
+                FusionTextButton(onClick = { noteDeleteConfirmOpen = false }) { Text("취소", maxLines = 1) }
             },
             containerColor = PanelBg,
             titleContentColor = TextPrimary,
@@ -4633,6 +4762,34 @@ private fun formatRecentUsedLabel(lastUsedAt: Long): String {
     } else {
         "최근 사용: ${SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(lastUsedAt))}"
     }
+}
+
+private fun loadModelNotes(prefs: SharedPreferences): Map<String, String> {
+    val raw = prefs.getString(PrefModelNotes, null) ?: return emptyMap()
+    return runCatching {
+        val obj = JSONObject(raw)
+        buildMap {
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val value = obj.optString(key).trim()
+                if (key.isNotBlank() && value.isNotBlank()) {
+                    put(key, value)
+                }
+            }
+        }
+    }.getOrDefault(emptyMap())
+}
+
+private fun saveModelNotes(prefs: SharedPreferences, notes: Map<String, String>) {
+    val obj = JSONObject()
+    notes.forEach { (id, note) ->
+        val trimmed = note.trim()
+        if (id.isNotBlank() && trimmed.isNotBlank()) {
+            obj.put(id, trimmed)
+        }
+    }
+    prefs.edit().putString(PrefModelNotes, obj.toString()).apply()
 }
 
 private fun recommendationSortRank(model: FusionModelSpec, favoriteModelIds: Set<String>): Int {
