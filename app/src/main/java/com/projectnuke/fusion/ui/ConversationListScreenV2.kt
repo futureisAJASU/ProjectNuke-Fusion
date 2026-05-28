@@ -101,7 +101,10 @@ fun ConversationListScreenV2(
     onNewChat: () -> Unit,
     isDrawerOpen: Boolean = true,
     onOpenModelLibrary: (() -> Unit)? = null,
-    onOpenAdvancedSettings: (() -> Unit)? = null
+    onOpenAdvancedSettings: (() -> Unit)? = null,
+    openBenchmarkRequest: Int = 0,
+    benchmarkRequestModelFilter: String? = null,
+    benchmarkRequestOpenHistory: Boolean = false
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -123,10 +126,20 @@ fun ConversationListScreenV2(
     var attachmentStorageLoading by remember { mutableStateOf(false) }
     var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
     var archiveUnlockedForSession by remember { mutableStateOf(false) }
+    var pendingBenchmarkModelFilter by remember { mutableStateOf<String?>(null) }
+    var pendingBenchmarkOpenHistory by remember { mutableStateOf(false) }
 
     LaunchedEffect(isDrawerOpen) {
         if (!isDrawerOpen) {
             archiveUnlockedForSession = false
+        }
+    }
+    LaunchedEffect(openBenchmarkRequest) {
+        if (openBenchmarkRequest > 0) {
+            page = SidebarPage.BENCHMARK
+            archiveUnlockedForSession = false
+            pendingBenchmarkModelFilter = benchmarkRequestModelFilter
+            pendingBenchmarkOpenHistory = benchmarkRequestOpenHistory
         }
     }
 
@@ -247,7 +260,11 @@ fun ConversationListScreenV2(
                 .fillMaxSize()
                 .background(DrawerBlackBg)
         ) {
-            FusionBenchmarkScreen(onBack = { leaveArchive() })
+            FusionBenchmarkScreen(
+                onBack = { leaveArchive() },
+                initialShowHistory = pendingBenchmarkOpenHistory,
+                initialHistoryModelFilter = pendingBenchmarkModelFilter
+            )
         }
         return
     }

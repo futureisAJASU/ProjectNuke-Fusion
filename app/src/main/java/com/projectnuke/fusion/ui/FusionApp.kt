@@ -10,6 +10,7 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -22,6 +23,9 @@ fun FusionApp() {
     var currentConversationId by remember { mutableLongStateOf(0L) }
     var openModelLibraryRequest by remember { mutableLongStateOf(0L) }
     var openAdvancedSettingsRequest by remember { mutableLongStateOf(0L) }
+    var openBenchmarkRequest by remember { mutableLongStateOf(0L) }
+    var benchmarkRequestModelFilter by remember { mutableStateOf<String?>(null) }
+    var benchmarkRequestOpenHistory by remember { mutableStateOf(false) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -73,7 +77,10 @@ fun FusionApp() {
                     onOpenAdvancedSettings = {
                         openAdvancedSettingsRequest += 1L
                         scope.launch { drawerState.close() }
-                    }
+                    },
+                    openBenchmarkRequest = openBenchmarkRequest.toInt(),
+                    benchmarkRequestModelFilter = benchmarkRequestModelFilter,
+                    benchmarkRequestOpenHistory = benchmarkRequestOpenHistory
                 )
             }
         }
@@ -92,7 +99,13 @@ fun FusionApp() {
                 currentConversationId = 0L
             },
             openModelLibraryRequest = openModelLibraryRequest.toInt(),
-            openAdvancedSettingsRequest = openAdvancedSettingsRequest.toInt()
+            openAdvancedSettingsRequest = openAdvancedSettingsRequest.toInt(),
+            onOpenBenchmark = { modelName, openHistory ->
+                benchmarkRequestModelFilter = modelName
+                benchmarkRequestOpenHistory = openHistory
+                openBenchmarkRequest += 1L
+                scope.launch { drawerState.open() }
+            }
         )
     }
 }

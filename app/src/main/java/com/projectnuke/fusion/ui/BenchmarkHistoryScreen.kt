@@ -59,7 +59,8 @@ private val BenchmarkFail = Color(0xFFFF7A7A)
 @Composable
 fun BenchmarkHistoryScreen(
     dao: BenchmarkDao,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    initialModelFilter: String? = null
 ) {
     val allResults by dao.observeRecent(limit = 50).collectAsState(initial = emptyList())
     val clipboard = LocalClipboardManager.current
@@ -68,7 +69,7 @@ fun BenchmarkHistoryScreen(
     var mtpFilter by remember { mutableStateOf("전체") }
     var acceleratorFilter by remember { mutableStateOf("전체") }
     var dateFilter by remember { mutableStateOf("전체") }
-    var modelFilter by remember { mutableStateOf("전체") }
+    var modelFilter by remember { mutableStateOf(initialModelFilter?.takeIf { it.isNotBlank() } ?: "전체") }
     var comparisonMode by remember { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
     val selectedIds = remember { mutableStateListOf<Long>() }
@@ -227,6 +228,22 @@ fun BenchmarkHistoryScreen(
             FilterRow("가속기", listOf("전체", "GPU", "CPU"), acceleratorFilter) { acceleratorFilter = it }
             FilterRow("기간", listOf("전체", "최근 1일", "최근 7일", "최근 30일"), dateFilter) { dateFilter = it }
             FilterRow("모델", models, modelFilter) { modelFilter = it }
+            if (!initialModelFilter.isNullOrBlank() && modelFilter != "전체") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "현재 모델 필터가 적용되었습니다: $modelFilter",
+                        color = BenchmarkSubtle,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { modelFilter = "전체" }) {
+                        Text("해제", color = BenchmarkAccent)
+                    }
+                }
+            }
         }
 
         item {

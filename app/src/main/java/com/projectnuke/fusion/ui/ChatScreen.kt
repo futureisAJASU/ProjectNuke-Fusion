@@ -78,6 +78,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.net.toUri
 import com.projectnuke.fusion.data.AppDatabase
+import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
 import com.projectnuke.fusion.llm.BenchmarkRunningException
@@ -214,6 +215,19 @@ private data class ModelNoteEditState(
     val displayName: String,
     val initialNote: String
 )
+
+private data class ModelBenchmarkSummary(
+    val count: Int,
+    val latestAt: Long,
+    val medianDecodeTps: Float?,
+    val bestDecodeTps: Float?,
+    val worstDecodeTps: Float?,
+    val averageDecodeTps: Float?,
+    val averageTotalTps: Float?,
+    val recentAccelerator: String?,
+    val failedCount: Int,
+    val mtpRecommendation: String
+)
 private val QuickPromptPresets = listOf(
     "자세히 설명해 주세요.",
     "핵심만 요약해 주세요.",
@@ -228,7 +242,8 @@ fun ChatScreen(
     onOpenList: () -> Unit,
     onNewChat: () -> Unit,
     openModelLibraryRequest: Int = 0,
-    openAdvancedSettingsRequest: Int = 0
+    openAdvancedSettingsRequest: Int = 0,
+    onOpenBenchmark: (modelName: String?, openHistory: Boolean) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val settingsPrefs = remember {
@@ -1471,6 +1486,10 @@ fun ChatScreen(
             },
             onOpenAdvancedSettings = {
                 showAdvancedSettingsDialog = true
+            },
+            onOpenBenchmark = { modelName, openHistory ->
+                showModelDialog = false
+                onOpenBenchmark(modelName, openHistory)
             },
             onToggleReasoning = {
                 reasoningEnabled = !reasoningEnabled
@@ -2755,11 +2774,14 @@ private fun ModelSelectDialog(
     onLinkExternalModel: () -> Unit,
     onOpenStorageManager: () -> Unit,
     onOpenAdvancedSettings: () -> Unit,
+    onOpenBenchmark: (modelName: String?, openHistory: Boolean) -> Unit,
     onToggleReasoning: () -> Unit,
     onToggleWebSearch: () -> Unit
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE) }
+    val benchmarkDao = remember { AppDatabase.getInstance(context).benchmarkDao() }
+    val benchmarkResults by benchmarkDao.observeAll().collectAsState(initial = emptyList())
     var favoriteModelIds by remember { mutableStateOf(prefs.getStringSet(PrefFavoriteModelIds, emptySet())?.toSet() ?: emptySet()) }
     var hiddenModelIds by remember { mutableStateOf(prefs.getStringSet(PrefHiddenModelIds, emptySet())?.toSet() ?: emptySet()) }
     var showHiddenModels by remember { mutableStateOf(prefs.getBoolean(PrefShowHiddenModels, false)) }
@@ -2841,6 +2863,11 @@ private fun ModelSelectDialog(
                 isFavorite = spec.id in favoriteModelIds,
                 isLocalAvailable = isCatalogModelAvailable(context, spec)
             )
+        }
+    }
+    val benchmarkSummaryByModelId = remember(catalogModels, benchmarkResults) {
+        catalogModels.associate { spec ->
+            spec.id to buildModelBenchmarkSummary(spec, benchmarkResults)
         }
     }
     recommendedEvaluations.forEach { evaluation ->
@@ -3093,7 +3120,9 @@ private fun ModelSelectDialog(
                                     Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                                 },
                                 modelNotes = modelNotes,
-                                onSaveModelNote = ::persistModelNote
+                                onSaveModelNote = ::persistModelNote,
+                                benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                                onOpenBenchmark = onOpenBenchmark
                             )
                         }
                     }
@@ -3177,7 +3206,9 @@ private fun ModelSelectDialog(
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev },
                                 modelNotes = modelNotes,
-                                onSaveModelNote = ::persistModelNote
+                                onSaveModelNote = ::persistModelNote,
+                                benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                                onOpenBenchmark = onOpenBenchmark
                             )
                             Text("현재 선택된 모델은 이 기기에서 안정적으로 실행되지 않을 수 있습니다.", color = DangerRed, fontSize = 12.sp)
                         }
@@ -3197,7 +3228,9 @@ private fun ModelSelectDialog(
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluationMap,
                                 modelNotes = modelNotes,
-                                onSaveModelNote = ::persistModelNote
+                                onSaveModelNote = ::persistModelNote,
+                                benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                                onOpenBenchmark = onOpenBenchmark
                             )
                         }
                         if (recommendedExperimental.isNotEmpty()) {
@@ -3216,7 +3249,9 @@ private fun ModelSelectDialog(
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluationMap,
                                 modelNotes = modelNotes,
-                                onSaveModelNote = ::persistModelNote
+                                onSaveModelNote = ::persistModelNote,
+                                benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                                onOpenBenchmark = onOpenBenchmark
                             )
                         }
                         if (recommendedCaution.isNotEmpty()) {
@@ -3235,7 +3270,9 @@ private fun ModelSelectDialog(
                                 onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluationMap,
                                 modelNotes = modelNotes,
-                                onSaveModelNote = ::persistModelNote
+                                onSaveModelNote = ::persistModelNote,
+                                benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                                onOpenBenchmark = onOpenBenchmark
                             )
                         }
                         if (recommendedTop.isEmpty() && recommendedCaution.isEmpty()) {
@@ -3276,7 +3313,9 @@ private fun ModelSelectDialog(
                                 Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                             },
                             modelNotes = modelNotes,
-                            onSaveModelNote = ::persistModelNote
+                            onSaveModelNote = ::persistModelNote,
+                            benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                            onOpenBenchmark = onOpenBenchmark
                         )
                     }
 
@@ -3317,7 +3356,9 @@ private fun ModelSelectDialog(
                         },
                         recommendationMap = emptyMap(),
                         modelNotes = modelNotes,
-                        onSaveModelNote = ::persistModelNote
+                        onSaveModelNote = ::persistModelNote,
+                        benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                        onOpenBenchmark = onOpenBenchmark
                     )
                     ModelZooSection(
                         title = "변환이 필요한 모델",
@@ -3343,7 +3384,9 @@ private fun ModelSelectDialog(
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         modelNotes = modelNotes,
-                        onSaveModelNote = ::persistModelNote
+                        onSaveModelNote = ::persistModelNote,
+                        benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                        onOpenBenchmark = onOpenBenchmark
                     )
                     ModelZooSection(
                         title = "원격 모델",
@@ -3369,7 +3412,9 @@ private fun ModelSelectDialog(
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         modelNotes = modelNotes,
-                        onSaveModelNote = ::persistModelNote
+                        onSaveModelNote = ::persistModelNote,
+                        benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                        onOpenBenchmark = onOpenBenchmark
                     )
                     ModelZooSection(
                         title = "가져온 모델",
@@ -3397,7 +3442,9 @@ private fun ModelSelectDialog(
                             Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         modelNotes = modelNotes,
-                        onSaveModelNote = ::persistModelNote
+                        onSaveModelNote = ::persistModelNote,
+                        benchmarkSummaryByModelId = benchmarkSummaryByModelId,
+                        onOpenBenchmark = onOpenBenchmark
                     )
                     if (searchQuery.isNotBlank() && filteredCatalogModels.isEmpty()) {
                         Text(
@@ -3712,7 +3759,9 @@ private fun ModelZooSection(
     onUnhideModel: (FusionModelSpec) -> Unit,
     recommendationMap: Map<String, ModelRecommendationEvaluation> = emptyMap(),
     modelNotes: Map<String, String> = emptyMap(),
-    onSaveModelNote: (String, String?) -> Unit = { _, _ -> }
+    onSaveModelNote: (String, String?) -> Unit = { _, _ -> },
+    benchmarkSummaryByModelId: Map<String, ModelBenchmarkSummary?> = emptyMap(),
+    onOpenBenchmark: (modelName: String?, openHistory: Boolean) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -3728,6 +3777,7 @@ private fun ModelZooSection(
             buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb)
         }
         val hasNote = !modelNotes[spec.id].isNullOrBlank()
+        val benchmarkSummary = benchmarkSummaryByModelId[spec.id]
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = if (spec.displayName == currentModel) BubbleBg else Color.Transparent,
@@ -3755,6 +3805,10 @@ private fun ModelZooSection(
                     rec?.let {
                         Spacer(modifier = Modifier.height(2.dp))
                         Text("권장 설정: maxTokens ${it.recommendedTokens} · ${it.hint}", color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    benchmarkSummary?.let {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(buildCardBenchmarkLine(it), color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 if (spec.id in favoriteModelIds) {
@@ -3826,7 +3880,12 @@ private fun ModelZooSection(
                 }
             },
             modelNote = modelNotes[spec.id].orEmpty(),
-            onSaveModelNote = { note -> onSaveModelNote(spec.id, note) }
+            onSaveModelNote = { note -> onSaveModelNote(spec.id, note) },
+            benchmarkSummary = benchmarkSummaryByModelId[spec.id],
+            onOpenBenchmark = { openHistory ->
+                selectedSpec = null
+                onOpenBenchmark(spec.displayName, openHistory)
+            }
         )
         if (showDirectDownloadConfirm) {
             DirectDownloadConfirmDialog(
@@ -3861,7 +3920,9 @@ private fun ModelZooDetailDialog(
     onUnhideModel: () -> Unit,
     onCopyLink: () -> Unit,
     modelNote: String,
-    onSaveModelNote: (String?) -> Unit
+    onSaveModelNote: (String?) -> Unit,
+    benchmarkSummary: ModelBenchmarkSummary?,
+    onOpenBenchmark: (openHistory: Boolean) -> Unit
 ) {
     val context = LocalContext.current
     val socInfo = remember { collectFusionSocInfo() }
@@ -3966,6 +4027,38 @@ private fun ModelZooDetailDialog(
                             FusionTextButton(onClick = { noteDeleteConfirmOpen = true }) {
                                 Text("메모 삭제", fontSize = 12.sp, maxLines = 1)
                             }
+                        }
+                    }
+                    Text("벤치마크 요약", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    if (benchmarkSummary == null) {
+                        Text("아직 측정된 벤치마크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
+                    } else {
+                        DetailMetaRow("측정 횟수", "${benchmarkSummary.count}회")
+                        DetailMetaRow(
+                            "중앙값 디코딩 속도",
+                            benchmarkSummary.medianDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음"
+                        )
+                        DetailMetaRow(
+                            "최고 디코딩 속도",
+                            benchmarkSummary.bestDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음"
+                        )
+                        DetailMetaRow("최근 측정", formatTimestamp(benchmarkSummary.latestAt))
+                        DetailMetaRow("최근 가속기", benchmarkSummary.recentAccelerator ?: "정보 없음")
+                        DetailMetaRow("MTP 추천", benchmarkSummary.mtpRecommendation)
+                        if (benchmarkSummary.failedCount > 0) {
+                            DetailMetaRow("실패 횟수", "${benchmarkSummary.failedCount}회")
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FusionTextButton(onClick = {
+                            onOpenBenchmark(false)
+                        }) {
+                            Text("벤치마크 실행", fontSize = 12.sp, maxLines = 1)
+                        }
+                        FusionTextButton(onClick = {
+                            onOpenBenchmark(true)
+                        }) {
+                            Text("기록 보기", fontSize = 12.sp, maxLines = 1)
                         }
                     }
                     Text(fusionNpuNoteTitle(socInfo.detectedSocVendor), color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
@@ -4790,6 +4883,82 @@ private fun saveModelNotes(prefs: SharedPreferences, notes: Map<String, String>)
         }
     }
     prefs.edit().putString(PrefModelNotes, obj.toString()).apply()
+}
+
+private fun buildModelBenchmarkSummary(
+    spec: FusionModelSpec,
+    results: List<BenchmarkResultEntity>
+): ModelBenchmarkSummary? {
+    val matched = results.filter { result ->
+        val pathMatch = !spec.localPath.isNullOrBlank() && !result.modelPath.isNullOrBlank() && result.modelPath == spec.localPath
+        val nameMatch = result.modelName.equals(spec.displayName, ignoreCase = true)
+        pathMatch || nameMatch
+    }
+    if (matched.isEmpty()) return null
+
+    val success = matched.filter { it.success }
+    val failedCount = matched.count { !it.success }
+    val latest = matched.maxByOrNull { it.createdAt } ?: return null
+    val speedSeries = success.mapNotNull { it.decodeTokensPerSecond?.takeIf { v -> v > 0f } ?: it.totalTokensPerSecond.takeIf { v -> v > 0f } }
+    val sortedSpeed = speedSeries.sorted()
+    val median = if (sortedSpeed.isEmpty()) null else {
+        val mid = sortedSpeed.size / 2
+        if (sortedSpeed.size % 2 == 0) (sortedSpeed[mid - 1] + sortedSpeed[mid]) / 2f else sortedSpeed[mid]
+    }
+    val avg = if (speedSeries.isEmpty()) null else speedSeries.average().toFloat()
+    val best = speedSeries.maxOrNull()
+    val worst = speedSeries.minOrNull()
+    val averageTotal = success.map { it.totalTokensPerSecond }.filter { it > 0f }.takeIf { it.isNotEmpty() }?.average()?.toFloat()
+    val mtpRecommendation = buildMtpRecommendation(success)
+    return ModelBenchmarkSummary(
+        count = matched.size,
+        latestAt = latest.createdAt,
+        medianDecodeTps = median,
+        bestDecodeTps = best,
+        worstDecodeTps = worst,
+        averageDecodeTps = avg,
+        averageTotalTps = averageTotal,
+        recentAccelerator = latest.actualBackend ?: latest.accelerator,
+        failedCount = failedCount,
+        mtpRecommendation = mtpRecommendation
+    )
+}
+
+private fun buildMtpRecommendation(success: List<BenchmarkResultEntity>): String {
+    val on = success.filter { it.mtpEnabled }
+    val off = success.filter { !it.mtpEnabled }
+    if (on.size < 3 || off.size < 3) return "측정 부족"
+    val onMedian = on.mapNotNull { it.decodeTokensPerSecond?.takeIf { v -> v > 0f } ?: it.totalTokensPerSecond.takeIf { v -> v > 0f } }.sorted().let { arr ->
+        if (arr.isEmpty()) return "측정 부족"
+        val mid = arr.size / 2
+        if (arr.size % 2 == 0) (arr[mid - 1] + arr[mid]) / 2f else arr[mid]
+    }
+    val offMedian = off.mapNotNull { it.decodeTokensPerSecond?.takeIf { v -> v > 0f } ?: it.totalTokensPerSecond.takeIf { v -> v > 0f } }.sorted().let { arr ->
+        if (arr.isEmpty()) return "측정 부족"
+        val mid = arr.size / 2
+        if (arr.size % 2 == 0) (arr[mid - 1] + arr[mid]) / 2f else arr[mid]
+    }
+    return when {
+        onMedian >= offMedian * 1.05f -> "켬"
+        offMedian >= onMedian * 1.05f -> "끔"
+        else -> "차이 작음"
+    }
+}
+
+private fun buildCardBenchmarkLine(summary: ModelBenchmarkSummary): String {
+    val speed = summary.medianDecodeTps ?: summary.averageTotalTps
+    return if (speed != null) {
+        "벤치마크 ${summary.count}회 · 중앙값 ${formatSpeed(speed)} tok/s"
+    } else {
+        "벤치마크 ${summary.count}회"
+    }
+}
+
+private fun formatSpeed(value: Float): String = String.format(Locale.US, "%.1f", value)
+
+private fun formatTimestamp(ts: Long): String {
+    if (ts <= 0L) return "정보 없음"
+    return SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(ts))
 }
 
 private fun recommendationSortRank(model: FusionModelSpec, favoriteModelIds: Set<String>): Int {

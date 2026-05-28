@@ -55,7 +55,11 @@ private const val FusionBenchmarkPrompt = "반도체 공정과 메모리 계층 
 private const val FusionBenchmarkPromptLabel = "반도체 공정/메모리 계층 1000자 설명"
 
 @Composable
-fun FusionBenchmarkScreen(onBack: () -> Unit) {
+fun FusionBenchmarkScreen(
+    onBack: () -> Unit,
+    initialShowHistory: Boolean = false,
+    initialHistoryModelFilter: String? = null
+) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
@@ -63,7 +67,7 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
     val engine = remember { LiteRtLlmEngine(context.applicationContext) }
     val db = remember { AppDatabase.getInstance(context) }
     val benchmarkDao = remember { db.benchmarkDao() }
-    var showHistory by remember { mutableStateOf(false) }
+    var showHistory by remember(initialShowHistory) { mutableStateOf(initialShowHistory) }
 
     DisposableEffect(engine) {
         val unregisterMemoryUnloader = FusionMemoryManager.registerIdleEngineUnloader {
@@ -83,7 +87,8 @@ fun FusionBenchmarkScreen(onBack: () -> Unit) {
         BackHandler { showHistory = false }
         BenchmarkHistoryScreen(
             dao = benchmarkDao,
-            onBack = { showHistory = false }
+            onBack = { showHistory = false },
+            initialModelFilter = initialHistoryModelFilter
         )
         return
     }
