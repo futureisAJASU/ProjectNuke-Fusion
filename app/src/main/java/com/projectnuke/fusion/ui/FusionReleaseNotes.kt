@@ -163,6 +163,27 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.3.6-alpha",
+            status = "알파",
+            summary = "채팅 입력 영역의 배치를 다듬었습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "채팅 화면",
+                    items = listOf(
+                        "빠른 입력 버튼의 세로 위치를 입력창에 더 자연스럽게 맞췄습니다.",
+                        "빈 채팅 화면에서 빠른 입력 영역이 과하게 위로 떠 보이는 문제를 개선했습니다.",
+                        "키보드가 열리거나 닫힐 때 입력 영역의 배치가 어색해지지 않도록 조정했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "UI 개선",
+                    items = listOf(
+                        "하단 입력 영역의 여백과 정렬을 더 일관되게 다듬었습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.3.5-alpha",
             status = "알파",
             summary = "업데이트 기록과 버전 정보를 정리했습니다.",
