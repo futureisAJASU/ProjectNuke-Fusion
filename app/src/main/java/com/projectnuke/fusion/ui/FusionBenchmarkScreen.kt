@@ -155,6 +155,7 @@ fun FusionBenchmarkScreen(
                         }
                         if (snapshot.modelPath.isNullOrBlank() || !File(snapshot.modelPath).exists()) {
                             Log.e("FusionBenchmark", "Selected model file missing: ${snapshot.modelPath}")
+                            DeveloperLogStore.record(context, "benchmark", "벤치마크 시작 실패", "model file missing")
                             Toast.makeText(context, "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요.", Toast.LENGTH_SHORT).show()
                             return@TextButton
                         }
@@ -162,6 +163,7 @@ fun FusionBenchmarkScreen(
                         val memorySnapshot = FusionMemoryManager.getMemorySnapshot(context)
                         if (memorySnapshot.lowMemory || FusionMemoryManager.shouldBlockBenchmark(context)) {
                             status = "사용 가능한 메모리가 부족하여 벤치마크를 시작할 수 없습니다."
+                            DeveloperLogStore.record(context, "memory", "벤치마크 시작 차단", "low memory")
                             Toast.makeText(context, "사용 가능한 메모리가 부족하여 벤치마크를 시작할 수 없습니다.", Toast.LENGTH_SHORT).show()
                             return@TextButton
                         }
@@ -172,6 +174,7 @@ fun FusionBenchmarkScreen(
                         isRunning = true
                         status = "벤치마크를 준비하는 중입니다."
                         result = null
+                        DeveloperLogStore.record(context, "benchmark", "벤치마크 시작", snapshot.modelName)
 
                         scope.launch {
                             runBenchmark(
@@ -339,6 +342,7 @@ private suspend fun runBenchmark(
             )
             Toast.makeText(context, "벤치마크 기록을 저장했습니다.", Toast.LENGTH_SHORT).show()
             Log.i("FusionBenchmark", "Benchmark success totalMs=$totalMs tokens=$estimatedTokens totalTps=$totalTps decodeTps=$decodeTps mtp=${mtpStatus.name}")
+            DeveloperLogStore.record(context, "benchmark", "벤치마크 성공", "model=${snapshot.modelName}, decodeTps=${decodeTps?.toFloat()}")
                 onStatus("벤치마크가 완료되었습니다.")
             } finally {
                 runCatching { engine.unload() }
@@ -353,6 +357,7 @@ private suspend fun runBenchmark(
     } catch (e: Exception) {
         Log.e("FusionBenchmark", "Benchmark generation failed", e)
         Log.e("FusionEngine", "모델 설정을 적용할 수 없습니다.", e)
+        DeveloperLogStore.record(context, "benchmark", "벤치마크 실패", e::class.java.simpleName)
         onStatus(null)
         val userMessage = benchmarkUserErrorMessage(e, snapshot)
         Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
