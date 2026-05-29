@@ -124,6 +124,7 @@ fun ConversationListScreenV2(
     var showAttachmentStorageDialog by remember { mutableStateOf(false) }
     var showAppInfoDialog by remember { mutableStateOf(false) }
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
+    var showDeveloperLogDialog by remember { mutableStateOf(false) }
     var attachmentStorageStats by remember { mutableStateOf<AttachmentStorageStats?>(null) }
     var attachmentStorageLoading by remember { mutableStateOf(false) }
     var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
@@ -760,6 +761,11 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("개발자 로그", "최근 모델, 메모리, 오류, 벤치마크 상태를 확인합니다.") {
+                            showDeveloperLogDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("디버그 정보 복사", "모델, 설정, 기기, 최근 상태 정보를 클립보드에 복사합니다.") {
                             scope.launch {
                                 try {
@@ -1060,6 +1066,17 @@ fun ConversationListScreenV2(
             containerColor = DrawerPanelBg,
             titleContentColor = DrawerTextPrimary,
             textContentColor = DrawerTextPrimary
+        )
+    }
+
+    if (showDeveloperLogDialog) {
+        val benchmarkResults by db.benchmarkDao().observeAll().collectAsState(initial = emptyList())
+        DeveloperLogDialog(
+            context = context,
+            prefs = prefs,
+            clipboard = clipboard,
+            benchmarkResults = benchmarkResults,
+            onDismiss = { showDeveloperLogDialog = false }
         )
     }
 
