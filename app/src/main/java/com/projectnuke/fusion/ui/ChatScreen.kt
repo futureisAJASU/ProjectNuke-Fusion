@@ -3579,10 +3579,6 @@ private fun ModelSelectDialog(
                     onToggleReasoning = onToggleReasoning,
                     onToggleWebSearch = onToggleWebSearch,
                     onOpenAdvancedSettings = onOpenAdvancedSettings,
-                    onSettingsRestored = {
-                        recentHistory = loadRecentModels(prefs)
-                        modelNotes = loadModelNotes(prefs)
-                    },
                     onDismiss = onDismiss
                 )
             }
@@ -3628,65 +3624,8 @@ private fun ModelLibrarySettingsDock(
     onToggleReasoning: () -> Unit,
     onToggleWebSearch: () -> Unit,
     onOpenAdvancedSettings: () -> Unit,
-    onSettingsRestored: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE) }
-    val clipboard = LocalClipboardManager.current
-    var pendingRestoreJson by remember { mutableStateOf<String?>(null) }
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val payload = buildSettingsBackupJson(context, prefs)
-        runCatching { context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(payload) } }
-            .onSuccess {
-                Toast.makeText(context, "설정을 내보냈습니다.", Toast.LENGTH_SHORT).show()
-                Log.d("FusionModelSelect", "settings_export schema=$SettingsBackupSchemaVersion keys=settings,modelLibrary success=true")
-            }
-            .onFailure {
-                Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
-                Log.d("FusionModelSelect", "settings_export schema=$SettingsBackupSchemaVersion keys=settings,modelLibrary success=false")
-            }
-    }
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val text = runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } }.getOrNull()
-        if (text.isNullOrBlank()) {
-            Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
-            return@rememberLauncherForActivityResult
-        }
-        pendingRestoreJson = text
-    }
-    pendingRestoreJson?.let { raw ->
-        AlertDialog(
-            onDismissRequest = { pendingRestoreJson = null },
-            title = { Text("설정을 복원하시겠습니까?") },
-            text = { Text("현재 설정이 백업 파일의 값으로 변경됩니다. 채팅 기록과 모델 파일은 삭제되지 않습니다.") },
-            confirmButton = {
-                FusionTextButton(onClick = {
-                    when (restoreSettingsBackupJson(prefs, raw)) {
-                        RestoreResult.Success -> {
-                            onSettingsRestored()
-                            Toast.makeText(context, "설정을 복원했습니다.", Toast.LENGTH_SHORT).show()
-                            Toast.makeText(context, "일부 설정은 화면을 다시 열면 반영됩니다.", Toast.LENGTH_SHORT).show()
-                        }
-                        RestoreResult.ModelPathMissing -> {
-                            onSettingsRestored()
-                            Toast.makeText(context, "설정을 복원했습니다.", Toast.LENGTH_SHORT).show()
-                            Toast.makeText(context, "백업의 모델 파일을 찾을 수 없어 현재 모델을 유지했습니다.", Toast.LENGTH_SHORT).show()
-                        }
-                        RestoreResult.InvalidJson -> Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
-                        RestoreResult.UnsupportedSchema -> Toast.makeText(context, "지원하지 않는 설정 백업 형식입니다.", Toast.LENGTH_SHORT).show()
-                    }
-                    pendingRestoreJson = null
-                }) { Text("복원") }
-            },
-            dismissButton = { FusionTextButton(onClick = { pendingRestoreJson = null }) { Text("취소") } },
-            containerColor = PanelBg,
-            titleContentColor = TextPrimary,
-            textContentColor = TextPrimary
-        )
-    }
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = BubbleBg,
@@ -3696,23 +3635,6 @@ private fun ModelLibrarySettingsDock(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            SettingsBackupRestorePanel(
-                onExportFile = { exportLauncher.launch("fusion-settings-backup.json") },
-                onImportFile = { importLauncher.launch(arrayOf("application/json", "text/*")) },
-                onCopyJson = {
-                    clipboard.setText(AnnotatedString(buildSettingsBackupJson(context, prefs)))
-                    Toast.makeText(context, "설정 JSON을 복사했습니다.", Toast.LENGTH_SHORT).show()
-                    Log.d("FusionModelSelect", "settings_export schema=$SettingsBackupSchemaVersion keys=settings,modelLibrary success=true")
-                },
-                onRestoreClipboard = {
-                    val raw = clipboard.getText()?.text?.toString()
-                    if (raw.isNullOrBlank()) {
-                        Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
-                    } else {
-                        pendingRestoreJson = raw
-                    }
-                }
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CompactToggleChip(
                     title = "Reasoning",
@@ -3756,32 +3678,6 @@ private fun ModelLibrarySettingsDock(
         }
     }
 
-}
-
-@Composable
-private fun SettingsBackupRestorePanel(
-    onExportFile: () -> Unit,
-    onImportFile: () -> Unit,
-    onCopyJson: () -> Unit,
-    onRestoreClipboard: () -> Unit
-) {
-    Surface(shape = RoundedCornerShape(12.dp), color = PanelBg, modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text("설정 백업 및 복원", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Text("모델 메모가 백업에 포함될 수 있습니다.", color = TextSecondary, fontSize = 11.sp)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                FusionTextButton(onClick = onExportFile) { Text("설정 내보내기", fontSize = 12.sp, maxLines = 1) }
-                FusionTextButton(onClick = onImportFile) { Text("설정 가져오기", fontSize = 12.sp, maxLines = 1) }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                FusionTextButton(onClick = onCopyJson) { Text("설정 JSON 복사", fontSize = 12.sp, maxLines = 1) }
-                FusionTextButton(onClick = onRestoreClipboard) { Text("클립보드에서 복원", fontSize = 12.sp, maxLines = 1) }
-            }
-        }
-    }
 }
 
 @Composable
@@ -6939,103 +6835,6 @@ private fun saveFusionSettings(
             }
         }
         .apply()
-}
-
-private enum class RestoreResult {
-    Success,
-    ModelPathMissing,
-    InvalidJson,
-    UnsupportedSchema
-}
-
-private fun buildSettingsBackupJson(context: Context, prefs: SharedPreferences): String {
-    val lowMemoryMode = (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.let {
-        it.isLowRamDevice
-    } ?: false
-    val root = JSONObject()
-        .put("schemaVersion", SettingsBackupSchemaVersion)
-        .put("app", "Fusion")
-        .put("exportedAt", System.currentTimeMillis())
-    val settings = JSONObject()
-        .put("selectedModel", prefs.getString(PrefSelectedModel, "Gemma 4 E2B-it"))
-        .put("selectedModelPath", prefs.getString(PrefSelectedModelPath, null))
-        .put("accelerator", prefs.getString(PrefAccelerator, AcceleratorMode.GPU.name))
-        .put("maxTokens", prefs.getInt(PrefMaxTokens, 4000))
-        .put("temperature", prefs.getFloat(PrefTemperature, 1.0f).toDouble())
-        .put("topK", prefs.getInt(PrefTopK, 64))
-        .put("topP", prefs.getFloat(PrefTopP, 0.95f).toDouble())
-        .put("mtpEnabled", prefs.getBoolean(PrefSpeculativeDecoding, false))
-        .put("reasoningEnabled", prefs.getBoolean(PrefReasoningEnabled, false))
-        .put("reasoningBudget", prefs.getInt(PrefReasoningBudget, 512))
-        .put("webSearchEnabled", prefs.getBoolean(PrefWebSearchEnabled, false))
-        .put("lowMemoryMode", lowMemoryMode)
-    val modelLibrary = JSONObject()
-        .put("favorites", JSONArray((prefs.getStringSet(PrefFavoriteModelIds, emptySet()) ?: emptySet()).toList()))
-        .put("hidden", JSONArray((prefs.getStringSet(PrefHiddenModelIds, emptySet()) ?: emptySet()).toList()))
-        .put("recent", prefs.getString(PrefRecentModels, null)?.let { JSONArray(it) } ?: JSONArray())
-        .put("notes", prefs.getString(PrefModelNotes, null)?.let { JSONObject(it) } ?: JSONObject())
-        .put("sortMode", prefs.getString(PrefModelLibrarySortMode, ModelLibrarySortMode.RECOMMENDATION.key))
-    root.put("settings", settings)
-    root.put("modelLibrary", modelLibrary)
-    Log.d("FusionModelSelect", "settings_export schema=$SettingsBackupSchemaVersion keys=settings,modelLibrary success=true")
-    return root.toString(2)
-}
-
-private fun restoreSettingsBackupJson(
-    prefs: SharedPreferences,
-    raw: String
-): RestoreResult {
-    val root = runCatching { JSONObject(raw) }.getOrNull() ?: return RestoreResult.InvalidJson
-    if (root.optString("app") != "Fusion" || root.optInt("schemaVersion", -1) != SettingsBackupSchemaVersion) {
-        return RestoreResult.UnsupportedSchema
-    }
-    val settings = root.optJSONObject("settings") ?: JSONObject()
-    val modelLibrary = root.optJSONObject("modelLibrary") ?: JSONObject()
-    val restoredKeys = mutableListOf<String>()
-    val editor = prefs.edit()
-    if (settings.has("accelerator")) { editor.putString(PrefAccelerator, settings.optString("accelerator", AcceleratorMode.GPU.name)); restoredKeys += PrefAccelerator }
-    if (settings.has("maxTokens")) { editor.putInt(PrefMaxTokens, settings.optInt("maxTokens", 4000).coerceIn(2000, 32000)); restoredKeys += PrefMaxTokens }
-    if (settings.has("temperature")) { editor.putFloat(PrefTemperature, settings.optDouble("temperature", 1.0).toFloat().coerceIn(0f, 2f)); restoredKeys += PrefTemperature }
-    if (settings.has("topK")) { editor.putInt(PrefTopK, settings.optInt("topK", 64).coerceIn(5, 100)); restoredKeys += PrefTopK }
-    if (settings.has("topP")) { editor.putFloat(PrefTopP, settings.optDouble("topP", 0.95).toFloat().coerceIn(0f, 1f)); restoredKeys += PrefTopP }
-    if (settings.has("mtpEnabled")) { editor.putBoolean(PrefSpeculativeDecoding, settings.optBoolean("mtpEnabled", false)); restoredKeys += PrefSpeculativeDecoding }
-    if (settings.has("reasoningEnabled")) { editor.putBoolean(PrefReasoningEnabled, settings.optBoolean("reasoningEnabled", false)); restoredKeys += PrefReasoningEnabled }
-    if (settings.has("reasoningBudget")) { editor.putInt(PrefReasoningBudget, settings.optInt("reasoningBudget", 512).coerceIn(128, 8192)); restoredKeys += PrefReasoningBudget }
-    if (settings.has("webSearchEnabled")) { editor.putBoolean(PrefWebSearchEnabled, settings.optBoolean("webSearchEnabled", false)); restoredKeys += PrefWebSearchEnabled }
-    if (settings.has("lowMemoryMode")) { restoredKeys += "lowMemoryMode(ignored)" }
-    val currentSelectedModel = prefs.getString(PrefSelectedModel, "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
-    val currentSelectedModelPath = prefs.getString(PrefSelectedModelPath, null)
-    val backupModel = settings.optString("selectedModel", currentSelectedModel)
-    val backupPath = settings.optString("selectedModelPath", currentSelectedModelPath)
-    var modelPathMissing = false
-    if (!backupPath.isNullOrBlank()) {
-        if (File(backupPath).exists()) {
-            editor.putString(PrefSelectedModel, backupModel)
-            editor.putString(PrefSelectedModelPath, backupPath)
-            restoredKeys += PrefSelectedModel
-            restoredKeys += PrefSelectedModelPath
-        } else {
-            modelPathMissing = true
-        }
-    } else if (settings.has("selectedModel")) {
-        editor.putString(PrefSelectedModel, backupModel)
-        editor.remove(PrefSelectedModelPath)
-        restoredKeys += PrefSelectedModel
-    }
-    modelLibrary.optJSONArray("favorites")?.let { arr ->
-        editor.putStringSet(PrefFavoriteModelIds, (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }.toSet())
-        restoredKeys += PrefFavoriteModelIds
-    }
-    modelLibrary.optJSONArray("hidden")?.let { arr ->
-        editor.putStringSet(PrefHiddenModelIds, (0 until arr.length()).mapNotNull { i -> arr.optString(i).takeIf { it.isNotBlank() } }.toSet())
-        restoredKeys += PrefHiddenModelIds
-    }
-    modelLibrary.optJSONArray("recent")?.let { arr -> editor.putString(PrefRecentModels, arr.toString()); restoredKeys += PrefRecentModels }
-    modelLibrary.optJSONObject("notes")?.let { notes -> editor.putString(PrefModelNotes, notes.toString()); restoredKeys += PrefModelNotes }
-    if (modelLibrary.has("sortMode")) { editor.putString(PrefModelLibrarySortMode, modelLibrary.optString("sortMode", ModelLibrarySortMode.RECOMMENDATION.key)); restoredKeys += PrefModelLibrarySortMode }
-    editor.apply()
-    Log.d("FusionModelSelect", "settings_restore schema=${root.optInt("schemaVersion", -1)} keys=${restoredKeys.joinToString(",")} success=true")
-    return if (modelPathMissing) RestoreResult.ModelPathMissing else RestoreResult.Success
 }
 
 private fun isGemma4Model(modelName: String): Boolean {

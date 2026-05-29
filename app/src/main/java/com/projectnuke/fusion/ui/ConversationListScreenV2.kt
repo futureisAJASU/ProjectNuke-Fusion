@@ -7,6 +7,7 @@ import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
 import android.os.CancellationSignal
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -133,6 +134,8 @@ fun ConversationListScreenV2(
     var includeArchivedInMarkdownExport by remember { mutableStateOf(false) }
     var markdownExportSearchQuery by remember { mutableStateOf("") }
     var pendingChatMarkdownExport by remember { mutableStateOf<String?>(null) }
+    var showSettingsBackupDialog by remember { mutableStateOf(false) }
+    var pendingSettingsRestoreJson by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(isDrawerOpen) {
         if (!isDrawerOpen) {
@@ -189,6 +192,36 @@ fun ConversationListScreenV2(
             Toast.makeText(context, "채팅 Markdown을 클립보드에 복사했습니다.", Toast.LENGTH_SHORT).show()
         }
         pendingChatMarkdownExport = null
+    }
+    val settingsBackupExportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val payload = buildSettingsBackupJson(context, prefs)
+        runCatching {
+            val stream = context.contentResolver.openOutputStream(uri)
+                ?: error("Unable to open export target")
+            stream.bufferedWriter().use { it.write(payload) }
+        }.onSuccess {
+            Toast.makeText(context, "설정을 내보냈습니다.", Toast.LENGTH_SHORT).show()
+            Log.d("FusionModelSelect", "settings_export schema=1 keys=settings,modelLibrary success=true")
+        }.onFailure {
+            Toast.makeText(context, "설정 파일을 쓸 수 없습니다.", Toast.LENGTH_SHORT).show()
+            Log.d("FusionModelSelect", "settings_export schema=1 keys=settings,modelLibrary success=false")
+        }
+    }
+    val settingsBackupImportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val text = runCatching {
+            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+        }.getOrNull()
+        if (text.isNullOrBlank()) {
+            Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
+        } else {
+            pendingSettingsRestoreJson = text
+        }
     }
 
     fun saveSettings() {
@@ -700,7 +733,12 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
-                        DrawerSettingActionRow("채팅 Markdown 내보내기", "Markdown 파일로 저장할 채팅을 선택해 주세요.") {
+                        DrawerSettingActionRow("설정 백업 및 복원", "모델, 생성 옵션, 모델 라이브러리 설정을 백업하거나 복원합니다.") {
+                            showSettingsBackupDialog = true
+                        }
+                    }
+                    item {
+                        DrawerSettingActionRow("채팅 Markdown 내보내기", "선택한 채팅을 Markdown 파일로 저장합니다.") {
                             showChatMarkdownExportPicker = true
                         }
                     }
@@ -761,6 +799,86 @@ fun ConversationListScreenV2(
                 }
             }
         }
+    }
+
+    pendingSettingsRestoreJson?.let { raw ->
+        AlertDialog(
+            onDismissRequest = { pendingSettingsRestoreJson = null },
+            title = { Text("설정을 복원하시겠습니까?") },
+            text = { Text("현재 설정이 백업 파일의 값으로 변경됩니다. 채팅 기록과 모델 파일은 삭제되지 않습니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    when (restoreSettingsBackupJson(prefs, raw)) {
+                        SettingsRestoreResult.Success -> {
+                            Toast.makeText(context, "설정을 복원했습니다.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "일부 설정은 화면을 다시 열면 반영됩니다.", Toast.LENGTH_SHORT).show()
+                        }
+                        SettingsRestoreResult.ModelPathMissing -> {
+                            Toast.makeText(context, "설정을 복원했습니다.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "백업의 모델 파일을 찾을 수 없어 현재 모델을 유지했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                        SettingsRestoreResult.InvalidJson -> {
+                            Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                        SettingsRestoreResult.UnsupportedSchema -> {
+                            Toast.makeText(context, "지원하지 않는 설정 백업 형식입니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    reasoningEnabled = prefs.getBoolean("reasoning_enabled", reasoningEnabled)
+                    webSearchEnabled = prefs.getBoolean("web_search_enabled", webSearchEnabled)
+                    speculativeEnabled = prefs.getBoolean("speculative_decoding_enabled", speculativeEnabled)
+                    pendingSettingsRestoreJson = null
+                }) { Text("복원", color = DrawerAccentBlue) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingSettingsRestoreJson = null }) {
+                    Text("취소", color = DrawerTextSecondary)
+                }
+            },
+            containerColor = DrawerPanelBg,
+            titleContentColor = DrawerTextPrimary,
+            textContentColor = DrawerTextPrimary
+        )
+    }
+
+    if (showSettingsBackupDialog) {
+        AlertDialog(
+            onDismissRequest = { showSettingsBackupDialog = false },
+            title = { Text("설정 백업 및 복원") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("채팅 기록과 모델 파일은 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
+                    Text("모델 메모가 백업에 포함될 수 있습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
+                    DrawerSettingActionRow("설정 내보내기", "JSON 파일로 저장합니다.") {
+                        settingsBackupExportLauncher.launch("fusion-settings-backup.json")
+                    }
+                    DrawerSettingActionRow("설정 가져오기", "백업 JSON 파일에서 복원합니다.") {
+                        settingsBackupImportLauncher.launch(arrayOf("application/json", "text/*"))
+                    }
+                    DrawerSettingActionRow("설정 JSON 복사", "백업 JSON을 클립보드에 복사합니다.") {
+                        clipboard.setText(AnnotatedString(buildSettingsBackupJson(context, prefs)))
+                        Toast.makeText(context, "설정 JSON을 복사했습니다.", Toast.LENGTH_SHORT).show()
+                        Log.d("FusionModelSelect", "settings_export schema=1 keys=settings,modelLibrary success=true")
+                    }
+                    DrawerSettingActionRow("클립보드에서 복원", "클립보드의 백업 JSON을 복원합니다.") {
+                        val raw = clipboard.getText()?.text?.toString()
+                        if (raw.isNullOrBlank()) {
+                            Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            pendingSettingsRestoreJson = raw
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showSettingsBackupDialog = false }) {
+                    Text("확인", color = DrawerAccentBlue)
+                }
+            },
+            containerColor = DrawerPanelBg,
+            titleContentColor = DrawerTextPrimary,
+            textContentColor = DrawerTextPrimary
+        )
     }
 
     if (showChatMarkdownExportPicker) {
