@@ -12,6 +12,7 @@ data class ConversationMemoryCandidate(
     val createdAt: Long,
     val updatedAt: Long? = null,
     val conversationTitle: String? = null,
+    val enabled: Boolean = true,
     val savedByUser: Boolean = true
 )
 
@@ -46,6 +47,7 @@ fun loadAllConversationMemoryCandidates(
                     createdAt = obj.optLong("createdAt"),
                     updatedAt = obj.optLong("updatedAt").takeIf { it > 0L },
                     conversationTitle = obj.optString("conversationTitle").takeIf { it.isNotBlank() },
+                    enabled = obj.optBoolean("enabled", true),
                     savedByUser = obj.optBoolean("savedByUser", true)
                 )
             )
@@ -92,6 +94,7 @@ fun saveConversationMemoryCandidates(
                 .put("createdAt", now)
                 .put("updatedAt", now)
                 .put("conversationTitle", conversationTitle)
+                .put("enabled", true)
                 .put("savedByUser", true)
         )
         savedCount++
@@ -128,6 +131,30 @@ fun updateConversationMemoryCandidate(
     return true
 }
 
+fun setConversationMemoryCandidateEnabled(
+    context: Context,
+    candidateId: String,
+    enabled: Boolean
+): Boolean {
+    if (candidateId.isBlank()) return false
+    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+    val existing = runCatching {
+        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+    }.getOrElse { JSONArray() }
+    var changed = false
+    for (index in 0 until existing.length()) {
+        val obj = existing.optJSONObject(index) ?: continue
+        if (obj.optString("id") != candidateId) continue
+        obj.put("enabled", enabled)
+        obj.put("updatedAt", System.currentTimeMillis())
+        changed = true
+        break
+    }
+    if (!changed) return false
+    prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
+    return true
+}
+
 fun deleteConversationMemoryCandidate(
     context: Context,
     candidateId: String
@@ -154,6 +181,6 @@ fun deleteConversationMemoryCandidate(
 
 private fun normalizeMemoryCandidateText(value: String): String {
     return value
-        .replace(Regex("""^[\-\*\u2022\u25CF\u25E6\d\.\)\s]+"""), "")
+        .replace(Regex("""^(?:[\-\*\u2022\u25CF\u25E6]\s*|\d+[\.\)]\s*)"""), "")
         .trim()
 }

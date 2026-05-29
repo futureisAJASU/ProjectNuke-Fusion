@@ -16,6 +16,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -59,12 +61,22 @@ fun MemoryManagerDialog(
     var editingSummary by remember { mutableStateOf<ConversationSummaryMemory?>(null) }
     var editingSummaryText by remember { mutableStateOf("") }
     var deletingSummary by remember { mutableStateOf<ConversationSummaryMemory?>(null) }
+    var showContextPreview by remember { mutableStateOf(false) }
+    val settingsPrefs = remember {
+        context.getSharedPreferences("fusion_chat_settings", Context.MODE_PRIVATE)
+    }
+    var memoryContextEnabled by remember {
+        mutableStateOf(isSavedMemoryContextEnabled(settingsPrefs))
+    }
 
     val conversationMap = remember(conversations, archivedConversations) {
         (conversations + archivedConversations).associateBy { it.id }
     }
     val savedMemories = remember(refreshKey) { loadAllConversationMemoryCandidates(context) }
     val savedSummaries = remember(refreshKey) { loadAllConversationSummaries(context) }
+    val memoryContext = remember(refreshKey, memoryContextEnabled) {
+        buildSavedMemoryContext(context, settingsPrefs, currentConversationId = null)
+    }
     val query = searchQuery.trim()
     val filteredMemories = remember(savedMemories, conversationMap, query) {
         if (query.isBlank()) {
@@ -102,6 +114,36 @@ fun MemoryManagerDialog(
                 item {
                     MemoryManagerCard {
                         Text("Fusion이 나중에 참고할 수 있도록 저장한 정보를 관리합니다.", color = MemoryManagerTextSecondary, fontSize = 13.sp)
+                    }
+                }
+                item {
+                    MemoryManagerCard {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("메모리 사용", color = MemoryManagerTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Text("저장된 메모리를 답변 생성에 참고합니다.", color = MemoryManagerTextSecondary, fontSize = 12.sp)
+                            }
+                            Switch(
+                                checked = memoryContextEnabled,
+                                onCheckedChange = { enabled ->
+                                    settingsPrefs.edit().putBoolean(PrefSavedMemoryContextEnabled, enabled).apply()
+                                    memoryContextEnabled = enabled
+                                    Toast.makeText(context, "메모리 사용 설정을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = MemoryManagerAccentBlue,
+                                    checkedTrackColor = MemoryManagerAccentBlue.copy(alpha = 0.45f),
+                                    uncheckedThumbColor = MemoryManagerTextSecondary,
+                                    uncheckedTrackColor = MemoryManagerCardBg
+                                )
+                            )
+                        }
+                        TextButton(onClick = { showContextPreview = true }) {
+                            Text("메모리 컨텍스트 미리보기", color = MemoryManagerAccentBlue)
+                        }
                     }
                 }
                 item {
@@ -144,9 +186,10 @@ fun MemoryManagerDialog(
                             val conversationTitle = resolveConversationTitle(candidate.conversationId, candidate.conversationTitle, conversationMap)
                             MemoryManagerCard {
                                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("수동 저장", color = MemoryManagerAccentBlue, fontSize = 11.sp)
+                                    Text(if (candidate.enabled) "사용 중" else "사용 안 함", color = if (candidate.enabled) MemoryManagerAccentBlue else MemoryManagerTextSecondary, fontSize = 11.sp)
                                     Text(formatMemoryTime(candidate.updatedAt ?: candidate.createdAt), color = MemoryManagerTextSecondary, fontSize = 11.sp)
                                 }
+                                Text("수동 저장", color = MemoryManagerTextSecondary, fontSize = 11.sp)
                                 Text(conversationTitle, color = MemoryManagerTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(candidate.text, color = MemoryManagerTextPrimary, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -158,6 +201,14 @@ fun MemoryManagerDialog(
                                         clipboard.setText(AnnotatedString(candidate.text))
                                         Toast.makeText(context, "메모리를 복사했습니다.", Toast.LENGTH_SHORT).show()
                                     }) { Text("복사", color = MemoryManagerAccentBlue) }
+                                    TextButton(onClick = {
+                                        if (setConversationMemoryCandidateEnabled(context, candidate.id, !candidate.enabled)) {
+                                            refreshKey++
+                                            Toast.makeText(context, "메모리 사용 상태를 변경했습니다.", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }) {
+                                        Text(if (candidate.enabled) "메모리 사용 안 함" else "메모리 사용", color = MemoryManagerAccentBlue)
+                                    }
                                     TextButton(onClick = { deletingMemory = candidate }) { Text("삭제", color = MemoryManagerDangerRed) }
                                 }
                             }
@@ -219,6 +270,59 @@ fun MemoryManagerDialog(
         titleContentColor = MemoryManagerTextPrimary,
         textContentColor = MemoryManagerTextPrimary
     )
+
+    if (showContextPreview) {
+        AlertDialog(
+            onDismissRequest = { showContextPreview = false },
+            title = { Text("메모리 컨텍스트 미리보기") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("답변 생성에 포함될 메모리를 확인합니다.", color = MemoryManagerTextSecondary, fontSize = 13.sp)
+                    Text("메모리 사용: ${if (memoryContextEnabled) "켜짐" else "꺼짐"}", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                    Text("저장된 메모리: ${savedMemories.size}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                    Text("사용 중인 메모리: ${savedMemories.count { it.enabled }}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                    Text("예상 문자 수: ${memoryContext.characterCount}", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                    if (memoryContext.trimmed) {
+                        Text("길이 제한에 맞춰 일부 메모리를 제외했습니다.", color = MemoryManagerTextSecondary, fontSize = 12.sp)
+                    }
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MemoryManagerCardBg
+                    ) {
+                        Text(
+                            text = when {
+                                !memoryContextEnabled -> "메모리 사용이 꺼져 있습니다."
+                                memoryContext.text.isNullOrBlank() -> "사용 중인 메모리가 없습니다."
+                                else -> memoryContext.text
+                            },
+                            modifier = Modifier.padding(10.dp),
+                            color = MemoryManagerTextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val text = memoryContext.text.orEmpty()
+                        if (text.isNotBlank()) {
+                            clipboard.setText(AnnotatedString(text))
+                            Toast.makeText(context, "메모리 컨텍스트를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    enabled = !memoryContext.text.isNullOrBlank()
+                ) { Text("복사", color = MemoryManagerAccentBlue) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showContextPreview = false }) { Text("닫기", color = MemoryManagerTextSecondary) }
+            },
+            containerColor = MemoryManagerPanelBg,
+            titleContentColor = MemoryManagerTextPrimary,
+            textContentColor = MemoryManagerTextPrimary
+        )
+    }
 
     if (editingMemory != null) {
         AlertDialog(

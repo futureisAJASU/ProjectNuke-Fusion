@@ -861,6 +861,7 @@ fun ConversationListScreenV2(
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("채팅 기록과 모델 파일은 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     Text("모델 메모가 백업에 포함될 수 있습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
+                    Text("저장된 메모리 내용은 설정 백업에 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     DrawerSettingActionRow("설정 내보내기", "JSON 파일로 저장합니다.") {
                         settingsBackupExportLauncher.launch("fusion-settings-backup.json")
                     }

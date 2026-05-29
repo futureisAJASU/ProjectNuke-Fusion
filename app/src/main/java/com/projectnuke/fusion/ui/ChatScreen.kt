@@ -553,6 +553,9 @@ fun ChatScreen(
                         add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
                     }
                     add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
+                    buildSavedMemoryContext(context, settingsPrefs, targetMessage.conversationId).text?.let { memoryContext ->
+                        add(ChatMessage(role = "system", content = memoryContext))
+                    }
                     buildConversationSummaryContextText(loadConversationSummary(context, targetMessage.conversationId))?.let { summaryContext ->
                         add(ChatMessage(role = "system", content = summaryContext))
                     }
@@ -1460,6 +1463,10 @@ fun ChatScreen(
                                                 content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"
                                             )
                                         )
+
+                                        buildSavedMemoryContext(context, settingsPrefs, activeConversationId).text?.let { memoryContext ->
+                                            add(ChatMessage(role = "system", content = memoryContext))
+                                        }
 
                                         buildConversationSummaryContextText(loadConversationSummary(context, activeConversationId))?.let { summaryContext ->
                                             add(ChatMessage(role = "system", content = summaryContext))
@@ -8042,7 +8049,7 @@ private fun parseMemoryCandidateLines(raw: String): List<String> {
     return raw
         .lines()
         .map { line ->
-            line.replace(Regex("""^[\-\*\u2022\u25CF\u25E6\d\.\)\s]+"""), "").trim()
+            line.replace(Regex("""^(?:[\-\*\u2022\u25CF\u25E6]\s*|\d+[\.\)]\s*)"""), "").trim()
         }
         .filter { it.isNotBlank() }
         .distinct()

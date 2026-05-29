@@ -163,6 +163,37 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.3.13-alpha",
+            status = "알파",
+            summary = "저장된 메모리를 답변 생성에 반영할 수 있도록 했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "메모리",
+                    items = listOf(
+                        "저장된 메모리를 답변 생성에 참고하는 설정을 추가했습니다.",
+                        "메모리별 사용 여부를 관리할 수 있도록 개선했습니다.",
+                        "답변 생성에 포함될 메모리 컨텍스트를 미리 확인할 수 있도록 했습니다.",
+                        "대화 요약과 저장된 메모리를 함께 활용할 수 있도록 정리했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "채팅",
+                    items = listOf(
+                        "일반 답변 생성과 답변 다시 생성이 동일한 메모리 컨텍스트를 사용하도록 개선했습니다.",
+                        "긴 대화에서도 저장된 핵심 정보를 더 안정적으로 참고할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "삭제되거나 사용 중지된 메모리는 답변 생성에 포함되지 않도록 했습니다.",
+                        "메모리 컨텍스트 길이에 제한을 적용해 긴 메모리로 인한 문제를 줄였습니다.",
+                        "개발자 로그에는 메모리 내용이 아니라 개수와 상태만 표시하도록 했습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.3.12-alpha",
             status = "알파",
             summary = "메모리 관리 화면을 추가했습니다.",

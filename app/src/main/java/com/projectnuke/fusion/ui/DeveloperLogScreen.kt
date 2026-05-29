@@ -75,7 +75,8 @@ fun DeveloperLogDialog(
                     item { DeveloperSectionCard("현재 상태", snapshot.fullLogText, 0, 7) }
                     item { DeveloperSectionCard("모델", snapshot.fullLogText, 8, 13) }
                     item { DeveloperSectionCard("메모리", snapshot.fullLogText, 14, 18) }
-                    item { DeveloperSectionCard("최근 오류", snapshot.fullLogText, 28, 48) }
+                    item { DeveloperPlainCard("저장된 메모리", snapshot.memoryStatusText) }
+                    item { DeveloperSectionCard("최근 오류", snapshot.fullLogText, 36, 56) }
                     item { DeveloperSectionCard("벤치마크", snapshot.fullLogText, 19, 23) }
                     item { DeveloperSectionCard("설정", snapshot.fullLogText, 24, 27) }
                 }
@@ -176,6 +177,18 @@ private fun DeveloperSectionCard(title: String, text: String, startLine: Int, en
                 if (line.isNotBlank()) {
                     Text(line, color = DevLogTextSecondary, fontSize = 11.sp)
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeveloperPlainCard(title: String, text: String) {
+    Surface(shape = RoundedCornerShape(12.dp), color = DevLogCardBg, modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(title, color = DevLogTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            text.lines().filter { it.isNotBlank() }.forEach { line ->
+                Text(line, color = DevLogTextSecondary, fontSize = 11.sp)
             }
         }
     }

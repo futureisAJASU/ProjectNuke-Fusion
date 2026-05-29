@@ -78,7 +78,10 @@ fun loadAllConversationSummaries(
 }
 
 fun buildConversationSummaryContextText(summary: ConversationSummaryMemory?): String? {
-    val text = summary?.summary?.trim()?.takeIf { it.isNotBlank() } ?: return null
+    val text = summary?.summary
+        ?.let(::sanitizeFusionMemoryText)
+        ?.takeIf { it.isNotBlank() }
+        ?: return null
     return "[대화 요약]\n${text.take(MaxSummaryContextChars)}"
 }
 

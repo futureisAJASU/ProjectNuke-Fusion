@@ -55,6 +55,7 @@ fun buildSettingsBackupJson(context: Context, prefs: SharedPreferences): String 
         .put("reasoningEnabled", prefs.getBoolean(PrefReasoningEnabled, false))
         .put("reasoningBudget", prefs.getInt(PrefReasoningBudget, 512))
         .put("webSearchEnabled", prefs.getBoolean(PrefWebSearchEnabled, false))
+        .put("savedMemoryContextEnabled", prefs.getBoolean(PrefSavedMemoryContextEnabled, false))
         .put("lowMemoryMode", lowMemoryMode)
     val modelLibrary = JSONObject()
         .put("favorites", JSONArray((prefs.getStringSet(PrefFavoriteModelIds, emptySet()) ?: emptySet()).toList()))
@@ -89,6 +90,7 @@ fun restoreSettingsBackupJson(
     if (settings.has("reasoningEnabled")) { editor.putBoolean(PrefReasoningEnabled, settings.optBoolean("reasoningEnabled", false)); restoredKeys += PrefReasoningEnabled }
     if (settings.has("reasoningBudget")) { editor.putInt(PrefReasoningBudget, settings.optInt("reasoningBudget", 512).coerceIn(128, 8192)); restoredKeys += PrefReasoningBudget }
     if (settings.has("webSearchEnabled")) { editor.putBoolean(PrefWebSearchEnabled, settings.optBoolean("webSearchEnabled", false)); restoredKeys += PrefWebSearchEnabled }
+    if (settings.has("savedMemoryContextEnabled")) { editor.putBoolean(PrefSavedMemoryContextEnabled, settings.optBoolean("savedMemoryContextEnabled", false)); restoredKeys += PrefSavedMemoryContextEnabled }
     if (settings.has("lowMemoryMode")) { restoredKeys += "lowMemoryMode(ignored)" }
 
     val currentSelectedModel = prefs.getString(PrefSelectedModel, "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"

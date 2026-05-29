@@ -13,7 +13,8 @@ import java.util.Locale
 
 data class FusionDeveloperLogSnapshot(
     val fullLogText: String,
-    val errorReportText: String
+    val errorReportText: String,
+    val memoryStatusText: String
 )
 
 fun buildFusionDeveloperLogSnapshot(
@@ -42,6 +43,17 @@ fun buildFusionDeveloperLogSnapshot(
     }
     val latestBenchmark = benchmarkResults.firstOrNull()
     val errorEvents = events.filter { it.category.contains("error", ignoreCase = true) || it.category.contains("오류") }
+    val savedMemories = loadAllConversationMemoryCandidates(context)
+    val savedSummaries = loadAllConversationSummaries(context)
+    val memoryContext = buildSavedMemoryContext(context, prefs, currentConversationId = null)
+    val memoryStatus = buildString {
+        appendLine("메모리 사용: ${if (isSavedMemoryContextEnabled(prefs)) "켜짐" else "꺼짐"}")
+        appendLine("저장된 메모리 수: ${savedMemories.size}개")
+        appendLine("사용 중인 메모리 수: ${savedMemories.count { it.enabled }}개")
+        appendLine("대화 요약 수: ${savedSummaries.size}개")
+        appendLine("메모리 컨텍스트 예상 문자 수: ${memoryContext.characterCount}")
+        append("메모리 컨텍스트 잘림: ${memoryContext.trimmed}")
+    }
 
     val full = buildString {
         appendLine("개발자 로그")
@@ -72,6 +84,9 @@ fun buildFusionDeveloperLogSnapshot(
         appendLine("maxTokens=$maxTokens, temperature=$temperature, topK=$topK, topP=$topP")
         appendLine("Reasoning=${if (reasoningEnabled) "켜짐" else "꺼짐"}, Web Search=${if (webSearchEnabled) "켜짐" else "꺼짐"}")
         appendLine()
+        appendLine("[저장된 메모리]")
+        appendLine(memoryStatus)
+        appendLine()
         appendLine("[최근 오류]")
         if (events.isEmpty()) {
             appendLine("최근 오류가 없습니다.")
@@ -84,6 +99,9 @@ fun buildFusionDeveloperLogSnapshot(
 
     val errorReport = buildString {
         appendLine("Fusion 오류 보고서")
+        appendLine("[저장된 메모리]")
+        appendLine(memoryStatus)
+        appendLine()
         if (errorEvents.isEmpty()) {
             appendLine("최근 오류가 없습니다.")
         } else {
@@ -93,7 +111,11 @@ fun buildFusionDeveloperLogSnapshot(
         }
     }.trimEnd()
 
-    return FusionDeveloperLogSnapshot(fullLogText = full, errorReportText = errorReport)
+    return FusionDeveloperLogSnapshot(
+        fullLogText = full,
+        errorReportText = errorReport,
+        memoryStatusText = memoryStatus
+    )
 }
 
 private fun getFusionAppInfoSummary(context: Context): Pair<String, String> {
