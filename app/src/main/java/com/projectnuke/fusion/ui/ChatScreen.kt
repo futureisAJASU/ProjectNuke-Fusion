@@ -261,6 +261,7 @@ fun ChatScreen(
     onOpenBenchmark: (modelName: String?, openHistory: Boolean) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
     val density = LocalDensity.current
     val settingsPrefs = remember {
         context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
@@ -281,6 +282,11 @@ fun ChatScreen(
     var showModelDialog by remember { mutableStateOf(false) }
     var showAdvancedSettingsDialog by remember { mutableStateOf(false) }
     var showDeleteChatDialog by remember { mutableStateOf(false) }
+    var showConversationSummaryDialog by remember { mutableStateOf(false) }
+    var showConversationSummaryEditor by remember { mutableStateOf(false) }
+    var showConversationSummaryDeleteConfirm by remember { mutableStateOf(false) }
+    var conversationSummaryDraft by remember { mutableStateOf("") }
+    var conversationSummaryRefreshKey by remember { mutableStateOf(0) }
     var inChatSearchMode by remember { mutableStateOf(false) }
     var inChatSearchQuery by remember { mutableStateOf("") }
 
@@ -396,6 +402,9 @@ fun ChatScreen(
     }
 
     val messageEntities by messageFlow.collectAsState(initial = emptyList())
+    val conversationSummary = remember(conversationId, conversationSummaryRefreshKey) {
+        loadConversationSummary(context, conversationId)
+    }
 
     val messages = messageEntities.map {
         ChatMessage(
@@ -532,6 +541,9 @@ fun ChatScreen(
                         add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
                     }
                     add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
+                    buildConversationSummaryContextText(loadConversationSummary(context, targetMessage.conversationId))?.let { summaryContext ->
+                        add(ChatMessage(role = "system", content = summaryContext))
+                    }
                     addAll(historyBeforeUser)
                     add(
                         ChatMessage(
@@ -1101,6 +1113,10 @@ fun ChatScreen(
                     },
                     onChatOption = { option ->
                         chatMenuExpanded = false
+                        if (option == "대화 요약") {
+                            showConversationSummaryDialog = true
+                            return@ChatTopBar
+                        }
                         if (option == "대화 내 검색") {
                             inChatSearchMode = true
                         } else {
@@ -1295,6 +1311,10 @@ fun ChatScreen(
                                                 content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"
                                             )
                                         )
+
+                                        buildConversationSummaryContextText(loadConversationSummary(context, activeConversationId))?.let { summaryContext ->
+                                            add(ChatMessage(role = "system", content = summaryContext))
+                                        }
 
                                         addAll(messages)
 
@@ -1988,7 +2008,212 @@ fun ChatScreen(
         )
     }
 
+    if (showConversationSummaryDialog) {
+        ConversationSummaryDialog(
+            summaryMemory = conversationSummary,
+            onGenerate = {
+                input = "현재 대화의 핵심 내용을 나중에 참고할 수 있도록 간결하게 요약해 주세요. 사용자의 선호, 진행 중인 작업, 중요한 결정 사항을 중심으로 정리해 주세요. 불필요한 잡담은 제외해 주세요."
+                showConversationSummaryDialog = false
+                Toast.makeText(context, "요약 요청을 입력창에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                DeveloperLogStore.record(context, "summary", "요약 생성 요청", "conversationId=$conversationId")
+            },
+            onEdit = {
+                conversationSummaryDraft = conversationSummary?.summary.orEmpty()
+                showConversationSummaryEditor = true
+            },
+            onCopy = {
+                val text = conversationSummary?.summary.orEmpty()
+                if (text.isBlank()) {
+                    Toast.makeText(context, "저장된 요약이 없습니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    clipboardManager.setText(AnnotatedString(text))
+                    Toast.makeText(context, "요약을 복사했습니다.", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDelete = {
+                showConversationSummaryDeleteConfirm = true
+            },
+            onDismiss = {
+                showConversationSummaryDialog = false
+            }
+        )
+    }
+
+    if (showConversationSummaryEditor) {
+        ConversationSummaryEditorDialog(
+            value = conversationSummaryDraft,
+            onValueChange = { conversationSummaryDraft = it },
+            onSave = {
+                val saved = saveConversationSummary(context, conversationId, conversationSummaryDraft)
+                if (saved == null) {
+                    Toast.makeText(context, "대화가 저장된 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    conversationSummaryRefreshKey++
+                    showConversationSummaryEditor = false
+                    Toast.makeText(context, "대화 요약을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "summary", "대화 요약 저장", "conversationId=$conversationId, length=${saved.summary.length}")
+                }
+            },
+            onDismiss = {
+                showConversationSummaryEditor = false
+            }
+        )
+    }
+
+    if (showConversationSummaryDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showConversationSummaryDeleteConfirm = false },
+            title = { Text("대화 요약을 삭제하시겠습니까?") },
+            text = { Text("저장된 요약만 삭제되며 채팅 기록은 삭제되지 않습니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteConversationSummary(context, conversationId)
+                    conversationSummaryRefreshKey++
+                    showConversationSummaryDeleteConfirm = false
+                    Toast.makeText(context, "대화 요약을 삭제했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "summary", "대화 요약 삭제", "conversationId=$conversationId")
+                }) {
+                    Text("삭제", color = DangerRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConversationSummaryDeleteConfirm = false }) {
+                    Text("취소")
+                }
+            },
+            containerColor = PanelBg,
+            titleContentColor = TextPrimary,
+            textContentColor = TextPrimary
+        )
+    }
+
 }
+
+@Composable
+private fun ConversationSummaryDialog(
+    summaryMemory: ConversationSummaryMemory?,
+    onGenerate: () -> Unit,
+    onEdit: () -> Unit,
+    onCopy: () -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val updatedAtText = remember(summaryMemory?.updatedAt) {
+        summaryMemory?.updatedAt
+            ?.takeIf { it > 0L }
+            ?.let { SimpleDateFormat("yyyy.MM.dd a h:mm", Locale.KOREAN).format(Date(it)) }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("대화 요약") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "현재 대화의 핵심 내용을 저장해 긴 대화에서도 맥락을 유지합니다.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = ReleaseCardBgOrPanel()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (summaryMemory == null) {
+                            Text("저장된 요약이 없습니다.", color = TextSecondary, fontSize = 14.sp)
+                        } else {
+                            updatedAtText?.let {
+                                Text("업데이트: $it", color = TextSecondary, fontSize = 12.sp)
+                            }
+                            Text(
+                                text = summaryMemory.summary,
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp,
+                                maxLines = 8,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onGenerate) { Text("요약 생성", color = AccentBlue) }
+                TextButton(onClick = onEdit) { Text("직접 편집", color = AccentBlue) }
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onCopy, enabled = summaryMemory != null) { Text("요약 복사", color = AccentBlue) }
+                TextButton(onClick = onDelete, enabled = summaryMemory != null) { Text("요약 삭제", color = DangerRed) }
+                TextButton(onClick = onDismiss) { Text("닫기", color = TextSecondary) }
+            }
+        },
+        containerColor = PanelBg,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary
+    )
+}
+
+@Composable
+private fun ConversationSummaryEditorDialog(
+    value: String,
+    onValueChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("대화 요약 편집") },
+        text = {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp),
+                placeholder = { Text("이 대화에서 계속 참고할 핵심 내용을 입력해 주세요.") },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = AccentBlue,
+                    unfocusedBorderColor = LineColor,
+                    focusedContainerColor = PanelBg,
+                    unfocusedContainerColor = PanelBg,
+                    focusedPlaceholderColor = TextSecondary,
+                    unfocusedPlaceholderColor = TextSecondary
+                )
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onSave) {
+                Text("저장", color = AccentBlue)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("취소", color = TextSecondary)
+            }
+        },
+        containerColor = PanelBg,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary
+    )
+}
+
+private fun ReleaseCardBgOrPanel(): Color = Color(0xFF111111)
+
 @Composable
 private fun ChatTopBar(
     onOpenList: () -> Unit,
@@ -2070,12 +2295,12 @@ private fun ChatTopBar(
                         onClick = { onChatOption("아카이브에 보관") }
                     )
                     DropdownMenuItem(
-                        text = { Text("삭제", color = DangerRed) },
-                        onClick = { onChatOption("대화 내 검색") }
+                        text = { Text("대화 요약", color = TextPrimary) },
+                        onClick = { onChatOption("대화 요약") }
                     )
                     DropdownMenuItem(
-                        text = { Text("??젣", color = DangerRed) },
-                        onClick = onDeleteChat
+                        text = { Text("삭제", color = DangerRed) },
+                        onClick = { onChatOption("대화 내 검색") }
                     )
                 }
             }

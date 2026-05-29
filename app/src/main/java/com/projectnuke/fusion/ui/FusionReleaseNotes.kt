@@ -163,6 +163,78 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.3.10-alpha",
+            status = "알파",
+            summary = "업데이트 기록, 채팅 설정의 인코딩 문제를 수정했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "업데이트 기록",
+                    items = listOf(
+                        "일부 버전의 패치노트에서 글자가 깨져 보이던 문제를 수정했습니다.",
+                        "버전별 업데이트 기록이 정상적인 한국어로 표시되도록 정리했습니다.",
+                        "업데이트 기록 복사 시 깨진 문자가 포함되지 않도록 수정했습니다.",
+                        "채팅 설정에서 잘못된 설정 문구를 삭제했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "버전 관리",
+                    items = listOf(
+                        "현재 앱 버전을 0.3.10-alpha로 업데이트했습니다.",
+                        "0.3.10-alpha 패치 기록을 업데이트 기록에 추가했습니다.",
+                        "기존 0.3.x-alpha 패치노트의 순서와 요약 문구를 정리했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안정성",
+                    items = listOf(
+                        "이번 패치는 업데이트 기록과 버전 정보만 수정합니다.",
+                        "채팅, 모델 실행, 벤치마크, 설정 데이터는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
+            version = "0.3.9-alpha",
+            status = "알파",
+            summary = "대화 요약 메모리와 패치노트를 정리했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "대화 요약 메모리",
+                    items = listOf(
+                        "대화 요약을 저장해 긴 대화에서도 핵심 맥락을 유지할 수 있도록 했습니다.",
+                        "요약 생성, 직접 편집, 복사, 삭제 기능을 추가했습니다.",
+                        "요약은 현재 대화의 생성과 응답 재생성에 함께 반영됩니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "업데이트 기록",
+                    items = listOf(
+                        "0.3.9-alpha 버전을 추가했습니다.",
+                        "버전별 패치노트를 최신 상태로 유지했습니다."
+                    )
+                )
+            )
+        ),        FusionReleaseNote(
+            version = "0.3.8-alpha",
+            status = "알파",
+            summary = "버전과 패치노트를 정리했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "업데이트 기록",
+                    items = listOf(
+                        "0.3.8-alpha 버전을 추가했습니다.",
+                        "버전별 패치노트를 최신 상태로 유지했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안정성",
+                    items = listOf(
+                        "앱 버전 표시와 업데이트 기록만 정리했습니다.",
+                        "채팅, 모델, 벤치마크, 설정 동작은 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),        FusionReleaseNote(
             version = "0.3.7-alpha",
             status = "알파",
             summary = "응답 재생성과 패치노트 정리를 반영했습니다.",
