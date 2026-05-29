@@ -66,7 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -250,7 +250,6 @@ fun ChatScreen(
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
-    val imeBottomPx = WindowInsets.ime.getBottom(density)
     val settingsPrefs = remember {
         context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
     }
@@ -260,6 +259,10 @@ fun ChatScreen(
     var isGenerating by remember { mutableStateOf(false) }
     var streamingAssistantText by remember { mutableStateOf<String?>(null) }
     var streamingMetricsLine by remember { mutableStateOf<String?>(null) }
+    var composerHeightPx by remember { mutableStateOf(0) }
+    val chatContentBottomPadding = with(density) {
+        (composerHeightPx.takeIf { it > 0 } ?: 120.dp.roundToPx()).toDp() + 16.dp
+    }
 
     var chatMenuExpanded by remember { mutableStateOf(false) }
     var showModelDialog by remember { mutableStateOf(false) }
@@ -868,9 +871,10 @@ fun ChatScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .offset { IntOffset(0, -imeBottomPx) }
+                    .onSizeChanged { composerHeightPx = it.height }
                     .background(BlackBg)
-                    .navigationBarsPadding(),
+                    .navigationBarsPadding()
+                    .imePadding(),
                 contentAlignment = Alignment.BottomCenter
             ) {
                 ChatInputBar(
@@ -1291,8 +1295,7 @@ fun ChatScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .background(BlackBg)
-                .imePadding()
-                .padding(innerPadding)
+                .padding(top = innerPadding.calculateTopPadding())
                 .padding(horizontal = 16.dp)
         ) {
             if (inChatSearchMode) {
@@ -1316,7 +1319,7 @@ fun ChatScreen(
             }
 
             if (messageEntities.isEmpty() && !isGenerating) {
-                EmptyChatBody()
+                EmptyChatBody(bottomPadding = chatContentBottomPadding)
             } else if (inChatSearchMode) {
                 if (inChatSearchQuery.trim().isNotEmpty() && inChatSearchResults.isEmpty()) {
                     EmptyInChatSearchResults()
@@ -1326,7 +1329,7 @@ fun ChatScreen(
                             .weight(1f)
                             .fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(vertical = 6.dp)
+                        contentPadding = PaddingValues(top = 6.dp, bottom = chatContentBottomPadding)
                     ) {
                         items(
                             items = inChatSearchResults,
@@ -1355,7 +1358,7 @@ fun ChatScreen(
                         .fillMaxWidth(),
                     state = listState,
                     verticalArrangement = Arrangement.spacedBy(18.dp),
-                    contentPadding = PaddingValues(vertical = 12.dp)
+                    contentPadding = PaddingValues(top = 12.dp, bottom = chatContentBottomPadding)
                 ) {
                     items(
                         items = messageEntities,
@@ -1878,11 +1881,11 @@ private fun ModelPill(
 
 }
 @Composable
-private fun EmptyChatBody() {
+private fun EmptyChatBody(bottomPadding: androidx.compose.ui.unit.Dp) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(bottom = 120.dp),
+            .padding(bottom = bottomPadding),
         verticalArrangement = Arrangement.Center
     ) {
         Text(

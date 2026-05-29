@@ -7,10 +7,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
@@ -26,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.BenchmarkResultEntity
@@ -60,38 +60,42 @@ fun DeveloperLogDialog(
         onDismissRequest = onDismiss,
         title = { Text("개발자 로그") },
         text = {
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().height(520.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 620.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                item { DeveloperSectionCard("현재 상태", snapshot.fullLogText, 0, 7) }
-                item { DeveloperSectionCard("모델", snapshot.fullLogText, 8, 13) }
-                item { DeveloperSectionCard("메모리", snapshot.fullLogText, 14, 18) }
-                item { DeveloperSectionCard("최근 오류", snapshot.fullLogText, 28, 48) }
-                item { DeveloperSectionCard("벤치마크", snapshot.fullLogText, 19, 23) }
-                item { DeveloperSectionCard("설정", snapshot.fullLogText, 24, 27) }
-            }
-        },
-        confirmButton = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    item { DeveloperSectionCard("현재 상태", snapshot.fullLogText, 0, 7) }
+                    item { DeveloperSectionCard("모델", snapshot.fullLogText, 8, 13) }
+                    item { DeveloperSectionCard("메모리", snapshot.fullLogText, 14, 18) }
+                    item { DeveloperSectionCard("최근 오류", snapshot.fullLogText, 28, 48) }
+                    item { DeveloperSectionCard("벤치마크", snapshot.fullLogText, 19, 23) }
+                    item { DeveloperSectionCard("설정", snapshot.fullLogText, 24, 27) }
+                }
+
+                DeveloperLogActionFooter(
+                    onCopyLog = {
                         clipboard.setText(AnnotatedString(snapshot.fullLogText))
                         Toast.makeText(context, "개발자 로그를 복사했습니다.", Toast.LENGTH_SHORT).show()
-                    }) { Text("개발자 로그 복사", color = DevLogAccentBlue, fontSize = 12.sp) }
-                    TextButton(onClick = {
+                    },
+                    onCopyErrorReport = {
                         clipboard.setText(AnnotatedString(snapshot.errorReportText))
                         Toast.makeText(context, "오류 보고서를 복사했습니다.", Toast.LENGTH_SHORT).show()
-                    }) { Text("오류 보고서 복사", color = DevLogAccentBlue, fontSize = 12.sp) }
-                }
-                TextButton(onClick = { showClearConfirm = true }) {
-                    Text("로그 지우기", color = DevLogAccentBlue, fontSize = 12.sp)
-                }
+                    },
+                    onClear = { showClearConfirm = true },
+                    onDismiss = onDismiss
+                )
             }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("닫기", color = DevLogTextSecondary) }
-        },
+        confirmButton = {},
+        dismissButton = {},
         containerColor = DevLogPanelBg,
         titleContentColor = DevLogTextPrimary,
         textContentColor = DevLogTextPrimary
@@ -121,9 +125,50 @@ fun DeveloperLogDialog(
 }
 
 @Composable
+private fun DeveloperLogActionFooter(
+    onCopyLog: () -> Unit,
+    onCopyErrorReport: () -> Unit,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Surface(shape = RoundedCornerShape(12.dp), color = DevLogCardBg, modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                DeveloperFooterButton("개발자 로그 복사", onCopyLog, Modifier.weight(1f), DevLogAccentBlue)
+                DeveloperFooterButton("오류 보고서 복사", onCopyErrorReport, Modifier.weight(1f), DevLogAccentBlue)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                DeveloperFooterButton("로그 지우기", onClear, Modifier.weight(1f), DevLogAccentBlue)
+                DeveloperFooterButton("닫기", onDismiss, Modifier.weight(1f), DevLogTextSecondary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeveloperFooterButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    color: Color = DevLogAccentBlue
+) {
+    TextButton(onClick = onClick, modifier = modifier) {
+        Text(text, color = color, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
 private fun DeveloperSectionCard(title: String, text: String, startLine: Int, endLine: Int) {
     val lines = text.lines()
-    val sectionLines = if (startLine < lines.size) lines.subList(startLine, minOf(endLine + 1, lines.size)) else emptyList()
+    val sectionLines = if (startLine < lines.size) {
+        lines.subList(startLine, minOf(endLine + 1, lines.size))
+    } else {
+        emptyList()
+    }
+
     Surface(shape = RoundedCornerShape(12.dp), color = DevLogCardBg, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Text(title, color = DevLogTextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
