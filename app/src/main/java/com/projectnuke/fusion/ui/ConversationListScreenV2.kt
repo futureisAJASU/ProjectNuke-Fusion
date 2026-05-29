@@ -756,7 +756,7 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
-                        DrawerSettingActionRow("릴리즈 노트", "Fusion Beta 변경 사항을 확인합니다.") {
+                        DrawerSettingActionRow("업데이트 기록", "최근 추가된 기능과 변경사항을 확인합니다.") {
                             showReleaseNotesDialog = true
                         }
                     }
@@ -1047,25 +1047,10 @@ fun ConversationListScreenV2(
     }
 
     if (showReleaseNotesDialog) {
-        AlertDialog(
-            onDismissRequest = { showReleaseNotesDialog = false },
-            title = { Text("릴리즈 노트") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text("• 로컬 모델 채팅 안정성을 개선했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
-                    Text("• 벤치마크와 기록 기능을 추가했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
-                    Text("• MTP 켜짐/꺼짐 비교를 지원합니다.", color = DrawerTextPrimary, fontSize = 13.sp)
-                    Text("• Prompt Lab을 추가했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
-                    Text("• 아카이브 잠금을 추가했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
-                    Text("• 첨부파일 미리보기와 관리를 개선했습니다.", color = DrawerTextPrimary, fontSize = 13.sp)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showReleaseNotesDialog = false }) { Text("확인") }
-            },
-            containerColor = DrawerPanelBg,
-            titleContentColor = DrawerTextPrimary,
-            textContentColor = DrawerTextPrimary
+        ReleaseNotesDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showReleaseNotesDialog = false }
         )
     }
 
