@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.3.11-alpha",
+            status = "알파",
+            summary = "메모리 후보 추출과 버전 정보를 정리했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "메모리 후보 추출",
+                    items = listOf(
+                        "현재 대화에서 나중에 참고할 만한 메모리 후보를 추출할 수 있도록 했습니다.",
+                        "추출한 후보를 검토한 뒤 복사하거나 선택해서 저장할 수 있도록 했습니다.",
+                        "메모리 후보는 자동 저장하지 않고 사용자가 확인한 항목만 저장합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "대화 맥락",
+                    items = listOf(
+                        "저장된 대화 요약과 최근 대화를 함께 참고해 메모리 후보를 정리하도록 개선했습니다.",
+                        "민감한 정보는 자동 저장하지 않고 검토용 후보로만 표시합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "버전 관리",
+                    items = listOf(
+                        "현재 앱 버전을 0.3.11-alpha로 업데이트했습니다.",
+                        "0.3.11-alpha 패치 기록을 업데이트 기록에 추가했습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.3.10-alpha",
             status = "알파",
             summary = "업데이트 기록, 채팅 설정의 인코딩 문제를 수정했습니다.",

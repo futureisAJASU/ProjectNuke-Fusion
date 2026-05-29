@@ -35,6 +35,7 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -182,6 +183,8 @@ private enum class ResponseRegenerationAction(
     ExpertTone("전문가 톤", "이전 답변의 핵심 내용을 유지하면서 더 전문적이고 정확한 톤으로 다시 작성해 주세요.")
 }
 
+private const val ChatOptionConversationSummary = "대화 요약"
+private const val ChatOptionMemoryCandidateExtraction = "메모리 후보 추출"
 private const val FusionPrefsName = "fusion_chat_settings"
 private const val PrefMaxTokens = "max_tokens"
 private const val PrefTopK = "top_k"
@@ -287,6 +290,9 @@ fun ChatScreen(
     var showConversationSummaryDeleteConfirm by remember { mutableStateOf(false) }
     var conversationSummaryDraft by remember { mutableStateOf("") }
     var conversationSummaryRefreshKey by remember { mutableStateOf(0) }
+    var showMemoryCandidateDialog by remember { mutableStateOf(false) }
+    var memoryCandidateText by remember { mutableStateOf("") }
+    var extractingMemoryCandidates by remember { mutableStateOf(false) }
     var inChatSearchMode by remember { mutableStateOf(false) }
     var inChatSearchQuery by remember { mutableStateOf("") }
 
@@ -405,6 +411,12 @@ fun ChatScreen(
     val conversationSummary = remember(conversationId, conversationSummaryRefreshKey) {
         loadConversationSummary(context, conversationId)
     }
+    val savedMemoryCandidates = remember(conversationId, memoryCandidateText) {
+        loadConversationMemoryCandidates(context, conversationId)
+    }
+    LaunchedEffect(conversationId) {
+        memoryCandidateText = ""
+    }
 
     val messages = messageEntities.map {
         ChatMessage(
@@ -428,7 +440,7 @@ fun ChatScreen(
         targetMessage: MessageEntity,
         action: ResponseRegenerationAction
     ) {
-        if (isGenerating || regeneratingMessageId != null || FusionRuntimeLock.isChatGenerationRunning) {
+        if (isGenerating || regeneratingMessageId != null || extractingMemoryCandidates || FusionRuntimeLock.isChatGenerationRunning) {
             Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
             return
         }
@@ -643,6 +655,139 @@ fun ChatScreen(
                 generationStatus = null
                 isGenerating = false
                 regeneratingMessageId = null
+                streamingAssistantText = null
+                streamingMetricsLine = null
+            }
+        }
+    }
+
+    fun startMemoryCandidateExtraction() {
+        if (isGenerating || regeneratingMessageId != null || extractingMemoryCandidates || FusionRuntimeLock.isChatGenerationRunning) {
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (FusionRuntimeLock.isBenchmarkRunning) {
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val snapshot = messageEntities.toList()
+        if (conversationId == 0L || snapshot.isEmpty()) {
+            Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val recentVisibleMessages = snapshot
+            .takeLast(12)
+            .mapNotNull { entity ->
+                val visibleText = if (entity.role == "user") {
+                    parseMessageAttachments(entity.content).body.trim()
+                } else {
+                    visibleSearchText(entity.content).trim()
+                }
+                visibleText.takeIf { it.isNotBlank() }?.let {
+                    ChatMessage(role = entity.role, content = it)
+                }
+            }
+        if (recentVisibleMessages.isEmpty()) {
+            Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
+            modelName = selectedModel,
+            settings = generationSettings
+        )
+        val requestSettings = generationSettings.copy(
+            speculativeDecodingEnabled = mtpEnabledForRequest
+        )
+        val extractionPrompt = "현재 대화에서 나중에 참고할 만한 메모리 후보를 추출해 주세요. 사용자의 장기적인 선호, 진행 중인 프로젝트, 반복적으로 참고할 설정, 중요한 결정 사항만 짧은 bullet로 정리해 주세요. 일시적인 감정, 사소한 잡담, 민감한 개인정보, 추측성 내용은 제외해 주세요."
+        val currentMessages = buildList {
+            add(
+                ChatMessage(
+                    role = "system",
+                    content = """
+                    FUSION_GENERATION_SETTINGS
+                    maxTokens=${requestSettings.maxTokens}
+                    topK=${requestSettings.topK}
+                    topP=${requestSettings.topP}
+                    temperature=${requestSettings.temperature}
+                    accelerator=${requestSettings.accelerator.name}
+                    reasoningBudgetTokens=${requestSettings.reasoningBudgetTokens}
+                    speculativeDecoding=${requestSettings.speculativeDecodingEnabled == true}
+                    """.trimIndent()
+                )
+            )
+            add(
+                ChatMessage(
+                    role = "system",
+                    content = buildFusionSystemPrompt(
+                        reasoningEnabled = reasoningEnabled,
+                        webSearchEnabled = false,
+                        webContext = null,
+                        promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
+                    )
+                )
+            )
+            selectedModelPath?.let { modelPath ->
+                add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+            }
+            add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
+            buildConversationSummaryContextText(loadConversationSummary(context, conversationId))?.let { summaryContext ->
+                add(ChatMessage(role = "system", content = summaryContext))
+            }
+            addAll(recentVisibleMessages)
+            add(ChatMessage(role = "user", content = extractionPrompt))
+        }
+
+        val activeModelPath = selectedModelPath?.takeIf { File(it).exists() }
+            ?: builtInModels
+                .firstOrNull { it.name == selectedModel && isModelDownloaded(context, it) }
+                ?.let { getModelFile(context, it).absolutePath }
+
+        if (activeModelPath == null) {
+            DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", "model file missing")
+            Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        isGenerating = true
+        extractingMemoryCandidates = true
+        generationStatus = "메모리 후보를 추출하는 중입니다."
+        DeveloperLogStore.record(context, "memory", "메모리 후보 추출 시작", "conversationId=$conversationId")
+
+        scope.launch {
+            try {
+                val rawReply = FusionRuntimeLock.withChatGeneration {
+                    generateWithLiteRtRecovery(
+                        engine = engine,
+                        onBeforeRetry = {
+                            generationStatus = "메모리 후보를 추출하는 중입니다."
+                        },
+                        generateOnce = {
+                            engine.generate(
+                                messages = currentMessages,
+                                modelPath = activeModelPath,
+                                settings = requestSettings
+                            )
+                        }
+                    )
+                }
+                memoryCandidateText = rawReply.trim()
+                DeveloperLogStore.record(
+                    context,
+                    "memory",
+                    "메모리 후보 추출 성공",
+                    "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
+                )
+            } catch (e: Exception) {
+                Log.e("FusionMemory", "Memory candidate extraction failed", e)
+                DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", e::class.java.simpleName)
+                Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            } finally {
+                generationStatus = null
+                extractingMemoryCandidates = false
+                isGenerating = false
                 streamingAssistantText = null
                 streamingMetricsLine = null
             }
@@ -1113,8 +1258,12 @@ fun ChatScreen(
                     },
                     onChatOption = { option ->
                         chatMenuExpanded = false
-                        if (option == "대화 요약") {
+                        if (option == ChatOptionConversationSummary) {
                             showConversationSummaryDialog = true
+                            return@ChatTopBar
+                        }
+                        if (option == ChatOptionMemoryCandidateExtraction) {
+                            showMemoryCandidateDialog = true
                             return@ChatTopBar
                         }
                         if (option == "대화 내 검색") {
@@ -2039,6 +2188,43 @@ fun ChatScreen(
         )
     }
 
+    if (showMemoryCandidateDialog) {
+        MemoryCandidateDialog(
+            candidateText = memoryCandidateText,
+            isExtracting = extractingMemoryCandidates,
+            savedCount = savedMemoryCandidates.size,
+            onExtract = { startMemoryCandidateExtraction() },
+            onCopy = {
+                val text = memoryCandidateText.trim()
+                if (text.isBlank()) {
+                    Toast.makeText(context, "복사할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    clipboardManager.setText(AnnotatedString(text))
+                    Toast.makeText(context, "메모리 후보를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onSaveSelected = { selectedItems ->
+                val savedCount = saveConversationMemoryCandidates(context, conversationId, selectedItems)
+                if (savedCount <= 0) {
+                    Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
+                }
+            },
+            onSaveAll = {
+                val savedCount = saveConversationMemoryCandidates(context, conversationId, parseMemoryCandidateLines(memoryCandidateText))
+                if (savedCount <= 0) {
+                    Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
+                }
+            },
+            onDismiss = { showMemoryCandidateDialog = false }
+        )
+    }
+
     if (showConversationSummaryEditor) {
         ConversationSummaryEditorDialog(
             value = conversationSummaryDraft,
@@ -2212,6 +2398,135 @@ private fun ConversationSummaryEditorDialog(
     )
 }
 
+@Composable
+private fun MemoryCandidateDialog(
+    candidateText: String,
+    isExtracting: Boolean,
+    savedCount: Int,
+    onExtract: () -> Unit,
+    onCopy: () -> Unit,
+    onSaveSelected: (List<String>) -> Unit,
+    onSaveAll: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val parsedCandidates = remember(candidateText) { parseMemoryCandidateLines(candidateText) }
+    var selectedCandidates by remember(candidateText) { mutableStateOf(parsedCandidates.toSet()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("메모리 후보 추출") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "이 대화에서 나중에 참고할 만한 정보를 정리합니다.",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp
+                )
+                Text(
+                    text = "자동 저장하지 않습니다. 필요한 항목만 확인해 주세요.",
+                    color = AccentBlue,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+                if (savedCount > 0) {
+                    Text(
+                        text = "저장된 후보 ${savedCount}개",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = ReleaseCardBgOrPanel()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (isExtracting) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    color = AccentBlue,
+                                    strokeWidth = 2.dp
+                                )
+                                Text("메모리 후보를 추출하는 중입니다.", color = TextPrimary, fontSize = 13.sp)
+                            }
+                        } else if (candidateText.isBlank()) {
+                            Text("추출된 메모리 후보가 없습니다.", color = TextSecondary, fontSize = 14.sp)
+                        } else if (parsedCandidates.isEmpty()) {
+                            Text(
+                                text = candidateText,
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
+                            )
+                        } else {
+                            parsedCandidates.forEach { candidate ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Checkbox(
+                                        checked = selectedCandidates.contains(candidate),
+                                        onCheckedChange = { checked ->
+                                            selectedCandidates = if (checked) {
+                                                selectedCandidates + candidate
+                                            } else {
+                                                selectedCandidates - candidate
+                                            }
+                                        }
+                                    )
+                                    Text(
+                                        text = candidate,
+                                        color = TextPrimary,
+                                        fontSize = 14.sp,
+                                        lineHeight = 20.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onExtract, enabled = !isExtracting) { Text("후보 추출", color = AccentBlue) }
+                TextButton(onClick = { onSaveSelected(selectedCandidates.toList()) }, enabled = parsedCandidates.isNotEmpty() && !isExtracting) {
+                    Text("선택 항목 저장", color = AccentBlue, maxLines = 1)
+                }
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onSaveAll, enabled = parsedCandidates.isNotEmpty() && !isExtracting) {
+                    Text("전체 저장", color = AccentBlue)
+                }
+                TextButton(onClick = onCopy, enabled = candidateText.isNotBlank() && !isExtracting) {
+                    Text("후보 복사", color = AccentBlue)
+                }
+                TextButton(onClick = onDismiss) { Text("닫기", color = TextSecondary) }
+            }
+        },
+        containerColor = PanelBg,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary
+    )
+}
+
 private fun ReleaseCardBgOrPanel(): Color = Color(0xFF111111)
 
 @Composable
@@ -2296,7 +2611,11 @@ private fun ChatTopBar(
                     )
                     DropdownMenuItem(
                         text = { Text("대화 요약", color = TextPrimary) },
-                        onClick = { onChatOption("대화 요약") }
+                        onClick = { onChatOption(ChatOptionConversationSummary) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("메모리 후보 추출", color = TextPrimary) },
+                        onClick = { onChatOption(ChatOptionMemoryCandidateExtraction) }
                     )
                     DropdownMenuItem(
                         text = { Text("삭제", color = DangerRed) },
@@ -7717,6 +8036,16 @@ private fun visibleSearchText(rawMessageContent: String): String {
         .replace(Regex("""(?is)</?fusion_(?:thinking|answer)>"""), "")
         .replace(Regex("""\s+"""), " ")
         .trim()
+}
+
+private fun parseMemoryCandidateLines(raw: String): List<String> {
+    return raw
+        .lines()
+        .map { line ->
+            line.replace(Regex("""^[\-\*\u2022\u25CF\u25E6\d\.\)\s]+"""), "").trim()
+        }
+        .filter { it.isNotBlank() }
+        .distinct()
 }
 
 private fun String.unescapeAttachmentField(): String {
