@@ -56,6 +56,27 @@ fun deleteConversationSummary(
         .apply()
 }
 
+fun loadAllConversationSummaries(
+    context: Context
+): List<ConversationSummaryMemory> {
+    val prefs = context.getSharedPreferences(ConversationSummaryPrefs, Context.MODE_PRIVATE)
+    return prefs.all.keys
+        .asSequence()
+        .filter { it.startsWith("summary_") && !it.startsWith("summary_updated_at_") }
+        .mapNotNull { key ->
+            val conversationId = key.removePrefix("summary_").toLongOrNull() ?: return@mapNotNull null
+            val summary = prefs.getString(key, null)?.trim().orEmpty()
+            if (summary.isBlank()) return@mapNotNull null
+            ConversationSummaryMemory(
+                conversationId = conversationId,
+                summary = summary,
+                updatedAt = prefs.getLong(updatedAtKey(conversationId), 0L)
+            )
+        }
+        .sortedByDescending { it.updatedAt }
+        .toList()
+}
+
 fun buildConversationSummaryContextText(summary: ConversationSummaryMemory?): String? {
     val text = summary?.summary?.trim()?.takeIf { it.isNotBlank() } ?: return null
     return "[대화 요약]\n${text.take(MaxSummaryContextChars)}"

@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.3.12-alpha",
+            status = "알파",
+            summary = "메모리 관리 화면을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "메모리 관리",
+                    items = listOf(
+                        "저장된 메모리와 대화 요약을 한곳에서 확인하고 관리할 수 있는 화면을 추가했습니다.",
+                        "저장된 메모리를 검색하고 수정, 복사, 삭제할 수 있도록 했습니다.",
+                        "대화 요약도 열기, 복사, 삭제로 관리할 수 있도록 정리했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "저장소 재사용",
+                    items = listOf(
+                        "메모리 후보 추출에서 저장한 메모리를 같은 저장소로 불러오도록 연결했습니다.",
+                        "기존 대화 요약 저장 구조를 그대로 재사용해 별도 데이터베이스 변경 없이 관리할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "버전 관리",
+                    items = listOf(
+                        "현재 앱 버전을 0.3.12-alpha로 업데이트했습니다.",
+                        "0.3.12-alpha 패치 기록을 업데이트 기록에 추가했습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.3.11-alpha",
             status = "알파",
             summary = "메모리 후보 추출과 버전 정보를 정리했습니다.",

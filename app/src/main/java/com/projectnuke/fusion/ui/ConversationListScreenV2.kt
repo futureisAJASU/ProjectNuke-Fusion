@@ -125,6 +125,7 @@ fun ConversationListScreenV2(
     var showAppInfoDialog by remember { mutableStateOf(false) }
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
     var showDeveloperLogDialog by remember { mutableStateOf(false) }
+    var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var attachmentStorageStats by remember { mutableStateOf<AttachmentStorageStats?>(null) }
     var attachmentStorageLoading by remember { mutableStateOf(false) }
     var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
@@ -743,6 +744,11 @@ fun ConversationListScreenV2(
                             showChatMarkdownExportPicker = true
                         }
                     }
+                    item {
+                        DrawerSettingActionRow("메모리 관리", "저장된 메모리와 대화 요약을 확인하고 관리합니다.") {
+                            showMemoryManagerDialog = true
+                        }
+                    }
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("실험실") }
                     item { DrawerSettingActionRow("벤치마크", "TTFT, 토큰 속도, 메모리 사용량을 측정합니다.") { page = SidebarPage.BENCHMARK } }
@@ -1062,6 +1068,16 @@ fun ConversationListScreenV2(
             clipboard = clipboard,
             benchmarkResults = benchmarkResults,
             onDismiss = { showDeveloperLogDialog = false }
+        )
+    }
+
+    if (showMemoryManagerDialog) {
+        MemoryManagerDialog(
+            context = context,
+            clipboard = clipboard,
+            conversations = conversations,
+            archivedConversations = archivedConversations,
+            onDismiss = { showMemoryManagerDialog = false }
         )
     }
 

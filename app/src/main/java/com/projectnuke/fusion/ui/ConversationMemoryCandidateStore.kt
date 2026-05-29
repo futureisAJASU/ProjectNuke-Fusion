@@ -10,6 +10,8 @@ data class ConversationMemoryCandidate(
     val text: String,
     val conversationId: Long,
     val createdAt: Long,
+    val updatedAt: Long? = null,
+    val conversationTitle: String? = null,
     val savedByUser: Boolean = true
 )
 
@@ -21,32 +23,41 @@ fun loadConversationMemoryCandidates(
     conversationId: Long
 ): List<ConversationMemoryCandidate> {
     if (conversationId <= 0L) return emptyList()
+    return loadAllConversationMemoryCandidates(context)
+        .filter { it.conversationId == conversationId }
+}
+
+fun loadAllConversationMemoryCandidates(
+    context: Context
+): List<ConversationMemoryCandidate> {
     val raw = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
         .getString(ConversationMemoryCandidateKey, null)
     val arr = runCatching { JSONArray(raw ?: "[]") }.getOrNull() ?: return emptyList()
     return buildList {
         for (index in 0 until arr.length()) {
             val obj = arr.optJSONObject(index) ?: continue
-            if (obj.optLong("conversationId") != conversationId) continue
             val text = obj.optString("text").trim()
             if (text.isBlank()) continue
             add(
                 ConversationMemoryCandidate(
                     id = obj.optString("id").ifBlank { UUID.randomUUID().toString() },
                     text = text,
-                    conversationId = conversationId,
+                    conversationId = obj.optLong("conversationId"),
                     createdAt = obj.optLong("createdAt"),
+                    updatedAt = obj.optLong("updatedAt").takeIf { it > 0L },
+                    conversationTitle = obj.optString("conversationTitle").takeIf { it.isNotBlank() },
                     savedByUser = obj.optBoolean("savedByUser", true)
                 )
             )
         }
-    }
+    }.sortedByDescending { it.updatedAt ?: it.createdAt }
 }
 
 fun saveConversationMemoryCandidates(
     context: Context,
     conversationId: Long,
-    candidates: List<String>
+    candidates: List<String>,
+    conversationTitle: String? = null
 ): Int {
     if (conversationId <= 0L) return 0
     val cleanCandidates = candidates
@@ -79,6 +90,8 @@ fun saveConversationMemoryCandidates(
                 .put("text", candidate)
                 .put("conversationId", conversationId)
                 .put("createdAt", now)
+                .put("updatedAt", now)
+                .put("conversationTitle", conversationTitle)
                 .put("savedByUser", true)
         )
         savedCount++
@@ -88,6 +101,55 @@ fun saveConversationMemoryCandidates(
     }
     prefs.edit().putString(ConversationMemoryCandidateKey, updated.toString()).apply()
     return savedCount
+}
+
+fun updateConversationMemoryCandidate(
+    context: Context,
+    candidateId: String,
+    newText: String
+): Boolean {
+    val cleanText = normalizeMemoryCandidateText(newText)
+    if (candidateId.isBlank() || cleanText.isBlank()) return false
+    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+    val existing = runCatching {
+        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+    }.getOrElse { JSONArray() }
+    var changed = false
+    for (index in 0 until existing.length()) {
+        val obj = existing.optJSONObject(index) ?: continue
+        if (obj.optString("id") != candidateId) continue
+        obj.put("text", cleanText)
+        obj.put("updatedAt", System.currentTimeMillis())
+        changed = true
+        break
+    }
+    if (!changed) return false
+    prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
+    return true
+}
+
+fun deleteConversationMemoryCandidate(
+    context: Context,
+    candidateId: String
+): Boolean {
+    if (candidateId.isBlank()) return false
+    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+    val existing = runCatching {
+        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+    }.getOrElse { JSONArray() }
+    val updated = JSONArray()
+    var removed = false
+    for (index in 0 until existing.length()) {
+        val obj = existing.optJSONObject(index) ?: continue
+        if (obj.optString("id") == candidateId) {
+            removed = true
+            continue
+        }
+        updated.put(obj)
+    }
+    if (!removed) return false
+    prefs.edit().putString(ConversationMemoryCandidateKey, updated.toString()).apply()
+    return true
 }
 
 private fun normalizeMemoryCandidateText(value: String): String {
