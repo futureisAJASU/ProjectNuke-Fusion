@@ -66,8 +66,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -247,6 +249,8 @@ fun ChatScreen(
     onOpenBenchmark: (modelName: String?, openHistory: Boolean) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
     val settingsPrefs = remember {
         context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
     }
@@ -864,9 +868,9 @@ fun ChatScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .offset { IntOffset(0, -imeBottomPx) }
                     .background(BlackBg)
-                    .navigationBarsPadding()
-                    .imePadding(),
+                    .navigationBarsPadding(),
                 contentAlignment = Alignment.BottomCenter
             ) {
                 ChatInputBar(
@@ -1287,6 +1291,7 @@ fun ChatScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .background(BlackBg)
+                .imePadding()
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {

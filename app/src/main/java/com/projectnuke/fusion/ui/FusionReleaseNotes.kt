@@ -159,6 +159,28 @@ fun ReleaseNotesDialog(
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.3.2-alpha",
+            channel = "?뚰뙆",
+            status = "媛쒕컻 以?",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "?먮줈?뚮뒗 ?낆뿭",
+                    items = listOf(
+                        "?뤡留?뱀뀡?쒖쓽 ?뚮엺?놁? 援ъ“瑜?젣?곗뻽?듬땲??",
+                        "?꾩옱 ?앹쓽 ?ㅽ겕 寃?을 ?붿옉 Android 踰꾩쟾怨??먯씠?꾩씠?꽣?먯뿉 ?맞꽭??媛?닔 ?덈룄濡?媛쒖꽑?덉뒿?덈떎.",
+                        "踰꾩쟾蹂?`?뱀꽦?몃? ?쒖씠洹?濡?蹂닿퀬?섍쾶 媛쒖꽑?덉뒿?덈떎."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "UI 媛쒖꽑",
+                    items = listOf(
+                        "?낅튃遺??꾧닔怨?媛깆냽?듭뿭???뺣━?덉뒿?덈떎.",
+                        "?ㅽ겕 UI? ?섎뒛??媛뺤“ ?됱긽???듭씪?덉뒿?덈떎."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.3.1-alpha",
             channel = "알파",
             status = "개발 중",
