@@ -171,6 +171,17 @@ private data class FusionMetricsSplit(
     val metricsLine: String?
 )
 
+private enum class ResponseRegenerationAction(
+    val menuLabel: String,
+    val instruction: String?
+) {
+    Retry("답변 다시 생성", null),
+    Shorter("더 짧게", "이전 답변의 핵심 내용을 유지하면서 더 짧고 간결하게 다시 작성해 주세요."),
+    MoreDetailed("더 자세히", "이전 답변의 핵심 내용을 유지하면서 더 자세히 풀어서 설명해 주세요."),
+    Table("표로 정리", "이전 답변의 핵심 내용을 표로 정리해 주세요. 필요한 경우 짧은 요약도 함께 포함해 주세요."),
+    ExpertTone("전문가 톤", "이전 답변의 핵심 내용을 유지하면서 더 전문적이고 정확한 톤으로 다시 작성해 주세요.")
+}
+
 private const val FusionPrefsName = "fusion_chat_settings"
 private const val PrefMaxTokens = "max_tokens"
 private const val PrefTopK = "top_k"
@@ -258,6 +269,7 @@ fun ChatScreen(
     val dao = remember { db.chatDao() }
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
+    var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }
     var streamingAssistantText by remember { mutableStateOf<String?>(null) }
     var streamingMetricsLine by remember { mutableStateOf<String?>(null) }
     var composerHeightPx by remember { mutableStateOf(0) }
@@ -403,7 +415,237 @@ fun ChatScreen(
         }
     }
 
+    fun startRegenerateResponse(
+        targetMessage: MessageEntity,
+        action: ResponseRegenerationAction
+    ) {
+        if (isGenerating || regeneratingMessageId != null || FusionRuntimeLock.isChatGenerationRunning) {
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (FusionRuntimeLock.isBenchmarkRunning) {
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val snapshot = messageEntities.toList()
+        val targetIndex = snapshot.indexOfFirst { it.id == targetMessage.id }
+        if (targetIndex <= 0 || targetMessage.role == "user") {
+            Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val previousUserIndex = (targetIndex - 1 downTo 0).firstOrNull { snapshot[it].role == "user" }
+        if (previousUserIndex == null) {
+            Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val previousUser = snapshot[previousUserIndex]
+        val parsedUserMessage = parseMessageAttachments(previousUser.content)
+        val previousUserText = parsedUserMessage.body.trim()
+        val originalAssistantText = visibleSearchText(targetMessage.content)
+        val isStyleRegeneration = action.instruction != null
+        val attachmentsToSend = if (isStyleRegeneration) emptyList() else parsedUserMessage.attachments
+        val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
+        val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
+        val userInstruction = if (isStyleRegeneration) {
+            """
+            ${action.instruction}
+
+            이전 사용자 요청:
+            $previousUserText
+
+            이전 답변:
+            $originalAssistantText
+
+            새 답변만 작성해 주세요.
+            """.trimIndent()
+        } else if (imageAttachments.isNotEmpty()) {
+            buildImageUserInstruction(previousUserText)
+        } else {
+            previousUserText
+        }
+        val historyBeforeUser = snapshot
+            .take(previousUserIndex)
+            .map { ChatMessage(role = it.role, content = it.content) }
+        val shouldUseWebSearch = !isStyleRegeneration && (webSearchEnabled || shouldAutoUseWebSearch(previousUserText))
+
+        isGenerating = true
+        regeneratingMessageId = targetMessage.id
+        streamingAssistantText = null
+        streamingMetricsLine = null
+        generationStatus = "답변을 다시 생성하는 중입니다."
+        DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 시작", action.menuLabel)
+
+        scope.launch {
+            val activeConversationId = targetMessage.conversationId
+            try {
+                val previousUserMessage = historyBeforeUser
+                    .asReversed()
+                    .firstOrNull { it.role == "user" }
+                    ?.content
+                    ?.let { parseMessageAttachments(it).body }
+                    ?.trim()
+                    .orEmpty()
+
+                val webSearchResult = if (shouldUseWebSearch) {
+                    FusionWebSearch.search(
+                        userInput = previousUserText,
+                        previousUserMessage = previousUserMessage
+                    ).toStructuredContext()
+                } else {
+                    null
+                }
+
+                val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
+                    modelName = selectedModel,
+                    settings = generationSettings
+                )
+                val requestSettings = generationSettings.copy(
+                    speculativeDecodingEnabled = mtpEnabledForRequest
+                )
+                val fusionSystemPrompt = buildFusionSystemPrompt(
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = shouldUseWebSearch,
+                    webContext = webSearchResult,
+                    promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
+                )
+                val currentMessages = buildList<ChatMessage> {
+                    add(
+                        ChatMessage(
+                            role = "system",
+                            content = """
+                            FUSION_GENERATION_SETTINGS
+                            maxTokens=${requestSettings.maxTokens}
+                            topK=${requestSettings.topK}
+                            topP=${requestSettings.topP}
+                            temperature=${requestSettings.temperature}
+                            accelerator=${requestSettings.accelerator.name}
+                            reasoningBudgetTokens=${requestSettings.reasoningBudgetTokens}
+                            speculativeDecoding=${requestSettings.speculativeDecodingEnabled == true}
+                            """.trimIndent()
+                        )
+                    )
+                    add(ChatMessage(role = "system", content = fusionSystemPrompt))
+                    selectedModelPath?.let { modelPath ->
+                        add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+                    }
+                    add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
+                    addAll(historyBeforeUser)
+                    add(
+                        ChatMessage(
+                            role = "user",
+                            content = buildFinalUserContent(
+                                body = userInstruction,
+                                attachments = if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend,
+                                webSearchEnabled = shouldUseWebSearch,
+                                webSearchResult = webSearchResult
+                            )
+                        )
+                    )
+                }
+
+                val activeModelPath = selectedModelPath?.takeIf { File(it).exists() }
+                    ?: builtInModels
+                        .firstOrNull { it.name == selectedModel && isModelDownloaded(context, it) }
+                        ?.let { getModelFile(context, it).absolutePath }
+
+                if (activeModelPath == null) {
+                    DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", "model file missing")
+                    Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val missingImage = imageAttachments.firstOrNull { !File(it.localPath).exists() }
+                if (missingImage != null) {
+                    DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", "image file missing")
+                    Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val useMultimodalImages = imageAttachments.isNotEmpty()
+                if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath!!)) {
+                    DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", "multimodal unsupported")
+                    Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val generationStartMs = SystemClock.elapsedRealtime()
+                val rawReply = FusionRuntimeLock.withChatGeneration {
+                    generateWithLiteRtRecovery(
+                        engine = engine,
+                        onBeforeRetry = {
+                            generationStatus = "답변을 다시 생성하는 중입니다."
+                        },
+                        generateOnce = {
+                            if (useMultimodalImages) {
+                                engine.generateMultimodalStreaming(
+                                    messages = currentMessages,
+                                    modelPath = activeModelPath!!,
+                                    settings = requestSettings,
+                                    imagePaths = imageAttachments.map { it.localPath },
+                                    onToken = {}
+                                )
+                            } else {
+                                engine.generate(
+                                    messages = currentMessages,
+                                    modelPath = activeModelPath!!,
+                                    settings = requestSettings
+                                )
+                            }
+                        }
+                    )
+                }
+                val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
+                val metricsLine = buildFusionMetricsLine(
+                    modelName = shortModelName(selectedModel),
+                    acceleratorName = buildAcceleratorLabel(
+                        acceleratorName = requestSettings.accelerator.name,
+                        speculativeDecodingEnabled = mtpEnabledForRequest
+                    ),
+                    generatedText = rawReply,
+                    totalGenerationMs = totalGenerationMs,
+                    firstTokenLatencyMs = null,
+                    settingsLine = buildEffectiveSettingsLine(
+                        buildEffectiveRuntimeSettings(
+                            modelName = selectedModel,
+                            modelPath = activeModelPath!!,
+                            settings = requestSettings,
+                            reasoningEnabled = reasoningEnabled,
+                            webSearchEnabled = shouldUseWebSearch,
+                            mtpStatus = engine.lastMtpStatus
+                        )
+                    )
+                )
+
+                dao.updateMessageContent(targetMessage.id, appendFusionMetrics(rawReply, metricsLine))
+                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 성공", action.menuLabel)
+                Toast.makeText(context, "답변을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e("FusionEngine", "Response regeneration failed", e)
+                DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", e::class.java.simpleName)
+                Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            } finally {
+                generationStatus = null
+                isGenerating = false
+                regeneratingMessageId = null
+                streamingAssistantText = null
+                streamingMetricsLine = null
+            }
+        }
+    }
+
     fun startRegenerateLatestResponse() {
+        val safeLatestAssistant = messageEntities.lastOrNull { it.role != "user" }
+        if (safeLatestAssistant == null) {
+            Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startRegenerateResponse(safeLatestAssistant, ResponseRegenerationAction.Retry)
+        return
+
         if (isGenerating) return
         if (FusionRuntimeLock.isBenchmarkRunning) {
             Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
@@ -579,7 +821,7 @@ fun ChatScreen(
                 }
 
                 val useMultimodalImages = imageAttachments.isNotEmpty()
-                if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath)) {
+                if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath!!)) {
                     dao.insertMessage(
                         MessageEntity(
                             conversationId = activeConversationId,
@@ -615,7 +857,7 @@ fun ChatScreen(
 
                     engine.generateMultimodalStreaming(
                         messages = currentMessages,
-                        modelPath = activeModelPath,
+                        modelPath = activeModelPath!!,
                         settings = requestSettings,
                         imagePaths = imageAttachments.map { it.localPath },
                         onToken = { token ->
@@ -637,7 +879,7 @@ fun ChatScreen(
                     generationStatus = "더 깊게 생각하는 중..."
                     engine.generate(
                         messages = currentMessages,
-                        modelPath = activeModelPath,
+                        modelPath = activeModelPath!!,
                         settings = requestSettings
                     )
                 } else {
@@ -647,7 +889,7 @@ fun ChatScreen(
 
                     engine.generateStreaming(
                         messages = currentMessages,
-                        modelPath = activeModelPath,
+                        modelPath = activeModelPath!!,
                         settings = requestSettings,
                         onToken = { token ->
                             if (firstTokenLatencyMs == null && token.isNotEmpty()) {
@@ -680,7 +922,7 @@ fun ChatScreen(
                     settingsLine = buildEffectiveSettingsLine(
                         buildEffectiveRuntimeSettings(
                             modelName = selectedModel,
-                            modelPath = activeModelPath,
+                            modelPath = activeModelPath!!,
                             settings = requestSettings,
                             reasoningEnabled = reasoningEnabled,
                             webSearchEnabled = webSearchEnabled,
@@ -1129,7 +1371,7 @@ fun ChatScreen(
                                     }
 
                                     val useMultimodalImages = imageAttachments.isNotEmpty()
-                                    if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath)) {
+                                    if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath!!)) {
                                         dao.insertMessage(
                                             MessageEntity(
                                                 conversationId = activeConversationId,
@@ -1168,7 +1410,7 @@ fun ChatScreen(
 
                                         engine.generateMultimodalStreaming(
                                             messages = currentMessages,
-                                            modelPath = activeModelPath,
+                                            modelPath = activeModelPath!!,
                                             settings = requestSettings,
                                             imagePaths = imageAttachments.map { it.localPath },
                                             onToken = { token ->
@@ -1190,7 +1432,7 @@ fun ChatScreen(
                                         generationStatus = "더 깊게 생각하는 중..."
                                         engine.generate(
                                             messages = currentMessages,
-                                            modelPath = activeModelPath,
+                                            modelPath = activeModelPath!!,
                                             settings = requestSettings
                                         )
                                     } else {
@@ -1200,7 +1442,7 @@ fun ChatScreen(
 
                                         engine.generateStreaming(
                                             messages = currentMessages,
-                                            modelPath = activeModelPath,
+                                            modelPath = activeModelPath!!,
                                             settings = requestSettings,
                                             onToken = { token ->
                                                 if (firstTokenLatencyMs == null && token.isNotEmpty()) {
@@ -1233,7 +1475,7 @@ fun ChatScreen(
                                         settingsLine = buildEffectiveSettingsLine(
                                             buildEffectiveRuntimeSettings(
                                                 modelName = selectedModel,
-                                                modelPath = activeModelPath,
+                                                modelPath = activeModelPath!!,
                                                 settings = requestSettings,
                                                 reasoningEnabled = reasoningEnabled,
                                                 webSearchEnabled = webSearchEnabled,
@@ -1373,7 +1615,9 @@ fun ChatScreen(
                                 selectedModel = selectedModel,
                                 webSearchEnabled = webSearchEnabled,
                                 reasoningEnabled = reasoningEnabled,
-                                onRetry = { startRegenerateLatestResponse() },
+                                isRegenerating = regeneratingMessageId == message.id,
+                                onRetry = { startRegenerateResponse(message, ResponseRegenerationAction.Retry) },
+                                onRegenerate = { action -> startRegenerateResponse(message, action) },
                                 onBranch = {
                                     Toast.makeText(
                                         context,
@@ -1396,7 +1640,7 @@ fun ChatScreen(
                         }
                     }
 
-                    if (isGenerating) {
+                    if (isGenerating && regeneratingMessageId == null) {
                         item {
                             val streamingText = streamingAssistantText
                             if (!reasoningEnabled && streamingText != null) {
@@ -1410,6 +1654,7 @@ fun ChatScreen(
                                     reasoningEnabled = false,
                                     showActions = false,
                                     onRetry = {},
+                                    onRegenerate = {},
                                     onBranch = {},
                                     onToggleWebSearch = {}
                                 )
@@ -2050,7 +2295,9 @@ private fun AssistantMessage(
     webSearchEnabled: Boolean,
     reasoningEnabled: Boolean,
     showActions: Boolean = true,
+    isRegenerating: Boolean = false,
     onRetry: () -> Unit,
+    onRegenerate: (ResponseRegenerationAction) -> Unit,
     onBranch: () -> Unit,
     onToggleWebSearch: () -> Unit
 ) {
@@ -2078,6 +2325,16 @@ private fun AssistantMessage(
             fontSize = 18.sp,
             lineHeight = 29.sp
         )
+
+        if (isRegenerating) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "답변을 다시 생성하는 중입니다.",
+                color = AccentBlue,
+                fontSize = 13.sp,
+                lineHeight = 18.sp
+            )
+        }
 
         if (showActions) {
         metricsSplit.metricsLine?.let { metricsLine ->
@@ -2128,6 +2385,7 @@ private fun AssistantMessage(
                     createdAt = createdAt,
                     selectedModel = selectedModel,
                     webSearchEnabled = webSearchEnabled,
+                    isRegenerating = isRegenerating,
                     onBranch = {
                         moreExpanded = false
                         onBranch()
@@ -2135,6 +2393,10 @@ private fun AssistantMessage(
                     onRetry = {
                         moreExpanded = false
                         onRetry()
+                    },
+                    onRegenerate = { action ->
+                        moreExpanded = false
+                        onRegenerate(action)
                     },
                     onToggleWebSearch = {
                         moreExpanded = false
@@ -2211,8 +2473,10 @@ private fun AssistantMoreMenu(
     createdAt: Long,
     selectedModel: String,
     webSearchEnabled: Boolean,
+    isRegenerating: Boolean,
     onBranch: () -> Unit,
     onRetry: () -> Unit,
+    onRegenerate: (ResponseRegenerationAction) -> Unit,
     onToggleWebSearch: () -> Unit
 ) {
     val timeText = remember(createdAt) {
@@ -2255,8 +2519,33 @@ private fun AssistantMoreMenu(
         )
 
         DropdownMenuItem(
-            text = { Text("↻  재시도", color = TextPrimary) },
-            onClick = onRetry
+            text = { Text("답변 다시 생성", color = TextPrimary) },
+            onClick = onRetry,
+            enabled = !isRegenerating
+        )
+
+        DropdownMenuItem(
+            text = { Text("더 짧게", color = TextPrimary) },
+            onClick = { onRegenerate(ResponseRegenerationAction.Shorter) },
+            enabled = !isRegenerating
+        )
+
+        DropdownMenuItem(
+            text = { Text("더 자세히", color = TextPrimary) },
+            onClick = { onRegenerate(ResponseRegenerationAction.MoreDetailed) },
+            enabled = !isRegenerating
+        )
+
+        DropdownMenuItem(
+            text = { Text("표로 정리", color = TextPrimary) },
+            onClick = { onRegenerate(ResponseRegenerationAction.Table) },
+            enabled = !isRegenerating
+        )
+
+        DropdownMenuItem(
+            text = { Text("전문가 톤", color = TextPrimary) },
+            onClick = { onRegenerate(ResponseRegenerationAction.ExpertTone) },
+            enabled = !isRegenerating
         )
 
         DropdownMenuItem(

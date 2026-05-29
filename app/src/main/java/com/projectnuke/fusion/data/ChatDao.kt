@@ -91,6 +91,9 @@ interface ChatDao {
     @Query("UPDATE conversations SET updatedAt = :updatedAt WHERE id = :conversationId")
     suspend fun updateConversationTime(conversationId: Long, updatedAt: Long)
 
+    @Query("UPDATE messages SET content = :content WHERE id = :messageId")
+    suspend fun updateMessageContent(messageId: Long, content: String)
+
     @Query("UPDATE conversations SET isPinned = :isPinned WHERE id = :conversationId")
     suspend fun updateConversationPinned(conversationId: Long, isPinned: Boolean)
 

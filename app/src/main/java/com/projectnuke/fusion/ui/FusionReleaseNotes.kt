@@ -1,4 +1,4 @@
-package com.projectnuke.fusion.ui
+﻿package com.projectnuke.fusion.ui
 
 import android.content.Context
 import android.os.Build
@@ -163,6 +163,27 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.3.7-alpha",
+            status = "알파",
+            summary = "응답 재생성과 패치노트 정리를 반영했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "답변 다시 생성",
+                    items = listOf(
+                        "답변을 자동으로 다시 생성할 수 있도록 개선했습니다.",
+                        "더 짧게, 더 자세히, 표로 정리, 전문가 톤 재생성 동작을 추가했습니다.",
+                        "재생성 실패 시 기존 답변은 그대로 유지하도록 안전하게 처리했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "업데이트 기록",
+                    items = listOf(
+                        "0.3.7-alpha 버전을 추가했습니다.",
+                        "버전별 패치노트를 더 정리된 형태로 유지했습니다."
+                    )
+                )
+            )
+        ),        FusionReleaseNote(
             version = "0.3.6-alpha",
             status = "알파",
             summary = "채팅 입력 영역의 배치를 다듬었습니다.",
