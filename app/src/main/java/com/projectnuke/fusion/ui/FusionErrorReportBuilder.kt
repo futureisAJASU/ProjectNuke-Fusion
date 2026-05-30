@@ -49,7 +49,12 @@ fun buildFusionDeveloperLogSnapshot(
     val memoryStatus = buildString {
         appendLine("메모리 사용: ${if (isSavedMemoryContextEnabled(prefs)) "켜짐" else "꺼짐"}")
         appendLine("저장된 메모리 수: ${savedMemories.size}개")
-        appendLine("사용 중인 메모리 수: ${savedMemories.count { it.enabled }}개")
+        appendLine("사용 중인 메모리 수: ${savedMemories.count { it.enabled && it.scope != MemoryScope.DISABLED }}개")
+        appendLine("전체 대화 메모리 수: ${savedMemories.count { it.scope == MemoryScope.GLOBAL }}개")
+        appendLine("대화 전용 메모리 수: ${savedMemories.count { it.scope == MemoryScope.CONVERSATION_ONLY }}개")
+        appendLine("모델 전용 메모리 수: ${savedMemories.count { it.scope == MemoryScope.MODEL_ONLY }}개")
+        appendLine("사용 안 함 메모리 수: ${savedMemories.count { !it.enabled || it.scope == MemoryScope.DISABLED }}개")
+        appendLine("현재 미리보기 포함 메모리 수: ${memoryContext.itemCount}개")
         appendLine("대화 요약 수: ${savedSummaries.size}개")
         appendLine("메모리 컨텍스트 예상 문자 수: ${memoryContext.characterCount}")
         append("메모리 컨텍스트 잘림: ${memoryContext.trimmed}")

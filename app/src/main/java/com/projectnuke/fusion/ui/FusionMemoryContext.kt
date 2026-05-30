@@ -12,7 +12,10 @@ data class FusionSavedMemoryContext(
     val text: String?,
     val itemCount: Int,
     val characterCount: Int,
-    val trimmed: Boolean
+    val trimmed: Boolean,
+    val totalSavedCount: Int = 0,
+    val enabledCount: Int = 0,
+    val excludedByScopeCount: Int = 0
 )
 
 fun isSavedMemoryContextEnabled(prefs: SharedPreferences): Boolean {
@@ -22,15 +25,37 @@ fun isSavedMemoryContextEnabled(prefs: SharedPreferences): Boolean {
 fun buildSavedMemoryContext(
     context: Context,
     prefs: SharedPreferences,
-    currentConversationId: Long?
+    currentConversationId: Long?,
+    currentModelId: String? = prefs.getString("selected_model", null),
+    globalPreviewOnly: Boolean = false
 ): FusionSavedMemoryContext {
+    val allCandidates = loadAllConversationMemoryCandidates(context)
+    val enabledCandidates = allCandidates.filter { it.enabled && it.scope != MemoryScope.DISABLED }
     if (!isSavedMemoryContextEnabled(prefs)) {
-        return FusionSavedMemoryContext(text = null, itemCount = 0, characterCount = 0, trimmed = false)
+        return FusionSavedMemoryContext(
+            text = null,
+            itemCount = 0,
+            characterCount = 0,
+            trimmed = false,
+            totalSavedCount = allCandidates.size,
+            enabledCount = enabledCandidates.size
+        )
     }
 
-    val candidates = loadAllConversationMemoryCandidates(context)
+    val matchingCandidates = enabledCandidates.filter { candidate ->
+        when (candidate.scope) {
+            MemoryScope.GLOBAL -> true
+            MemoryScope.CONVERSATION_ONLY -> !globalPreviewOnly &&
+                currentConversationId != null &&
+                candidate.conversationId == currentConversationId
+            MemoryScope.MODEL_ONLY -> !globalPreviewOnly &&
+                !currentModelId.isNullOrBlank() &&
+                candidate.modelId == currentModelId
+            MemoryScope.DISABLED -> false
+        }
+    }
+    val candidates = matchingCandidates
         .asSequence()
-        .filter { it.enabled }
         .mapNotNull { candidate ->
             sanitizeFusionMemoryText(candidate.text)
                 .takeIf { it.isNotBlank() }
@@ -41,6 +66,8 @@ fun buildSavedMemoryContext(
             compareByDescending<Pair<ConversationMemoryCandidate, String>> { (candidate, _) ->
                 currentConversationId != null && candidate.conversationId == currentConversationId
             }
+                .thenByDescending { (candidate, _) -> candidate.scope == MemoryScope.GLOBAL }
+                .thenByDescending { (candidate, _) -> candidate.scope == MemoryScope.MODEL_ONLY }
                 .thenByDescending { (candidate, _) -> candidate.updatedAt ?: candidate.createdAt }
                 .thenBy { (_, cleanText) -> cleanText.length }
         )
@@ -48,7 +75,15 @@ fun buildSavedMemoryContext(
         .toList()
 
     if (candidates.isEmpty()) {
-        return FusionSavedMemoryContext(text = null, itemCount = 0, characterCount = 0, trimmed = false)
+        return FusionSavedMemoryContext(
+            text = null,
+            itemCount = 0,
+            characterCount = 0,
+            trimmed = false,
+            totalSavedCount = allCandidates.size,
+            enabledCount = enabledCandidates.size,
+            excludedByScopeCount = enabledCandidates.size - matchingCandidates.size
+        )
     }
 
     val header = "[저장된 메모리]"
@@ -67,7 +102,15 @@ fun buildSavedMemoryContext(
     }
     if (lines.size < candidates.size) trimmed = true
     if (lines.isEmpty()) {
-        return FusionSavedMemoryContext(text = null, itemCount = 0, characterCount = 0, trimmed = true)
+        return FusionSavedMemoryContext(
+            text = null,
+            itemCount = 0,
+            characterCount = 0,
+            trimmed = true,
+            totalSavedCount = allCandidates.size,
+            enabledCount = enabledCandidates.size,
+            excludedByScopeCount = enabledCandidates.size - matchingCandidates.size
+        )
     }
 
     val text = buildString {
@@ -78,7 +121,10 @@ fun buildSavedMemoryContext(
         text = text,
         itemCount = lines.size,
         characterCount = text.length,
-        trimmed = trimmed
+        trimmed = trimmed,
+        totalSavedCount = allCandidates.size,
+        enabledCount = enabledCandidates.size,
+        excludedByScopeCount = enabledCandidates.size - matchingCandidates.size
     )
 }
 

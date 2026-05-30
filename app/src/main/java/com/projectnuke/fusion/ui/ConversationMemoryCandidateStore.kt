@@ -13,11 +13,29 @@ data class ConversationMemoryCandidate(
     val updatedAt: Long? = null,
     val conversationTitle: String? = null,
     val enabled: Boolean = true,
+    val scope: MemoryScope = MemoryScope.GLOBAL,
+    val modelId: String? = null,
     val savedByUser: Boolean = true
 )
 
+enum class MemoryScope {
+    GLOBAL,
+    CONVERSATION_ONLY,
+    MODEL_ONLY,
+    DISABLED
+}
+
+enum class MemoryManagerSortMode {
+    UPDATED_DESC,
+    CREATED_DESC,
+    SHORTEST_FIRST,
+    LONGEST_FIRST,
+    ENABLED_FIRST
+}
+
 private const val ConversationMemoryCandidatePrefs = "fusion_memory_candidates"
 private const val ConversationMemoryCandidateKey = "saved_candidates"
+const val PrefMemoryManagerSortMode = "memory_manager_sort_mode"
 
 fun loadConversationMemoryCandidates(
     context: Context,
@@ -39,6 +57,7 @@ fun loadAllConversationMemoryCandidates(
             val obj = arr.optJSONObject(index) ?: continue
             val text = obj.optString("text").trim()
             if (text.isBlank()) continue
+            val enabled = obj.optBoolean("enabled", true)
             add(
                 ConversationMemoryCandidate(
                     id = obj.optString("id").ifBlank { UUID.randomUUID().toString() },
@@ -47,7 +66,12 @@ fun loadAllConversationMemoryCandidates(
                     createdAt = obj.optLong("createdAt"),
                     updatedAt = obj.optLong("updatedAt").takeIf { it > 0L },
                     conversationTitle = obj.optString("conversationTitle").takeIf { it.isNotBlank() },
-                    enabled = obj.optBoolean("enabled", true),
+                    enabled = enabled,
+                    scope = obj.optString("scope")
+                        .takeIf { it.isNotBlank() }
+                        ?.let { runCatching { MemoryScope.valueOf(it) }.getOrNull() }
+                        ?: if (enabled) MemoryScope.GLOBAL else MemoryScope.DISABLED,
+                    modelId = obj.optString("modelId").takeIf { it.isNotBlank() },
                     savedByUser = obj.optBoolean("savedByUser", true)
                 )
             )
@@ -95,6 +119,7 @@ fun saveConversationMemoryCandidates(
                 .put("updatedAt", now)
                 .put("conversationTitle", conversationTitle)
                 .put("enabled", true)
+                .put("scope", MemoryScope.CONVERSATION_ONLY.name)
                 .put("savedByUser", true)
         )
         savedCount++
@@ -146,6 +171,40 @@ fun setConversationMemoryCandidateEnabled(
         val obj = existing.optJSONObject(index) ?: continue
         if (obj.optString("id") != candidateId) continue
         obj.put("enabled", enabled)
+        obj.put("scope", if (enabled) MemoryScope.GLOBAL.name else MemoryScope.DISABLED.name)
+        if (!enabled) obj.remove("modelId")
+        obj.put("updatedAt", System.currentTimeMillis())
+        changed = true
+        break
+    }
+    if (!changed) return false
+    prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
+    return true
+}
+
+fun setConversationMemoryCandidateScope(
+    context: Context,
+    candidateId: String,
+    scope: MemoryScope,
+    modelId: String? = null
+): Boolean {
+    if (candidateId.isBlank()) return false
+    if (scope == MemoryScope.MODEL_ONLY && modelId.isNullOrBlank()) return false
+    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+    val existing = runCatching {
+        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+    }.getOrElse { JSONArray() }
+    var changed = false
+    for (index in 0 until existing.length()) {
+        val obj = existing.optJSONObject(index) ?: continue
+        if (obj.optString("id") != candidateId) continue
+        obj.put("enabled", scope != MemoryScope.DISABLED)
+        obj.put("scope", scope.name)
+        if (scope == MemoryScope.MODEL_ONLY) {
+            obj.put("modelId", modelId)
+        } else {
+            obj.remove("modelId")
+        }
         obj.put("updatedAt", System.currentTimeMillis())
         changed = true
         break

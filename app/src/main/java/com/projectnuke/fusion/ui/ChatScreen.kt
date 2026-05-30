@@ -553,7 +553,7 @@ fun ChatScreen(
                         add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
                     }
                     add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
-                    buildSavedMemoryContext(context, settingsPrefs, targetMessage.conversationId).text?.let { memoryContext ->
+                    buildSavedMemoryContext(context, settingsPrefs, targetMessage.conversationId, selectedModel).text?.let { memoryContext ->
                         add(ChatMessage(role = "system", content = memoryContext))
                     }
                     buildConversationSummaryContextText(loadConversationSummary(context, targetMessage.conversationId))?.let { summaryContext ->
@@ -1464,7 +1464,7 @@ fun ChatScreen(
                                             )
                                         )
 
-                                        buildSavedMemoryContext(context, settingsPrefs, activeConversationId).text?.let { memoryContext ->
+                                        buildSavedMemoryContext(context, settingsPrefs, activeConversationId, selectedModel).text?.let { memoryContext ->
                                             add(ChatMessage(role = "system", content = memoryContext))
                                         }
 
