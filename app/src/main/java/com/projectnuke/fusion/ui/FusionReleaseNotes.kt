@@ -163,6 +163,36 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.0-alpha",
+            status = "알파",
+            summary = "모델 A/B 테스트 기능을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "모델 비교",
+                    items = listOf(
+                        "같은 프롬프트로 여러 모델 또는 설정을 비교할 수 있는 A/B 테스트 화면을 추가했습니다.",
+                        "각 테스트 대상의 모델, 생성 설정, 응답 결과를 함께 확인할 수 있도록 했습니다.",
+                        "테스트는 메모리 부담을 줄이기 위해 순차적으로 실행됩니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "성능 비교",
+                    items = listOf(
+                        "First Token Latency, 총 생성 시간, 토큰 속도 등 주요 성능 정보를 결과 카드에 표시합니다.",
+                        "가장 빠른 응답 시작과 가장 높은 디코딩 속도를 비교 요약으로 확인할 수 있습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "지원되지 않는 모델이나 원격 전용 모델은 로컬 A/B 테스트 대상에서 제외합니다.",
+                        "일부 테스트가 실패해도 다른 결과는 유지되도록 처리했습니다.",
+                        "개발자 로그에는 테스트 결과의 본문이 아니라 상태와 요약 정보만 기록합니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.3.14-alpha",
             status = "알파",
             summary = "메모리 검색과 적용 범위를 추가했습니다.",

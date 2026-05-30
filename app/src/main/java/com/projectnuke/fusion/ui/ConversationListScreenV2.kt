@@ -126,6 +126,7 @@ fun ConversationListScreenV2(
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
     var showDeveloperLogDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
+    var showModelAbTestLab by remember { mutableStateOf(false) }
     var attachmentStorageStats by remember { mutableStateOf<AttachmentStorageStats?>(null) }
     var attachmentStorageLoading by remember { mutableStateOf(false) }
     var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
@@ -326,6 +327,11 @@ fun ConversationListScreenV2(
                 initialHistoryModelFilter = pendingBenchmarkModelFilter
             )
         }
+        return
+    }
+
+    if (showModelAbTestLab) {
+        ModelAbTestLabScreen(onBack = { showModelAbTestLab = false })
         return
     }
 
@@ -747,6 +753,11 @@ fun ConversationListScreenV2(
                     item {
                         DrawerSettingActionRow("메모리 관리", "저장된 메모리와 대화 요약을 확인하고 관리합니다.") {
                             showMemoryManagerDialog = true
+                        }
+                    }
+                    item {
+                        DrawerSettingActionRow("모델 A/B 테스트", "같은 프롬프트로 모델과 설정을 비교합니다.") {
+                            showModelAbTestLab = true
                         }
                     }
 
