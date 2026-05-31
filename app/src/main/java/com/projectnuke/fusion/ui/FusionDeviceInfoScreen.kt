@@ -25,6 +25,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.util.FusionMemoryManager
+import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.util.FusionSocVendor
 import com.projectnuke.fusion.util.collectFusionSocInfo
 import java.util.Locale
@@ -207,12 +208,8 @@ private fun buildFusionDeviceInfoSnapshot(context: Context): FusionDeviceInfoSna
     )
 }
 
-private fun deviceInfoRamClassLabel(totalRamGb: Float): String = when {
-    totalRamGb in 7.0f..8.5f -> "8GB급"
-    totalRamGb <= 12.5f && totalRamGb > 0f -> "12GB급"
-    totalRamGb > 12.5f -> "16GB 이상"
-    else -> "확인 불가"
-}
+private fun deviceInfoRamClassLabel(totalRamGb: Float): String =
+    FusionModelMemoryPreflight.classifyDeviceRam((totalRamGb * 1024f * 1024f * 1024f).toLong()).label
 
 private fun bytesToGb(bytes: Long): Float {
     if (bytes <= 0L) return 0f

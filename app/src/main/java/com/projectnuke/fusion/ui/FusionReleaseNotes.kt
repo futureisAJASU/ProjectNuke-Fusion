@@ -163,6 +163,64 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.16-alpha",
+            status = "알파",
+            summary = "GitHub 바로가기 표시를 개선했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "GitHub 연결",
+                    items = listOf(
+                        "대화 목록 상단에 GitHub 저장소 바로가기 버튼을 추가했습니다.",
+                        "GitHub 버튼을 누르면 외부 브라우저에서 Fusion 저장소를 열 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "UI",
+                    items = listOf(
+                        "GitHub 바로가기를 검색창과 어울리는 둥근 pill 형태로 정리했습니다.",
+                        "상단 헤더에서 새 채팅 버튼과 함께 자연스럽게 보이도록 배치를 조정했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 외부 링크와 UI 배치만 변경합니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
+            version = "0.4.15-alpha",
+            status = "알파",
+            summary = "모델 메모리 점검 기준을 동적으로 개선했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "모델 점검",
+                    items = listOf(
+                        "모델 실행 전 점검에서 총 메모리와 현재 사용 가능한 메모리를 함께 반영하도록 개선했습니다.",
+                        "모델 크기, 권장 메모리, 현재 최대 토큰 수를 기준으로 실행 위험도를 계산하도록 했습니다.",
+                        "8GB 기준에 고정되지 않고 기기별 RAM 상태에 따라 권장, 주의 필요, 무거움, 권장하지 않음 단계를 표시합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "모델 추천",
+                    items = listOf(
+                        "모델 목록과 상세 화면의 경고 문구가 현재 기기 상태를 더 잘 반영하도록 정리했습니다.",
+                        "총 메모리는 충분하지만 현재 가용 메모리가 낮은 경우를 구분해 안내합니다.",
+                        "무거운 모델 선택 전 확인 절차가 동적 위험도 계산을 사용하도록 개선했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 모델 실행 전 안내와 추천 기준을 개선합니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.14-alpha",
             status = "알파",
             summary = "GitHub 이슈 제보와 실험 노트 UI를 개선했습니다.",

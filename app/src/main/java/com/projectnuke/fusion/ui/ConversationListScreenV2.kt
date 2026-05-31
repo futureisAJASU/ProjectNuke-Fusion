@@ -77,8 +77,22 @@ import java.util.Locale
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import androidx.compose.foundation.layout.widthIn
 
 private const val PrefArchiveLockEnabled = "archive_lock_enabled"
+private const val FUSION_GITHUB_REPO_URL =
+    "https://github.com/futureisAJASU/ProjectNuke-Fusion"
+
+private fun openFusionGithubUrl(context: Context) {
+    runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(FUSION_GITHUB_REPO_URL)).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+        }
+        context.startActivity(intent)
+    }.onFailure {
+        Toast.makeText(context, "GitHub 페이지를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+    }
+}
 private const val FUSION_GITHUB_ISSUES_URL = "https://github.com/futureisAJASU/ProjectNuke-Fusion/issues"
 
 private data class AppInfoSummary(
@@ -1451,13 +1465,41 @@ private fun DrawerTopBar(
     onClose: () -> Unit,
     onNewChat: () -> Unit
 ) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    val context = LocalContext.current
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         DrawerCircleButton("←", onClose)
+
         Spacer(modifier = Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = "Fusion", color = DrawerTextPrimary, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-            Text(text = "Local AI Workspace", color = DrawerTextSecondary, fontSize = 12.sp)
+
+        Column(
+            modifier = Modifier.weight(1f)
+        ) {
+            Text(
+                text = "Fusion",
+                color = DrawerTextPrimary,
+                fontSize = 25.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
+            )
+            Text(
+                text = "Local AI Workspace",
+                color = DrawerTextSecondary,
+                fontSize = 12.sp,
+                maxLines = 1
+            )
         }
+
+        DrawerGitHubPill(
+            onClick = { openFusionGithubUrl(context) },
+            modifier = Modifier.widthIn(min = 112.dp, max = 138.dp)
+        )
+
+        Spacer(modifier = Modifier.width(10.dp))
+
         DrawerCircleButton("+", onNewChat)
     }
 }
@@ -1718,6 +1760,43 @@ private fun DrawerCircleButton(text: String, onClick: () -> Unit) {
         contentAlignment = Alignment.Center
     ) {
         Text(text = text, color = DrawerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun DrawerGitHubPill(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(28.dp)
+
+    Row(
+        modifier = modifier
+            .height(52.dp)
+            .clip(shape)
+            .background(Color(0xFF17191F))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "GitHub",
+            color = Color.White,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 15.sp,
+            maxLines = 1
+        )
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Text(
+            text = "↗",
+            color = Color.White.copy(alpha = 0.9f),
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 16.sp,
+            maxLines = 1
+        )
     }
 }
 

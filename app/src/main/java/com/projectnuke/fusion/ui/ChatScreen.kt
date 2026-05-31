@@ -94,6 +94,8 @@ import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibility
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
+import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
+import com.projectnuke.fusion.modelzoo.FusionModelMemoryRiskLevel
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
 import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.modelzoo.ModelFamily
@@ -3714,7 +3716,8 @@ private fun ModelSelectDialog(
                 lowMemory = deviceSummary.third,
                 isCurrentSelected = spec.displayName == currentModel,
                 isFavorite = spec.id in favoriteModelIds,
-                isLocalAvailable = isCatalogModelAvailable(context, spec)
+                isLocalAvailable = isCatalogModelAvailable(context, spec),
+                currentMaxTokens = prefs.getInt(PrefMaxTokens, 4000)
             )
         }
     }
@@ -5297,6 +5300,27 @@ private fun evaluateModelSelectionDecision(
         }
         return ModelSelectionDecision(spec, ModelSelectRiskLevel.BLOCKED, "not locally available", tier, recommendation?.recommendedTokens ?: 0, ramClassLabel(memoryInfo.totalRamGb), msg)
     }
+    val risk = FusionModelMemoryPreflight.evaluate(
+        spec = spec,
+        totalRamBytes = gbToBytes(memoryInfo.totalRamGb),
+        availableRamBytes = gbToBytes(memoryInfo.availableRamGb),
+        currentMaxTokens = recommendation?.recommendedTokens ?: 2048
+    )
+    val effectiveRiskLabel = recommendation?.tier ?: risk.label
+    val dynamicHighRisk = effectiveRiskLabel in setOf(
+        FusionModelMemoryRiskLevel.CAUTION.label,
+        FusionModelMemoryRiskLevel.HEAVY.label,
+        FusionModelMemoryRiskLevel.NOT_RECOMMENDED.label
+    )
+    return ModelSelectionDecision(
+        spec = spec,
+        level = if (dynamicHighRisk) ModelSelectRiskLevel.CAUTION else ModelSelectRiskLevel.DIRECT,
+        reason = if (dynamicHighRisk) "dynamic risk confirmation" else "selected directly",
+        recommendationTier = effectiveRiskLabel,
+        recommendedMaxTokens = risk.recommendedMaxTokens,
+        deviceRamClass = risk.ramClass.label
+    )
+    @Suppress("UNREACHABLE_CODE")
     val sizeGb = spec.modelSizeEstimateGb ?: 0f
     val eightGbClass = memoryInfo.totalRamGb in 7.0f..8.5f
     val lowAvailRam = memoryInfo.availableRamGb < 1.25f
@@ -5481,8 +5505,33 @@ private fun evaluateModelRecommendation(
     lowMemory: Boolean,
     isCurrentSelected: Boolean,
     isFavorite: Boolean,
-    isLocalAvailable: Boolean
+    isLocalAvailable: Boolean,
+    currentMaxTokens: Int = 2048
 ): ModelRecommendationEvaluation {
+    val recommendedTokens = FusionModelMemoryPreflight.recommendedTokens(spec, gbToBytes(totalRamGb), gbToBytes(availableRamGb))
+    val risk = FusionModelMemoryPreflight.evaluate(
+        spec = spec,
+        totalRamBytes = gbToBytes(totalRamGb),
+        availableRamBytes = gbToBytes(availableRamGb),
+        currentMaxTokens = currentMaxTokens,
+        lowMemory = lowMemory
+    )
+    val dynamicIncluded = risk.level in setOf(
+        FusionModelMemoryRiskLevel.RECOMMENDED,
+        FusionModelMemoryRiskLevel.CHECK_REQUIRED,
+        FusionModelMemoryRiskLevel.CAUTION
+    )
+    return ModelRecommendationEvaluation(
+        spec = spec,
+        tier = risk.label,
+        reason = risk.summary,
+        recommendedTokens = risk.recommendedMaxTokens,
+        hint = if (spec.recommendedReasoningEnabled) "MTP 끔" else "MTP 끔 · Reasoning 끔",
+        deviceRamClass = risk.ramClass.label,
+        includedInRecommendedLocal = dynamicIncluded,
+        includeReason = if (dynamicIncluded) "included" else "risk_excluded"
+    )
+    @Suppress("UNREACHABLE_CODE")
     val token = buildDeviceAwareTokenRecommendation(spec, totalRamGb, availableRamGb).value.coerceAtLeast(1024)
     val hintParts = mutableListOf("MTP 끔")
     if (!spec.recommendedReasoningEnabled || totalRamGb <= 8.5f) hintParts += "Reasoning 끔"
@@ -5591,12 +5640,15 @@ private fun getAvailableRamGb(context: Context): Float {
     return bytesToGb(memoryInfo.availMem)
 }
 
+private fun gbToBytes(value: Float): Long {
+    if (value <= 0f) return 0L
+    return (value * 1024f * 1024f * 1024f).toLong()
+}
+
 private fun buildModelMemoryInfo(context: Context, spec: FusionModelSpec): ModelMemoryUiInfo {
-    val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-    val memoryInfo = ActivityManager.MemoryInfo()
-    activityManager?.getMemoryInfo(memoryInfo)
-    val totalRamGb = getTotalRamGb(context)
-    val availableRamGb = getAvailableRamGb(context)
+    val memoryInfo = FusionModelMemoryPreflight.snapshot(context)
+    val totalRamGb = bytesToGb(memoryInfo.totalMem)
+    val availableRamGb = bytesToGb(memoryInfo.availMem)
     val evaluation = evaluateModelRecommendation(
         spec = spec,
         totalRamGb = totalRamGb,
@@ -5620,6 +5672,10 @@ private fun buildModelMemoryWarning(
     availableRamGb: Float,
     evaluation: ModelRecommendationEvaluation
 ): String? {
+    return evaluation.reason.takeUnless {
+        evaluation.tier == FusionModelMemoryRiskLevel.RECOMMENDED.label
+    }
+    @Suppress("UNREACHABLE_CODE")
     if (evaluation.tier == "원격 전용") {
         return "이 모델은 모바일 로컬 실행용이 아닙니다."
     }
@@ -5650,6 +5706,13 @@ private fun buildDeviceAwareTokenRecommendation(
     totalRamGb: Float,
     availableRamGb: Float
 ): TokenRecommendation {
+    val recommended = FusionModelMemoryPreflight.recommendedTokens(spec, gbToBytes(totalRamGb), gbToBytes(availableRamGb))
+    return TokenRecommendation(
+        value = recommended,
+        label = if (recommended > 0) "권장 토큰 수: 약 $recommended" else "권장 토큰 수: 원격 실행 권장",
+        explanation = "현재 기기의 총 메모리와 사용 가능한 메모리를 기준으로 권장값을 계산했습니다."
+    )
+    @Suppress("UNREACHABLE_CODE")
     val sizeGb = spec.modelSizeEstimateGb ?: when (spec.memoryClass) {
         ModelMemoryClass.LOW -> 1.5f
         ModelMemoryClass.MEDIUM -> 3.5f

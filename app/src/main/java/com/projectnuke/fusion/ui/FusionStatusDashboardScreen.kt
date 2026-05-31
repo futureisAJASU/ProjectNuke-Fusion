@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
+import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.collectFusionSocInfo
 import java.util.Locale
@@ -262,10 +263,5 @@ private fun formatGb(value: Float): String = String.format(Locale.US, "%.1f", va
 
 private fun formatSpeed(value: Double): String = String.format(Locale.US, "%.1f", value)
 
-private fun dashboardRamClassLabel(totalRamGb: Float): String = when {
-    totalRamGb in 7.0f..8.5f -> "8GB급"
-    totalRamGb <= 12.5f -> "12GB급"
-    totalRamGb <= 16.5f -> "16GB급"
-    totalRamGb > 0f -> "16GB 이상"
-    else -> "정보 없음"
-}
+private fun dashboardRamClassLabel(totalRamGb: Float): String =
+    FusionModelMemoryPreflight.classifyDeviceRam((totalRamGb * 1024f * 1024f * 1024f).toLong()).label
