@@ -162,7 +162,9 @@ private fun ExperimentNotesActionFooter(
     onDismiss: () -> Unit
 ) {
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(

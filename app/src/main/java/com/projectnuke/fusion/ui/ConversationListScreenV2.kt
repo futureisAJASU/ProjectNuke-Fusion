@@ -79,7 +79,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 private const val PrefArchiveLockEnabled = "archive_lock_enabled"
-// TODO: Replace with the public Fusion repository issues URL before release.
 private const val FUSION_GITHUB_ISSUES_URL = "https://github.com/futureisAJASU/ProjectNuke-Fusion/issues"
 
 private data class AppInfoSummary(
