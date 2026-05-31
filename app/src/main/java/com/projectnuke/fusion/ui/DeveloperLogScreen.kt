@@ -76,6 +76,7 @@ fun DeveloperLogDialog(
                     item { DeveloperSectionCard("모델", snapshot.fullLogText, 8, 13) }
                     item { DeveloperSectionCard("메모리", snapshot.fullLogText, 14, 18) }
                     item { DeveloperPlainCard("저장된 메모리", snapshot.memoryStatusText) }
+                    item { DeveloperPlainCard("A/B 테스트", snapshot.abTestStatusText) }
                     item { DeveloperSectionCard("최근 오류", snapshot.fullLogText, 36, 56) }
                     item { DeveloperSectionCard("벤치마크", snapshot.fullLogText, 19, 23) }
                     item { DeveloperSectionCard("설정", snapshot.fullLogText, 24, 27) }

@@ -14,7 +14,8 @@ import java.util.Locale
 data class FusionDeveloperLogSnapshot(
     val fullLogText: String,
     val errorReportText: String,
-    val memoryStatusText: String
+    val memoryStatusText: String,
+    val abTestStatusText: String
 )
 
 fun buildFusionDeveloperLogSnapshot(
@@ -46,6 +47,14 @@ fun buildFusionDeveloperLogSnapshot(
     val savedMemories = loadAllConversationMemoryCandidates(context)
     val savedSummaries = loadAllConversationSummaries(context)
     val memoryContext = buildSavedMemoryContext(context, prefs, currentConversationId = null)
+    val abTestHistory = ModelAbTestHistoryStore.load(context)
+    val latestAbTest = abTestHistory.firstOrNull()
+    val abTestStatus = buildString {
+        appendLine("A/B 테스트 기록 수: ${abTestHistory.size}개")
+        appendLine("최근 A/B 테스트: ${latestAbTest?.let { formatTime(it.createdAt) } ?: "없음"}")
+        appendLine("최근 대상 수: ${latestAbTest?.targetCount ?: 0}개")
+        append("최근 실패 대상 수: ${latestAbTest?.failureCount ?: 0}개")
+    }
     val memoryStatus = buildString {
         appendLine("메모리 사용: ${if (isSavedMemoryContextEnabled(prefs)) "켜짐" else "꺼짐"}")
         appendLine("저장된 메모리 수: ${savedMemories.size}개")
@@ -92,6 +101,9 @@ fun buildFusionDeveloperLogSnapshot(
         appendLine("[저장된 메모리]")
         appendLine(memoryStatus)
         appendLine()
+        appendLine("[A/B 테스트]")
+        appendLine(abTestStatus)
+        appendLine()
         appendLine("[최근 오류]")
         if (events.isEmpty()) {
             appendLine("최근 오류가 없습니다.")
@@ -107,6 +119,9 @@ fun buildFusionDeveloperLogSnapshot(
         appendLine("[저장된 메모리]")
         appendLine(memoryStatus)
         appendLine()
+        appendLine("[A/B 테스트]")
+        appendLine(abTestStatus)
+        appendLine()
         if (errorEvents.isEmpty()) {
             appendLine("최근 오류가 없습니다.")
         } else {
@@ -119,7 +134,8 @@ fun buildFusionDeveloperLogSnapshot(
     return FusionDeveloperLogSnapshot(
         fullLogText = full,
         errorReportText = errorReport,
-        memoryStatusText = memoryStatus
+        memoryStatusText = memoryStatus,
+        abTestStatusText = abTestStatus
     )
 }
 

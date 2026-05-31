@@ -127,6 +127,7 @@ fun ConversationListScreenV2(
     var showDeveloperLogDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
+    var showHelpDialog by remember { mutableStateOf(false) }
     var attachmentStorageStats by remember { mutableStateOf<AttachmentStorageStats?>(null) }
     var attachmentStorageLoading by remember { mutableStateOf(false) }
     var archiveLockEnabled by remember { mutableStateOf(prefs.getBoolean(PrefArchiveLockEnabled, false)) }
@@ -760,6 +761,11 @@ fun ConversationListScreenV2(
                             showModelAbTestLab = true
                         }
                     }
+                    item {
+                        DrawerSettingActionRow("사용 가이드", "Fusion의 주요 기능과 사용 방법을 확인합니다.") {
+                            showHelpDialog = true
+                        }
+                    }
 
                     item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("실험실") }
                     item { DrawerSettingActionRow("벤치마크", "TTFT, 토큰 속도, 메모리 사용량을 측정합니다.") { page = SidebarPage.BENCHMARK } }
@@ -873,6 +879,7 @@ fun ConversationListScreenV2(
                     Text("채팅 기록과 모델 파일은 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     Text("모델 메모가 백업에 포함될 수 있습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     Text("저장된 메모리와 대화 요약 내용은 설정 백업에 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
+                    Text("A/B 테스트 기록은 설정 백업에 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     DrawerSettingActionRow("설정 내보내기", "JSON 파일로 저장합니다.") {
                         settingsBackupExportLauncher.launch("fusion-settings-backup.json")
                     }
@@ -1090,6 +1097,14 @@ fun ConversationListScreenV2(
             conversations = conversations,
             archivedConversations = archivedConversations,
             onDismiss = { showMemoryManagerDialog = false }
+        )
+    }
+
+    if (showHelpDialog) {
+        FusionHelpScreen(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showHelpDialog = false }
         )
     }
 

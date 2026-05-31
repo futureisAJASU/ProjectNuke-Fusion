@@ -80,8 +80,10 @@ private data class AbTarget(
 private data class AbResult(
     val targetLabel: String,
     val modelName: String,
+    val modelId: String?,
     val settings: GenerationSettings,
     val reasoningEnabled: Boolean,
+    val memoryEnabled: Boolean,
     val answer: String?,
     val firstTokenLatencyMs: Long?,
     val totalGenerationMs: Long,
@@ -123,6 +125,7 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
     var isRunning by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var modelPickerTargetId by remember { mutableStateOf<Long?>(null) }
+    var showHistory by remember { mutableStateOf(false) }
 
     DisposableEffect(engine) {
         val unregister = FusionMemoryManager.registerIdleEngineUnloader {
@@ -138,6 +141,11 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
 
     BackHandler(enabled = !isRunning) { onBack() }
 
+    if (showHistory) {
+        ModelAbTestHistoryScreen(onBack = { showHistory = false })
+        return
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(AbBg).padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -149,6 +157,16 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
                     Text("같은 입력을 여러 모델 또는 설정으로 실행해 결과를 비교합니다.", color = AbSubtle, fontSize = 12.sp)
                 }
                 TextButton(enabled = !isRunning, onClick = onBack) { Text("뒤로", color = AbText) }
+            }
+        }
+
+        item {
+            AbCardBlock {
+                Text("최근 A/B 테스트", color = AbText, fontWeight = FontWeight.SemiBold)
+                Text("A/B 테스트 기록에는 테스트 프롬프트와 생성 결과가 저장될 수 있습니다.", color = AbSubtle, fontSize = 12.sp)
+                TextButton(enabled = !isRunning, onClick = { showHistory = true }) {
+                    Text("기록 열기", color = AbAccent)
+                }
             }
         }
 
@@ -258,7 +276,7 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
                                 DeveloperLogStore.record(context, "ab_test", "A/B 테스트 시작", "targets=${targets.size}, models=${targets.joinToString { it.model.spec.displayName }}")
                                 scope.launch {
                                     try {
-                                        runAbTests(
+                                        val completedResults = runAbTests(
                                             context = context,
                                             engine = engine,
                                             prefs = prefs,
@@ -267,6 +285,17 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
                                             onStatus = { status = it },
                                             onResult = { results = results + it }
                                         )
+                                        if (completedResults.isNotEmpty()) {
+                                            ModelAbTestHistoryStore.save(
+                                                context,
+                                                StoredAbTestSession(
+                                                    id = "ab-${System.currentTimeMillis()}",
+                                                    fullPrompt = cleanPrompt,
+                                                    createdAt = System.currentTimeMillis(),
+                                                    results = completedResults.map { it.toStoredResult() }
+                                                )
+                                            )
+                                        }
                                         status = "A/B 테스트가 완료되었습니다."
                                     } catch (_: ChatGenerationRunningException) {
                                         status = "현재 응답을 생성하는 중입니다."
@@ -439,7 +468,8 @@ private suspend fun runAbTests(
     targets: List<AbTarget>,
     onStatus: (String) -> Unit,
     onResult: (AbResult) -> Unit
-) {
+): List<AbResult> {
+    val completedResults = mutableListOf<AbResult>()
     FusionRuntimeLock.withExclusiveBenchmark(
         onPrepareExclusiveMode = {
             onStatus("모델 리소스를 정리하는 중입니다.")
@@ -456,6 +486,7 @@ private suspend fun runAbTests(
                 delay(250L)
                 runSingleAbTarget(context, engine, prefs, prompt, label, target)
             }.onSuccess { result ->
+                completedResults += result
                 onResult(result)
                 DeveloperLogStore.record(
                     context,
@@ -465,12 +496,13 @@ private suspend fun runAbTests(
                 )
             }.onFailure { error ->
                 Log.e("FusionAbTest", "Target $label failed", error)
-                onResult(
-                    AbResult(
+                val failedResult = AbResult(
                         targetLabel = label,
                         modelName = target.model.spec.displayName,
+                        modelId = target.model.spec.id,
                         settings = target.settings,
                         reasoningEnabled = target.reasoningEnabled,
+                        memoryEnabled = isSavedMemoryContextEnabled(prefs),
                         answer = null,
                         firstTokenLatencyMs = null,
                         totalGenerationMs = 0L,
@@ -480,13 +512,15 @@ private suspend fun runAbTests(
                         createdAt = System.currentTimeMillis(),
                         errorMessage = safeAbErrorMessage(error)
                     )
-                )
+                completedResults += failedResult
+                onResult(failedResult)
                 DeveloperLogStore.record(context, "ab_test", "A/B 대상 실패", "target=$label, model=${target.model.spec.displayName}, error=${error::class.java.simpleName}")
             }
         }
     }
     runCatching { engine.unload() }
     DeveloperLogStore.record(context, "ab_test", "A/B 테스트 완료", "targets=${targets.size}")
+    return completedResults
 }
 
 private suspend fun runSingleAbTarget(
@@ -529,8 +563,10 @@ private suspend fun runSingleAbTarget(
     return AbResult(
         targetLabel = label,
         modelName = target.model.spec.displayName,
+        modelId = target.model.spec.id,
         settings = target.settings,
         reasoningEnabled = target.reasoningEnabled,
+        memoryEnabled = isSavedMemoryContextEnabled(prefs),
         answer = answer,
         firstTokenLatencyMs = firstTokenLatencyMs,
         totalGenerationMs = totalMs,
@@ -617,6 +653,30 @@ private fun AbResult.copyText(): String = buildString {
         appendLine("실패: ${errorMessage.orEmpty()}")
     }
 }.trim()
+
+private fun AbResult.toStoredResult(): StoredAbTestResult {
+    return StoredAbTestResult(
+        targetLabel = targetLabel,
+        modelName = modelName,
+        modelId = modelId,
+        accelerator = settings.accelerator.name,
+        maxTokens = settings.maxTokens,
+        temperature = settings.temperature,
+        topK = settings.topK,
+        topP = settings.topP,
+        mtpEnabled = settings.speculativeDecodingEnabled == true,
+        reasoningEnabled = reasoningEnabled,
+        memoryEnabled = memoryEnabled,
+        answer = answer,
+        success = succeeded,
+        errorSummary = errorMessage,
+        firstTokenLatencyMs = firstTokenLatencyMs,
+        totalGenerationTimeMs = totalGenerationMs,
+        estimatedTokens = estimatedTokens,
+        totalTokensPerSecond = totalTokensPerSecond,
+        decodeTokensPerSecond = decodeTokensPerSecond
+    )
+}
 
 private fun sanitizeAbAnswer(raw: String): String {
     return raw

@@ -163,6 +163,66 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.2-alpha",
+            status = "알파",
+            summary = "사용 가이드를 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "사용 가이드",
+                    items = listOf(
+                        "Fusion의 주요 기능과 사용 방법을 빠르게 확인할 수 있는 가이드 화면을 추가했습니다.",
+                        "모델 라이브러리, 메모리, 벤치마크, A/B 테스트, 데이터 관리, 문제 해결 흐름을 한곳에서 정리했습니다.",
+                        "가이드 내용을 클립보드로 복사할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "UI",
+                    items = listOf(
+                        "설정 화면에서 사용 가이드로 바로 들어갈 수 있도록 했습니다.",
+                        "다크 UI와 하늘색 강조 색상에 맞춰 가이드 화면을 정리했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 패치는 읽기 전용 안내 화면과 버전 정보만 수정합니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리, A/B 테스트 동작은 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
+            version = "0.4.1-alpha",
+            status = "알파",
+            summary = "A/B 테스트 기록과 결과 관리를 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "A/B 테스트 기록",
+                    items = listOf(
+                        "실행한 A/B 테스트 결과를 최근 기록으로 확인할 수 있도록 했습니다.",
+                        "프롬프트, 모델, 설정, 응답 결과, 속도 정보를 함께 볼 수 있도록 했습니다.",
+                        "최근 A/B 테스트 기록을 열기, 복사, 삭제할 수 있도록 개선했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "결과 비교",
+                    items = listOf(
+                        "A/B 테스트 결과 상세 화면에서 각 대상의 답변과 성능 정보를 비교할 수 있습니다.",
+                        "가장 빠른 응답 시작, 가장 높은 디코딩 속도, 실패한 대상 수를 요약해 표시합니다.",
+                        "필요한 경우 결과를 Markdown 형식으로 복사할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "A/B 테스트 기록은 채팅 기록이나 모델 파일과 별도로 관리됩니다.",
+                        "개발자 로그에는 A/B 테스트 본문이 아니라 기록 개수와 상태만 표시합니다.",
+                        "설정 백업에는 A/B 테스트 결과 본문을 포함하지 않습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.0-alpha",
             status = "알파",
             summary = "모델 A/B 테스트 기능을 추가했습니다.",
