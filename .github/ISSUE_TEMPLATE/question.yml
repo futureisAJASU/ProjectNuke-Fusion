@@ -1,0 +1,30 @@
+name: Question
+description: Ask a question about Fusion usage, behavior, or development.
+title: "[Question] "
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What would you like to know?
+      placeholder: Example: How are saved memories injected into the generation context?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      options:
+        - Installation / Build
+        - Model Runtime
+        - Model Library
+        - Memory
+        - Benchmark
+        - A/B Test Lab
+        - Settings / Backup
+        - Documentation
+        - Other
+    validations:
+      required: false

@@ -1,0 +1,93 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in Fusion.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Fusion.
+        Please fill out as much information as possible so the issue can be reproduced and investigated.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug description
+      description: Describe what went wrong.
+      placeholder: Example: The app crashes after selecting a local model and starting a chat.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: List the steps needed to reproduce the issue.
+      placeholder: |
+        1. Open Model Library
+        2. Select a model
+        3. Start a new chat
+        4. App crashes
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+      placeholder: Example: The model should load and generate a response.
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened?
+      placeholder: Example: The app closed during model loading.
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: Example: Galaxy S24 / Galaxy S20+
+    validations:
+      required: false
+
+  - type: input
+    id: android-version
+    attributes:
+      label: Android version
+      placeholder: Example: Android 15 / Android 16
+    validations:
+      required: false
+
+  - type: input
+    id: app-version
+    attributes:
+      label: Fusion version
+      placeholder: Example: 0.4.15-alpha
+    validations:
+      required: false
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      placeholder: Example: Gemma / Qwen / custom local model
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Developer log or error report
+      description: If possible, paste Fusion's developer log or error report. Please remove any private data first.
+      render: text
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy checklist
+      options:
+        - label: I have checked that this issue does not include private information, API keys, passwords, or personal file paths.
+          required: true

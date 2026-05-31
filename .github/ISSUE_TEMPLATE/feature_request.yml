@@ -1,0 +1,52 @@
+name: Feature Request
+description: Suggest a new feature or improvement for Fusion.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement for Fusion.
+        Please describe the use case and expected benefit as clearly as possible.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem would this feature solve?
+      placeholder: Example: It is hard to compare saved memories when there are many entries.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature or improvement you would like to see.
+      placeholder: Example: Add search and tag filters to the Memory Manager.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any alternatives or workarounds you have considered.
+      placeholder: Example: I currently search manually by scrolling through the list.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      options:
+        - Chat
+        - Model Library
+        - Memory
+        - Benchmark
+        - A/B Test Lab
+        - Settings / Backup
+        - UI / UX
+        - Documentation / Guide
+        - Other
+    validations:
+      required: false
