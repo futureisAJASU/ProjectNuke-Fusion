@@ -163,6 +163,36 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.5-alpha",
+            status = "알파",
+            summary = "기기 정보 화면을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "기기 정보",
+                    items = listOf(
+                        "현재 기기의 모델명, Android 버전, AP/SoC 정보를 확인할 수 있는 기기 정보 화면을 추가했습니다.",
+                        "총 메모리와 현재 사용 가능한 메모리를 확인할 수 있도록 했습니다.",
+                        "기기 메모리 기준으로 Fusion 권장 모드를 표시하도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "모델 실행 참고",
+                    items = listOf(
+                        "8GB급 기기에서 소형 모델과 낮은 최대 토큰 수 설정을 권장하도록 안내를 추가했습니다.",
+                        "모델 파일 크기와 실제 실행 메모리가 다를 수 있다는 안내를 추가했습니다.",
+                        "KV 캐시와 런타임 버퍼로 인한 메모리 부담을 설명했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 읽기 전용 기기 정보 화면 중심으로 추가했습니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.4-alpha",
             status = "알파",
             summary = "상태 대시보드를 추가했습니다.",

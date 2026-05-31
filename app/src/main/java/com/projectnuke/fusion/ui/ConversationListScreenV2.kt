@@ -126,6 +126,7 @@ fun ConversationListScreenV2(
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
     var showDeveloperLogDialog by remember { mutableStateOf(false) }
     var showStatusDashboardDialog by remember { mutableStateOf(false) }
+    var showDeviceInfoDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -794,6 +795,11 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("기기 정보", "기기 메모리와 AP 정보를 확인합니다.") {
+                            showDeviceInfoDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("업데이트 기록", "최근 추가된 기능과 변경사항을 확인합니다.") {
                             showReleaseNotesDialog = true
                         }
@@ -1113,6 +1119,14 @@ fun ConversationListScreenV2(
             clipboard = clipboard,
             benchmarkResults = benchmarkResults,
             onDismiss = { showStatusDashboardDialog = false }
+        )
+    }
+
+    if (showDeviceInfoDialog) {
+        FusionDeviceInfoDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showDeviceInfoDialog = false }
         )
     }
 
