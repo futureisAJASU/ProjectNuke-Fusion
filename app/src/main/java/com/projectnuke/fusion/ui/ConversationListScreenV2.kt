@@ -129,6 +129,7 @@ fun ConversationListScreenV2(
     var showDeviceInfoDialog by remember { mutableStateOf(false) }
     var showReleaseChecklistDialog by remember { mutableStateOf(false) }
     var showPromptPresetsDialog by remember { mutableStateOf(false) }
+    var showExperimentNotesDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -782,6 +783,11 @@ fun ConversationListScreenV2(
                             showPromptPresetsDialog = true
                         }
                     }
+                    item {
+                        DrawerSettingActionRow("실험 노트", "모델 테스트와 벤치마크 메모를 기록합니다.") {
+                            showExperimentNotesDialog = true
+                        }
+                    }
                     item { DrawerSettingActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.") { page = SidebarPage.PROMPT_LAB } }
                     item { DrawerSettingActionRow("에이전트 모드", "기기 제어 실험 기능입니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
 
@@ -913,6 +919,7 @@ fun ConversationListScreenV2(
                     Text("모델 메모가 백업에 포함될 수 있습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     Text("저장된 메모리와 대화 요약 내용은 설정 백업에 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     Text("A/B 테스트 기록은 설정 백업에 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
+                    Text("실험 노트 내용은 설정 백업에 포함되지 않습니다.", color = DrawerTextSecondary, fontSize = 12.sp)
                     DrawerSettingActionRow("설정 내보내기", "JSON 파일로 저장합니다.") {
                         settingsBackupExportLauncher.launch("fusion-settings-backup.json")
                     }
@@ -1155,6 +1162,14 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showPromptPresetsDialog = false }
+        )
+    }
+
+    if (showExperimentNotesDialog) {
+        FusionExperimentNotesDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showExperimentNotesDialog = false }
         )
     }
 

@@ -163,6 +163,36 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.8-alpha",
+            status = "알파",
+            summary = "실험 노트 화면을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "실험 노트",
+                    items = listOf(
+                        "모델 테스트와 벤치마크 메모를 기록할 수 있는 실험 노트 화면을 추가했습니다.",
+                        "실험 노트를 저장, 복사, 초기화할 수 있도록 했습니다.",
+                        "실험 노트는 로컬 SharedPreferences에 저장됩니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "개발 보조",
+                    items = listOf(
+                        "A/B 테스트, 벤치마크, 모델 실행 결과를 사람이 직접 정리할 수 있도록 했습니다.",
+                        "반복 실험 중 발견한 내용을 앱 안에서 간단히 기록할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "실험 노트는 채팅, 모델 실행, 메모리 컨텍스트에 자동으로 반영되지 않습니다.",
+                        "실험 노트 내용은 개발자 로그와 설정 백업에 포함하지 않습니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.7-alpha",
             status = "알파",
             summary = "프롬프트 프리셋 화면을 추가했습니다.",
