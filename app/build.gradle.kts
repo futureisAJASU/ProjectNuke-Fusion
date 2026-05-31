@@ -18,8 +18,8 @@ android {
         applicationId = "com.projectnuke.fusion"
         minSdk = 32
         targetSdk = 36
-        versionCode = 26
-        versionName = "0.4.8-alpha"
+        versionCode = 27
+        versionName = "0.4.9-alpha"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

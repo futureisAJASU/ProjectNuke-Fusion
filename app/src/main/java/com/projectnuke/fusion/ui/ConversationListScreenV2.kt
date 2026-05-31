@@ -130,6 +130,7 @@ fun ConversationListScreenV2(
     var showReleaseChecklistDialog by remember { mutableStateOf(false) }
     var showPromptPresetsDialog by remember { mutableStateOf(false) }
     var showExperimentNotesDialog by remember { mutableStateOf(false) }
+    var showDeveloperCommandDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -818,6 +819,11 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("개발 명령어", "빌드, 설치, 로그, Git 명령어를 확인합니다.") {
+                            showDeveloperCommandDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("업데이트 기록", "최근 추가된 기능과 변경사항을 확인합니다.") {
                             showReleaseNotesDialog = true
                         }
@@ -1170,6 +1176,14 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showExperimentNotesDialog = false }
+        )
+    }
+
+    if (showDeveloperCommandDialog) {
+        FusionDeveloperCommandDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showDeveloperCommandDialog = false }
         )
     }
 

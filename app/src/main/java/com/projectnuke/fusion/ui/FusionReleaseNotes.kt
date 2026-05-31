@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.9-alpha",
+            status = "알파",
+            summary = "개발 명령어 치트시트를 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "개발 명령어",
+                    items = listOf(
+                        "빌드, ADB 설치, 로그 확인, Git 작업에 필요한 명령어를 확인할 수 있는 화면을 추가했습니다.",
+                        "각 명령어를 클립보드로 복사할 수 있도록 했습니다.",
+                        "Debug APK 설치와 logcat 크래시 확인 명령어를 빠르게 복사할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "개발 보조",
+                    items = listOf(
+                        "버전 정보 확인, 깨진 한글 검색, 위험 설정 검색 명령어를 추가했습니다.",
+                        "릴리즈 체크리스트와 함께 사용할 수 있는 개발 보조 화면을 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 정적 명령어 표시와 복사 기능만 추가합니다.",
+                        "앱 내부에서 명령어를 실행하지 않으며, 채팅과 모델 실행 데이터는 변경하지 않습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.8-alpha",
             status = "알파",
             summary = "실험 노트 화면을 추가했습니다.",
