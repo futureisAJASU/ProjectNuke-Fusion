@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.10-alpha",
+            status = "알파",
+            summary = "문제 해결 가이드를 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "문제 해결",
+                    items = listOf(
+                        "모델 실행, 메모리 부족, 벤치마크 오류, MTP 설정 문제를 확인할 수 있는 문제 해결 가이드를 추가했습니다.",
+                        "채팅 화면, 메모리 기능, ADB 설치, 로그 확인 관련 안내를 정리했습니다.",
+                        "각 문제 해결 항목을 클립보드로 복사할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "개발 보조",
+                    items = listOf(
+                        "개발자 로그와 logcat 확인 흐름을 더 쉽게 찾을 수 있도록 했습니다.",
+                        "릴리즈 체크리스트와 개발 명령어 화면과 함께 사용할 수 있는 진단용 안내 화면을 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 정적 안내 화면과 복사 기능만 추가합니다.",
+                        "앱 내부에서 명령어를 실행하지 않으며, 채팅과 모델 실행 데이터는 변경하지 않습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.9-alpha",
             status = "알파",
             summary = "개발 명령어 치트시트를 추가했습니다.",

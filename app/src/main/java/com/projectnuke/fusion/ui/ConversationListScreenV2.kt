@@ -131,6 +131,7 @@ fun ConversationListScreenV2(
     var showPromptPresetsDialog by remember { mutableStateOf(false) }
     var showExperimentNotesDialog by remember { mutableStateOf(false) }
     var showDeveloperCommandDialog by remember { mutableStateOf(false) }
+    var showTroubleshootingGuideDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -824,6 +825,11 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("문제 해결 가이드", "모델 실행, 메모리, 설치, 로그 문제 해결 방법을 확인합니다.") {
+                            showTroubleshootingGuideDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("업데이트 기록", "최근 추가된 기능과 변경사항을 확인합니다.") {
                             showReleaseNotesDialog = true
                         }
@@ -1184,6 +1190,14 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showDeveloperCommandDialog = false }
+        )
+    }
+
+    if (showTroubleshootingGuideDialog) {
+        FusionTroubleshootingGuideDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showTroubleshootingGuideDialog = false }
         )
     }
 
