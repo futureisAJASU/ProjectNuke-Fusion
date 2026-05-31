@@ -178,42 +178,13 @@ private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
                     title = "실험 노트",
                     items = listOf(
                         "실험 노트 화면의 하단 버튼 배치를 더 정돈된 형태로 개선했습니다.",
-                        ""
+                        "복사, 저장, 초기화, 닫기 버튼을 2줄 구성으로 정리했습니다."
                     )
                 ),
                 FusionReleaseNoteSection(
                     title = "안전성",
                     items = listOf(
-                        "이번 업데이트는 UI 정리 중심으로 적용했습니다.",
-                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
-                    )
-                )
-            )
-        ),
-        FusionReleaseNote(
-            version = "0.4.13-alpha",
-            status = "알파",
-            summary = "개인정보 및 데이터 안내 화면을 추가했습니다.",
-            sections = listOf(
-                FusionReleaseNoteSection(
-                    title = "데이터 안내",
-                    items = listOf(
-                        "Fusion이 로컬에 저장하는 데이터와 내보내기 가능한 데이터를 설명하는 안내 화면을 추가했습니다.",
-                        "채팅, 메모리, 모델 파일, 벤치마크, A/B 테스트, 설정 백업의 데이터 범위를 정리했습니다.",
-                        "개발자 로그와 오류 보고서에 포함하지 않는 정보를 명확히 안내했습니다."
-                    )
-                ),
-                FusionReleaseNoteSection(
-                    title = "데이터 안내",
-                    items = listOf(
-                        "GitHub 이슈 제보, 웹 검색, 클립보드 복사, 파일 내보내기처럼 외부로 이동하거나 데이터를 내보낼 수 있는 기능을 설명했습니다.",
-                        "민감한 정보를 외부에 공유하지 않도록 주의 안내를 추가했습니다."
-                    )
-                ),
-                FusionReleaseNoteSection(
-                    title = "안전성",
-                    items = listOf(
-                        "이번 업데이트는 정적 안내 화면과 복사 기능만 추가합니다.",
+                        "이번 업데이트는 링크 연결과 UI 정리 중심으로 적용했습니다.",
                         "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
                     )
                 )
@@ -228,37 +199,23 @@ private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
                     title = "앱 정보",
                     items = listOf(
                         "앱 정보 영역의 개발 관련 항목 배치를 정리했습니다.",
-                        "릴리즈 체크리스트를 일반 화면에서 숨기고, 개발자 모드에서만 표시하도록 했습니다."
+                        "릴리즈 체크리스트를 일반 화면에서 숨기고, 개발자 모드에서만 표시하도록 했습니다.",
+                        "앱 정보 카드를 7초 이상 길게 누르면 개발자 모드를 활성화할 수 있도록 했습니다."
                     )
                 ),
                 FusionReleaseNoteSection(
                     title = "개발자 항목",
                     items = listOf(
                         "개발 명령어 화면을 제거했습니다.",
-                        "릴리즈 체크리스트는 개발자 항목으로 이동했습니다."
-                    )
-                ),
-                FusionReleaseNoteSection(
-                    title = "배포 준비",
-                    items = listOf(
-                        "GitHub Issues로 버그와 개선 요청을 남길 수 있는 진입점을 추가했습니다.",
-                        "공개 배포 전 저장소 링크를 쉽게 연결할 수 있도록 준비했습니다."
-                    )
-                ),
-                FusionReleaseNoteSection(
-                    title = "언어 설정",
-                    items = listOf(
-                        "앱 언어 설정 화면을 추가했습니다.",
-                        "시스템 설정 따름, 한국어, English 옵션을 선택할 수 있도록 했습니다.",
-                        "향후 다국어 지원을 위한 언어 설정 저장 구조를 추가했습니다."
+                        "릴리즈 체크리스트는 개발자 항목으로 이동했습니다.",
+                        "개발자 모드는 비밀번호가 아닌 UI 표시 전환 기능으로 동작합니다."
                     )
                 ),
                 FusionReleaseNoteSection(
                     title = "안전성",
                     items = listOf(
                         "이번 업데이트는 설정 메뉴 표시와 안내 화면 정리 중심으로 적용했습니다.",
-                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다.",
-                        "일부 화면은 아직 번역 리소스가 준비되지 않아 언어 선택 후 바로 바뀌지 않을 수 있습니다."
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
                     )
                 )
             )
