@@ -50,6 +50,11 @@ data class FusionReleaseNote(
     val sections: List<FusionReleaseNoteSection>
 )
 
+private data class FusionReleaseNoteGroup(
+    val key: String,
+    val notes: List<FusionReleaseNote>
+)
+
 @Composable
 fun ReleaseNotesDialog(
     context: Context,
@@ -58,6 +63,11 @@ fun ReleaseNotesDialog(
 ) {
     val appVersionName = remember(context) { resolveVersionName(context) }
     val releaseNotes = remember { buildFusionReleaseNotesHistory() }
+    val groupedReleaseNotes = remember(releaseNotes) { buildGroupedReleaseNotes(releaseNotes) }
+    val defaultExpandedGroup = remember(groupedReleaseNotes) { groupedReleaseNotes.firstOrNull()?.key }
+    var expandedGroups by remember(defaultExpandedGroup) {
+        mutableStateOf(defaultExpandedGroup?.let(::setOf) ?: emptySet())
+    }
     var selectedNote by remember { mutableStateOf<FusionReleaseNote?>(null) }
 
     AlertDialog(
@@ -76,21 +86,24 @@ fun ReleaseNotesDialog(
                         Text("현재 앱 버전: $appVersionName", color = ReleaseTextSecondary, fontSize = 12.sp)
                     }
                 }
-                items(releaseNotes, key = { it.version }) { note ->
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = ReleaseCardBg,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { selectedNote = note }
-                    ) {
-                        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(note.version, color = ReleaseTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                Text(note.status, color = ReleaseTextSecondary, fontSize = 11.sp)
+                items(groupedReleaseNotes, key = { it.key }) { group ->
+                    val isExpanded = group.key in expandedGroups
+                    ReleaseNotesGroupCard(
+                        group = group,
+                        expanded = isExpanded,
+                        onToggle = {
+                            expandedGroups = if (isExpanded) {
+                                expandedGroups - group.key
+                            } else {
+                                expandedGroups + group.key
                             }
-                            Text(note.summary, color = ReleaseTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text("섹션 ${note.sections.size}개", color = ReleaseTextSecondary, fontSize = 11.sp)
+                        }
+                    )
+                }
+                groupedReleaseNotes.forEach { group ->
+                    if (group.key in expandedGroups) {
+                        items(group.notes, key = { it.version }) { note ->
+                            ReleaseNoteSummaryCard(note = note, onClick = { selectedNote = note })
                         }
                     }
                 }
@@ -157,6 +170,90 @@ fun ReleaseNotesDialog(
 private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(shape = RoundedCornerShape(12.dp), color = ReleaseCardBg, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp), content = content)
+    }
+}
+
+@Composable
+private fun ReleaseNotesGroupCard(
+    group: FusionReleaseNoteGroup,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    val latestVersion = group.notes.firstOrNull()?.version ?: "-"
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = ReleaseCardBg,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(group.key, color = ReleaseAccentBlue, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(if (expanded) "접기" else "펼치기", color = ReleaseAccentBlue, fontSize = 11.sp)
+            }
+            Text("${group.notes.size}개 업데이트", color = ReleaseTextPrimary, fontSize = 12.sp)
+            Text("최신: $latestVersion", color = ReleaseTextSecondary, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun ReleaseNoteSummaryCard(
+    note: FusionReleaseNote,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = ReleaseCardBg,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(note.version, color = ReleaseTextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text(note.status, color = ReleaseTextSecondary, fontSize = 11.sp)
+            }
+            Text(note.summary, color = ReleaseTextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("섹션 ${note.sections.size}개", color = ReleaseTextSecondary, fontSize = 11.sp)
+        }
+    }
+}
+
+private fun buildGroupedReleaseNotes(notes: List<FusionReleaseNote>): List<FusionReleaseNoteGroup> {
+    val grouped = linkedMapOf<String, MutableList<FusionReleaseNote>>()
+    notes.forEach { note ->
+        val key = releaseNoteGroupKey(note.version)
+        grouped.getOrPut(key) { mutableListOf() }.add(note)
+    }
+    return grouped.entries
+        .sortedBy { releaseNoteGroupOrder(it.key) }
+        .map { (key, groupNotes) -> FusionReleaseNoteGroup(key = key, notes = groupNotes) }
+}
+
+private fun releaseNoteGroupKey(version: String): String {
+    val baseVersion = version.substringBefore("-")
+    val parts = baseVersion.split(".")
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+    if (parts.size < 2) return "기타"
+    val major = parts[0].toIntOrNull() ?: return "기타"
+    val minor = parts[1].toIntOrNull() ?: return "기타"
+    return "$major.$minor.x"
+}
+
+private fun releaseNoteGroupOrder(groupKey: String): Int {
+    return when (groupKey) {
+        "0.4.x" -> 0
+        "0.3.x" -> 1
+        "0.2.x" -> 2
+        "0.1.x" -> 3
+        "기타" -> 4
+        else -> 5
     }
 }
 
