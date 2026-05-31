@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.7-alpha",
+            status = "알파",
+            summary = "프롬프트 프리셋 화면을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "프롬프트 프리셋",
+                    items = listOf(
+                        "자주 쓰는 요청 문구를 확인하고 복사할 수 있는 프롬프트 프리셋 화면을 추가했습니다.",
+                        "요약, 설명, 비교, 코드, Fusion 개발, 실험 카테고리를 추가했습니다.",
+                        "각 프리셋을 클립보드로 복사할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "개발 보조",
+                    items = listOf(
+                        "Fusion 기능 구현과 테스트에 사용할 수 있는 안전한 개발용 프롬프트를 추가했습니다.",
+                        "벤치마크와 A/B 테스트 결과 해석에 사용할 수 있는 실험용 프롬프트를 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 정적 프리셋과 복사 기능만 추가합니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.6-alpha",
             status = "알파",
             summary = "릴리즈 체크리스트를 추가했습니다.",

@@ -128,6 +128,7 @@ fun ConversationListScreenV2(
     var showStatusDashboardDialog by remember { mutableStateOf(false) }
     var showDeviceInfoDialog by remember { mutableStateOf(false) }
     var showReleaseChecklistDialog by remember { mutableStateOf(false) }
+    var showPromptPresetsDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -776,6 +777,11 @@ fun ConversationListScreenV2(
                             showModelAbTestLab = true
                         }
                     }
+                    item {
+                        DrawerSettingActionRow("프롬프트 프리셋", "자주 쓰는 요청 문구를 확인하고 복사합니다.") {
+                            showPromptPresetsDialog = true
+                        }
+                    }
                     item { DrawerSettingActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.") { page = SidebarPage.PROMPT_LAB } }
                     item { DrawerSettingActionRow("에이전트 모드", "기기 제어 실험 기능입니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
 
@@ -1141,6 +1147,14 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showReleaseChecklistDialog = false }
+        )
+    }
+
+    if (showPromptPresetsDialog) {
+        FusionPromptPresetsDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showPromptPresetsDialog = false }
         )
     }
 
