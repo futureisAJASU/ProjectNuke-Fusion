@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.11-alpha",
+            status = "알파",
+            summary = "가이드 화면 내용을 더 실용적으로 확장했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "가이드 확장",
+                    items = listOf(
+                        "사용 가이드에 시작 순서, 모델 선택, 채팅, 메모리, 벤치마크, A/B 테스트, 데이터 관리 설명을 더 자세히 추가했습니다.",
+                        "문제 해결 가이드에 모델 실행, 메모리 부족, 응답 지연, A/B 테스트, ADB 설치, 로그 확인 항목을 더 실용적으로 정리했습니다.",
+                        "모델 호환성 가이드에 기기 RAM 기준, 실제 메모리 차이, 로컬 실행 구분, 모델 선택 전 확인 사항을 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "복사 개선",
+                    items = listOf(
+                        "가이드 복사 시 확장된 전체 내용을 함께 복사하도록 정리했습니다.",
+                        "깨진 한글 없이 실사용 안내 문구를 읽기 쉽게 다듬었습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 가이드 화면의 정적 내용만 확장했습니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리, 데이터 스키마 동작은 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.10-alpha",
             status = "알파",
             summary = "문제 해결 가이드를 추가했습니다.",
