@@ -165,8 +165,22 @@ private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
         FusionReleaseNote(
             version = "0.4.12-alpha",
             status = "알파",
-            summary = "GitHub 이슈 연결과 언어 설정 준비 기능을 추가했습니다.",
+            summary = "앱 정보 화면 표시 방식을 정리했습니다.",
             sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "앱 정보",
+                    items = listOf(
+                        "앱 정보 영역의 개발 관련 항목 배치를 정리했습니다.",
+                        "릴리즈 체크리스트를 일반 화면에서 숨기고, 개발자 모드에서만 표시하도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "개발자 항목",
+                    items = listOf(
+                        "개발 명령어 화면을 제거했습니다.",
+                        "릴리즈 체크리스트는 개발자 항목으로 이동했습니다."
+                    )
+                ),
                 FusionReleaseNoteSection(
                     title = "배포 준비",
                     items = listOf(
@@ -185,7 +199,7 @@ private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
                 FusionReleaseNoteSection(
                     title = "안전성",
                     items = listOf(
-                        "이번 업데이트는 설정 UI와 링크 연결 중심으로 추가했습니다.",
+                        "이번 업데이트는 설정 메뉴 표시와 안내 화면 정리 중심으로 적용했습니다.",
                         "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다.",
                         "일부 화면은 아직 번역 리소스가 준비되지 않아 언어 선택 후 바로 바뀌지 않을 수 있습니다."
                     )
@@ -238,42 +252,13 @@ private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
                     title = "개발 보조",
                     items = listOf(
                         "개발자 로그와 logcat 확인 흐름을 더 쉽게 찾을 수 있도록 했습니다.",
-                        "릴리즈 체크리스트와 개발 명령어 화면과 함께 사용할 수 있는 진단용 안내 화면을 추가했습니다."
+                        "릴리즈 체크리스트와 함께 사용할 수 있는 진단용 안내 화면을 추가했습니다."
                     )
                 ),
                 FusionReleaseNoteSection(
                     title = "안전성",
                     items = listOf(
                         "이번 업데이트는 정적 안내 화면과 복사 기능만 추가합니다.",
-                        "앱 내부에서 명령어를 실행하지 않으며, 채팅과 모델 실행 데이터는 변경하지 않습니다."
-                    )
-                )
-            )
-        ),
-        FusionReleaseNote(
-            version = "0.4.9-alpha",
-            status = "알파",
-            summary = "개발 명령어 치트시트를 추가했습니다.",
-            sections = listOf(
-                FusionReleaseNoteSection(
-                    title = "개발 명령어",
-                    items = listOf(
-                        "빌드, ADB 설치, 로그 확인, Git 작업에 필요한 명령어를 확인할 수 있는 화면을 추가했습니다.",
-                        "각 명령어를 클립보드로 복사할 수 있도록 했습니다.",
-                        "Debug APK 설치와 logcat 크래시 확인 명령어를 빠르게 복사할 수 있도록 했습니다."
-                    )
-                ),
-                FusionReleaseNoteSection(
-                    title = "개발 보조",
-                    items = listOf(
-                        "버전 정보 확인, 깨진 한글 검색, 위험 설정 검색 명령어를 추가했습니다.",
-                        "릴리즈 체크리스트와 함께 사용할 수 있는 개발 보조 화면을 추가했습니다."
-                    )
-                ),
-                FusionReleaseNoteSection(
-                    title = "안전성",
-                    items = listOf(
-                        "이번 업데이트는 정적 명령어 표시와 복사 기능만 추가합니다.",
                         "앱 내부에서 명령어를 실행하지 않으며, 채팅과 모델 실행 데이터는 변경하지 않습니다."
                     )
                 )

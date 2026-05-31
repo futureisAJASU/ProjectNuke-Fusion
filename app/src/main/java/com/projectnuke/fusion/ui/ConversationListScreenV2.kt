@@ -16,6 +16,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -72,10 +76,11 @@ import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val PrefArchiveLockEnabled = "archive_lock_enabled"
 // TODO: Replace with the public Fusion repository issues URL before release.
-private const val FUSION_GITHUB_ISSUES_URL = "https://github.com/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/issues"
+private const val FUSION_GITHUB_ISSUES_URL = "https://github.com/futureisAJASU/ProjectNuke-Fusion/issues"
 
 private data class AppInfoSummary(
     val versionName: String,
@@ -134,7 +139,7 @@ fun ConversationListScreenV2(
     var showReleaseChecklistDialog by remember { mutableStateOf(false) }
     var showPromptPresetsDialog by remember { mutableStateOf(false) }
     var showExperimentNotesDialog by remember { mutableStateOf(false) }
-    var showDeveloperCommandDialog by remember { mutableStateOf(false) }
+    var showDeveloperModeDialog by remember { mutableStateOf(false) }
     var showTroubleshootingGuideDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
@@ -154,6 +159,7 @@ fun ConversationListScreenV2(
     var showModelCompatibilityGuide by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
     var appLanguage by remember { mutableStateOf(getFusionAppLanguage(context)) }
+    var developerModeEnabled by remember { mutableStateOf(isFusionDeveloperModeEnabled(context)) }
 
     LaunchedEffect(isDrawerOpen) {
         if (!isDrawerOpen) {
@@ -818,12 +824,29 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
-                        DrawerSettingActionRow("언어", getFusionAppLanguageLabel(appLanguage)) {
+                        DrawerSettingActionRow("언어(Language)", getFusionAppLanguageLabel(appLanguage)) {
                             showLanguageDialog = true
                         }
                     }
                     item {
-                        DrawerSettingActionRow("앱 정보", "버전, 모델 상태, 데이터 정보를 확인합니다.") {
+                        DrawerSettingActionRow(
+                            title = "앱 정보",
+                            subtitle = "버전, 모델 상태, 데이터 정보를 확인합니다.",
+                            modifier = Modifier.pointerInput(developerModeEnabled) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false)
+                                    val releasedEarly = withTimeoutOrNull(7_000L) {
+                                        waitForUpOrCancellation()
+                                    }
+                                    if (releasedEarly == null && !developerModeEnabled) {
+                                        setFusionDeveloperModeEnabled(context, true)
+                                        developerModeEnabled = true
+                                        Toast.makeText(context, "개발자 모드를 사용하도록 설정했습니다.", Toast.LENGTH_SHORT).show()
+                                        waitForUpOrCancellation()
+                                    }
+                                }
+                            }
+                        ) {
                             showAppInfoDialog = true
                         }
                     }
@@ -835,16 +858,6 @@ fun ConversationListScreenV2(
                     item {
                         DrawerSettingActionRow("기기 정보", "기기 메모리와 AP 정보를 확인합니다.") {
                             showDeviceInfoDialog = true
-                        }
-                    }
-                    item {
-                        DrawerSettingActionRow("릴리즈 체크리스트", "빌드와 실기기 테스트 항목을 확인합니다.") {
-                            showReleaseChecklistDialog = true
-                        }
-                    }
-                    item {
-                        DrawerSettingActionRow("개발 명령어", "빌드, 설치, 로그, Git 명령어를 확인합니다.") {
-                            showDeveloperCommandDialog = true
                         }
                     }
                     item {
@@ -888,6 +901,19 @@ fun ConversationListScreenV2(
                                 } catch (_: Exception) {
                                     Toast.makeText(context, "디버그 정보 복사 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
                                 }
+                            }
+                        }
+                    }
+                    if (developerModeEnabled) {
+                        item { DrawerSectionTitle("개발자 항목") }
+                        item {
+                            DrawerSettingActionRow("릴리즈 체크리스트", "빌드와 실기기 테스트 항목을 확인합니다.") {
+                                showReleaseChecklistDialog = true
+                            }
+                        }
+                        item {
+                            DrawerSettingActionRow("개발자 모드", "릴리즈 체크리스트를 표시합니다.") {
+                                showDeveloperModeDialog = true
                             }
                         }
                     }
@@ -1208,14 +1234,6 @@ fun ConversationListScreenV2(
         )
     }
 
-    if (showDeveloperCommandDialog) {
-        FusionDeveloperCommandDialog(
-            context = context,
-            clipboard = clipboard,
-            onDismiss = { showDeveloperCommandDialog = false }
-        )
-    }
-
     if (showTroubleshootingGuideDialog) {
         FusionTroubleshootingGuideDialog(
             context = context,
@@ -1251,6 +1269,33 @@ fun ConversationListScreenV2(
                 appLanguage = getFusionAppLanguage(context)
             },
             onDismiss = { showLanguageDialog = false }
+        )
+    }
+
+    if (showDeveloperModeDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeveloperModeDialog = false },
+            title = { Text("개발자 모드") },
+            text = { Text("개발자 모드는 내부 테스트 항목을 표시하기 위한 UI 기능입니다. 보안 기능이 아닙니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    setFusionDeveloperModeEnabled(context, false)
+                    developerModeEnabled = false
+                    showDeveloperModeDialog = false
+                    showReleaseChecklistDialog = false
+                    Toast.makeText(context, "개발자 모드를 사용하지 않도록 설정했습니다.", Toast.LENGTH_SHORT).show()
+                }) {
+                    Text("끄기")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeveloperModeDialog = false }) {
+                    Text("닫기")
+                }
+            },
+            containerColor = DrawerPanelBg,
+            titleContentColor = DrawerTextPrimary,
+            textContentColor = DrawerTextPrimary
         )
     }
 
@@ -1486,9 +1531,14 @@ private fun DrawerSettingInfoRow(title: String, subtitle: String) {
 }
 
 @Composable
-private fun DrawerSettingActionRow(title: String, subtitle: String, onClick: () -> Unit) {
+private fun DrawerSettingActionRow(
+    title: String,
+    subtitle: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
     Surface(
-        modifier = Modifier.fillMaxWidth().clickable { onClick() },
+        modifier = modifier.fillMaxWidth().clickable { onClick() },
         shape = RoundedCornerShape(14.dp),
         color = DrawerCardBg
     ) {

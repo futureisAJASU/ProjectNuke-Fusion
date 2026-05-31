@@ -104,7 +104,7 @@ private val FusionHelpSections = listOf(
         items = listOf(
             "문제가 발생하면 먼저 상태 대시보드와 기기 정보를 확인해 주세요.",
             "모델 실행 오류가 반복되면 개발자 로그와 오류 보고서를 복사해 확인할 수 있습니다.",
-            "ADB 설치나 logcat 확인이 필요하면 개발 명령어 화면을 참고해 주세요."
+            "ADB 설치나 logcat 확인이 필요하면 Android SDK platform-tools와 개발자 로그를 확인해 주세요."
         )
     )
 )
