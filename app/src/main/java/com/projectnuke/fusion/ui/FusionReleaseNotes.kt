@@ -165,21 +165,28 @@ private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
         FusionReleaseNote(
             version = "0.4.4-alpha",
             status = "알파",
-            summary = "설정 메뉴 배치를 정리했습니다.",
+            summary = "상태 대시보드를 추가했습니다.",
             sections = listOf(
                 FusionReleaseNoteSection(
-                    title = "메뉴 정리",
+                    title = "상태 확인",
                     items = listOf(
-                        "모델 A/B 테스트를 실험실 섹션으로 옮겨 비교 기능을 더 찾기 쉽게 정리했습니다.",
-                        "모델 호환성 가이드를 모델 섹션으로 옮겨 모델 관련 안내와 더 가깝게 배치했습니다.",
-                        "사용 가이드를 앱 정보 섹션으로 옮겨 하단 안내 영역에서 바로 확인할 수 있도록 했습니다."
+                        "현재 모델, 메모리, 성능, 기기, 앱 정보를 한눈에 확인할 수 있는 상태 대시보드를 추가했습니다.",
+                        "저장된 메모리와 대화 요약은 내용이 아니라 개수와 상태만 표시하도록 했습니다.",
+                        "벤치마크와 A/B 테스트 기록 요약을 확인할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "사용성",
+                    items = listOf(
+                        "상태 정보를 클립보드로 복사할 수 있도록 했습니다.",
+                        "개발자 로그보다 간단한 사용자용 상태 확인 화면을 추가했습니다."
                     )
                 ),
                 FusionReleaseNoteSection(
                     title = "안정성",
                     items = listOf(
-                        "이번 패치는 메뉴 배치만 수정하며 화면 내용과 동작은 변경하지 않았습니다.",
-                        "채팅, 모델 실행, 메모리, 벤치마크, A/B 테스트 로직은 그대로 유지했습니다."
+                        "이번 업데이트는 읽기 전용 상태 화면 중심으로 추가했습니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
                     )
                 )
             )
