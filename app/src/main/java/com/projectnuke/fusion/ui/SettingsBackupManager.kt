@@ -27,6 +27,7 @@ private const val PrefHiddenModelIds = "hidden_model_ids"
 private const val PrefRecentModels = "recent_models"
 private const val PrefModelNotes = "model_notes"
 private const val PrefModelLibrarySortMode = "model_library_sort_mode"
+private const val PrefFusionAppLanguage = "fusion_app_language"
 
 enum class SettingsRestoreResult {
     Success,
@@ -55,6 +56,7 @@ fun buildSettingsBackupJson(context: Context, prefs: SharedPreferences): String 
         .put("reasoningEnabled", prefs.getBoolean(PrefReasoningEnabled, false))
         .put("reasoningBudget", prefs.getInt(PrefReasoningBudget, 512))
         .put("webSearchEnabled", prefs.getBoolean(PrefWebSearchEnabled, false))
+        .put("appLanguage", prefs.getString(PrefFusionAppLanguage, FusionAppLanguage.SYSTEM.value))
         .put("savedMemoryContextEnabled", prefs.getBoolean(PrefSavedMemoryContextEnabled, false))
         .put("memoryManagerSortMode", prefs.getString(PrefMemoryManagerSortMode, MemoryManagerSortMode.UPDATED_DESC.name))
         .put("lowMemoryMode", lowMemoryMode)
@@ -91,6 +93,12 @@ fun restoreSettingsBackupJson(
     if (settings.has("reasoningEnabled")) { editor.putBoolean(PrefReasoningEnabled, settings.optBoolean("reasoningEnabled", false)); restoredKeys += PrefReasoningEnabled }
     if (settings.has("reasoningBudget")) { editor.putInt(PrefReasoningBudget, settings.optInt("reasoningBudget", 512).coerceIn(128, 8192)); restoredKeys += PrefReasoningBudget }
     if (settings.has("webSearchEnabled")) { editor.putBoolean(PrefWebSearchEnabled, settings.optBoolean("webSearchEnabled", false)); restoredKeys += PrefWebSearchEnabled }
+    if (settings.has("appLanguage")) {
+        val rawLanguage = settings.optString("appLanguage", FusionAppLanguage.SYSTEM.value)
+        val language = FusionAppLanguage.fromValue(rawLanguage)
+        editor.putString(PrefFusionAppLanguage, language.value)
+        restoredKeys += PrefFusionAppLanguage
+    }
     if (settings.has("savedMemoryContextEnabled")) { editor.putBoolean(PrefSavedMemoryContextEnabled, settings.optBoolean("savedMemoryContextEnabled", false)); restoredKeys += PrefSavedMemoryContextEnabled }
     if (settings.has("memoryManagerSortMode")) {
         val sortMode = settings.optString("memoryManagerSortMode")

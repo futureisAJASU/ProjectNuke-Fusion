@@ -3,8 +3,10 @@ package com.projectnuke.fusion.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.hardware.biometrics.BiometricManager
 import android.hardware.biometrics.BiometricPrompt
+import android.net.Uri
 import android.os.Build
 import android.os.CancellationSignal
 import android.util.Log
@@ -72,6 +74,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 private const val PrefArchiveLockEnabled = "archive_lock_enabled"
+// TODO: Replace with the public Fusion repository issues URL before release.
+private const val FUSION_GITHUB_ISSUES_URL = "https://github.com/REPLACE_WITH_OWNER/REPLACE_WITH_REPO/issues"
 
 private data class AppInfoSummary(
     val versionName: String,
@@ -148,6 +152,8 @@ fun ConversationListScreenV2(
     var showSettingsBackupDialog by remember { mutableStateOf(false) }
     var pendingSettingsRestoreJson by remember { mutableStateOf<String?>(null) }
     var showModelCompatibilityGuide by remember { mutableStateOf(false) }
+    var showLanguageDialog by remember { mutableStateOf(false) }
+    var appLanguage by remember { mutableStateOf(getFusionAppLanguage(context)) }
 
     LaunchedEffect(isDrawerOpen) {
         if (!isDrawerOpen) {
@@ -800,6 +806,23 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("GitHub 이슈 제보", "버그, 개선 요청, 기능 제안을 GitHub Issues에 남깁니다.") {
+                            runCatching {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(FUSION_GITHUB_ISSUES_URL)).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                            }.onFailure {
+                                Toast.makeText(context, "GitHub 이슈 페이지를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                    item {
+                        DrawerSettingActionRow("언어", getFusionAppLanguageLabel(appLanguage)) {
+                            showLanguageDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("앱 정보", "버전, 모델 상태, 데이터 정보를 확인합니다.") {
                             showAppInfoDialog = true
                         }
@@ -1216,6 +1239,18 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showHelpDialog = false }
+        )
+    }
+
+    if (showLanguageDialog) {
+        FusionLanguageSettingsDialog(
+            context = context,
+            currentLanguage = appLanguage,
+            onSelect = { language ->
+                applyFusionAppLanguageIfSupported(context, language)
+                appLanguage = getFusionAppLanguage(context)
+            },
+            onDismiss = { showLanguageDialog = false }
         )
     }
 

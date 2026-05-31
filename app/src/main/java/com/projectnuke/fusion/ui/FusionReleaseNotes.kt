@@ -163,6 +163,36 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.12-alpha",
+            status = "알파",
+            summary = "GitHub 이슈 연결과 언어 설정 준비 기능을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "배포 준비",
+                    items = listOf(
+                        "GitHub Issues로 버그와 개선 요청을 남길 수 있는 진입점을 추가했습니다.",
+                        "공개 배포 전 저장소 링크를 쉽게 연결할 수 있도록 준비했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "언어 설정",
+                    items = listOf(
+                        "앱 언어 설정 화면을 추가했습니다.",
+                        "시스템 설정 따름, 한국어, English 옵션을 선택할 수 있도록 했습니다.",
+                        "향후 다국어 지원을 위한 언어 설정 저장 구조를 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 설정 UI와 링크 연결 중심으로 추가했습니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다.",
+                        "일부 화면은 아직 번역 리소스가 준비되지 않아 언어 선택 후 바로 바뀌지 않을 수 있습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.11-alpha",
             status = "알파",
             summary = "가이드 화면 내용을 더 실용적으로 확장했습니다.",
