@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.6-alpha",
+            status = "알파",
+            summary = "릴리즈 체크리스트를 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "릴리즈 확인",
+                    items = listOf(
+                        "빌드와 실기기 테스트 항목을 확인할 수 있는 릴리즈 체크리스트 화면을 추가했습니다.",
+                        "채팅, 모델, 메모리, 실험, 데이터, 진단 항목을 그룹별로 확인할 수 있도록 했습니다.",
+                        "전체 선택과 초기화 기능을 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "개발 보조",
+                    items = listOf(
+                        "체크리스트를 클립보드로 복사할 수 있도록 했습니다.",
+                        "배포 전 반복 테스트 흐름을 더 쉽게 확인할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "체크리스트는 로컬 화면 상태로만 동작하며 앱 데이터는 변경하지 않습니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.5-alpha",
             status = "알파",
             summary = "기기 정보 화면을 추가했습니다.",

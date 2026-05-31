@@ -127,6 +127,7 @@ fun ConversationListScreenV2(
     var showDeveloperLogDialog by remember { mutableStateOf(false) }
     var showStatusDashboardDialog by remember { mutableStateOf(false) }
     var showDeviceInfoDialog by remember { mutableStateOf(false) }
+    var showReleaseChecklistDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -800,6 +801,11 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("릴리즈 체크리스트", "빌드와 실기기 테스트 항목을 확인합니다.") {
+                            showReleaseChecklistDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("업데이트 기록", "최근 추가된 기능과 변경사항을 확인합니다.") {
                             showReleaseNotesDialog = true
                         }
@@ -1127,6 +1133,14 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showDeviceInfoDialog = false }
+        )
+    }
+
+    if (showReleaseChecklistDialog) {
+        FusionReleaseChecklistDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showReleaseChecklistDialog = false }
         )
     }
 
