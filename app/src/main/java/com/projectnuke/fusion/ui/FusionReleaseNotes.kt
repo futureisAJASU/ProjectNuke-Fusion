@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.13-alpha",
+            status = "알파",
+            summary = "개인정보 및 데이터 안내 화면을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "데이터 안내",
+                    items = listOf(
+                        "Fusion이 로컬에 저장하는 데이터와 내보내기 가능한 데이터를 설명하는 안내 화면을 추가했습니다.",
+                        "채팅, 메모리, 모델 파일, 벤치마크, A/B 테스트, 설정 백업의 데이터 범위를 정리했습니다.",
+                        "개발자 로그와 오류 보고서에 포함하지 않는 정보를 명확히 안내했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "외부 기능",
+                    items = listOf(
+                        "GitHub 이슈 제보, 웹 검색, 클립보드 복사, 파일 내보내기처럼 외부로 이동하거나 데이터를 내보낼 수 있는 기능을 설명했습니다.",
+                        "민감한 정보를 외부에 공유하지 않도록 주의 안내를 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 정적 안내 화면과 복사 기능만 추가합니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터 구조는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.12-alpha",
             status = "알파",
             summary = "앱 정보 화면 표시 방식을 정리했습니다.",

@@ -4,6 +4,7 @@ import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -103,28 +104,26 @@ fun FusionExperimentNotesDialog(
                         }
                     }
                 }
+                ExperimentNotesActionFooter(
+                    onCopy = {
+                        if (noteText.isBlank()) {
+                            Toast.makeText(context, "복사할 실험 노트가 없습니다.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            clipboard.setText(AnnotatedString(noteText))
+                            Toast.makeText(context, "실험 노트를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onSave = {
+                        prefs.edit().putString(FusionExperimentNotesKey, noteText).apply()
+                        Toast.makeText(context, "실험 노트를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    },
+                    onReset = { showResetConfirm = true },
+                    onDismiss = onDismiss
+                )
             }
         },
-        confirmButton = {
-            TextButton(onClick = {
-                prefs.edit().putString(FusionExperimentNotesKey, noteText).apply()
-                Toast.makeText(context, "실험 노트를 저장했습니다.", Toast.LENGTH_SHORT).show()
-            }) { Text("저장", color = ExperimentNotesAccentBlue) }
-        },
-        dismissButton = {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                TextButton(onClick = {
-                    if (noteText.isBlank()) {
-                        Toast.makeText(context, "복사할 실험 노트가 없습니다.", Toast.LENGTH_SHORT).show()
-                    } else {
-                        clipboard.setText(AnnotatedString(noteText))
-                        Toast.makeText(context, "실험 노트를 복사했습니다.", Toast.LENGTH_SHORT).show()
-                    }
-                }) { Text("복사", color = ExperimentNotesAccentBlue) }
-                TextButton(onClick = { showResetConfirm = true }) { Text("초기화", color = ExperimentNotesDanger) }
-                TextButton(onClick = onDismiss) { Text("닫기", color = ExperimentNotesTextSecondary) }
-            }
-        },
+        confirmButton = {},
+        dismissButton = {},
         containerColor = ExperimentNotesPanelBg,
         titleContentColor = ExperimentNotesTextPrimary,
         textContentColor = ExperimentNotesTextPrimary
@@ -152,6 +151,49 @@ fun FusionExperimentNotesDialog(
             titleContentColor = ExperimentNotesTextPrimary,
             textContentColor = ExperimentNotesTextPrimary
         )
+    }
+}
+
+@Composable
+private fun ExperimentNotesActionFooter(
+    onCopy: () -> Unit,
+    onSave: () -> Unit,
+    onReset: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TextButton(
+                onClick = onCopy,
+                modifier = Modifier.weight(1f)
+            ) { Text("복사", color = ExperimentNotesAccentBlue) }
+
+            TextButton(
+                onClick = onSave,
+                modifier = Modifier.weight(1f)
+            ) { Text("저장", color = ExperimentNotesAccentBlue) }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TextButton(
+                onClick = onReset,
+                modifier = Modifier.weight(1f)
+            ) { Text("초기화", color = ExperimentNotesDanger) }
+
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.weight(1f)
+            ) { Text("닫기", color = ExperimentNotesTextSecondary) }
+        }
     }
 }
 

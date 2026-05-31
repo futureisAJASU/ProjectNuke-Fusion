@@ -141,6 +141,7 @@ fun ConversationListScreenV2(
     var showExperimentNotesDialog by remember { mutableStateOf(false) }
     var showDeveloperModeDialog by remember { mutableStateOf(false) }
     var showTroubleshootingGuideDialog by remember { mutableStateOf(false) }
+    var showPrivacyDataGuideDialog by remember { mutableStateOf(false) }
     var showMemoryManagerDialog by remember { mutableStateOf(false) }
     var showModelAbTestLab by remember { mutableStateOf(false) }
     var showHelpDialog by remember { mutableStateOf(false) }
@@ -812,6 +813,11 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("개인정보 및 데이터 안내", "Fusion이 저장하거나 내보내는 데이터를 확인합니다.") {
+                            showPrivacyDataGuideDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("GitHub 이슈 제보", "버그, 개선 요청, 기능 제안을 GitHub Issues에 남깁니다.") {
                             runCatching {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(FUSION_GITHUB_ISSUES_URL)).apply {
@@ -1239,6 +1245,14 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showTroubleshootingGuideDialog = false }
+        )
+    }
+
+    if (showPrivacyDataGuideDialog) {
+        FusionPrivacyDataGuideDialog(
+            context = context,
+            clipboard = clipboard,
+            onDismiss = { showPrivacyDataGuideDialog = false }
         )
     }
 
