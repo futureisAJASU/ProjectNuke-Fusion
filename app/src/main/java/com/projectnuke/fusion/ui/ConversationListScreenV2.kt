@@ -642,6 +642,14 @@ fun ConversationListScreenV2(
                             else Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show()
                         }
                     }
+                    item {
+                        DrawerSettingActionRow(
+                            "모델 호환성 가이드",
+                            "모델군별 특징과 실행 기준을 확인합니다."
+                        ) {
+                            showModelCompatibilityGuide = true
+                        }
+                    }
                     item { DrawerSettingInfoRow("기본 모델", modelPath?.let { "$modelName\n$it" } ?: modelName) }
                     item { DrawerSettingInfoRow("가속기", accelerator) }
 
@@ -757,31 +765,23 @@ fun ConversationListScreenV2(
                             showMemoryManagerDialog = true
                         }
                     }
+
+                    item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("실험실") }
+                    item { DrawerSettingActionRow("벤치마크", "TTFT, 토큰 속도, 메모리 사용량을 측정합니다.") { page = SidebarPage.BENCHMARK } }
                     item {
                         DrawerSettingActionRow("모델 A/B 테스트", "같은 프롬프트로 모델과 설정을 비교합니다.") {
                             showModelAbTestLab = true
                         }
                     }
-                    item {
-                        DrawerSettingActionRow(
-                            "모델 호환성 가이드",
-                            "모델군별 특징과 실행 기준을 확인합니다."
-                        ) {
-                            showModelCompatibilityGuide = true
-                        }
-                    }
+                    item { DrawerSettingActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.") { page = SidebarPage.PROMPT_LAB } }
+                    item { DrawerSettingActionRow("에이전트 모드", "기기 제어 실험 기능입니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
+
+                    item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("앱 정보") }
                     item {
                         DrawerSettingActionRow("사용 가이드", "Fusion의 주요 기능과 사용 방법을 확인합니다.") {
                             showHelpDialog = true
                         }
                     }
-
-                    item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("실험실") }
-                    item { DrawerSettingActionRow("벤치마크", "TTFT, 토큰 속도, 메모리 사용량을 측정합니다.") { page = SidebarPage.BENCHMARK } }
-                    item { DrawerSettingActionRow("Prompt Lab", "시스템 프롬프트와 응답 스타일을 테스트합니다.") { page = SidebarPage.PROMPT_LAB } }
-                    item { DrawerSettingActionRow("에이전트 모드", "기기 제어 실험 기능입니다.") { Toast.makeText(context, "아직 준비 중입니다.", Toast.LENGTH_SHORT).show() } }
-
-                    item { Spacer(modifier = Modifier.height(6.dp)); DrawerSectionTitle("앱 정보") }
                     item {
                         DrawerSettingActionRow("앱 정보", "버전, 모델 상태, 데이터 정보를 확인합니다.") {
                             showAppInfoDialog = true

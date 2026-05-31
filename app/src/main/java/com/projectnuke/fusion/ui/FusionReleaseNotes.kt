@@ -163,6 +163,28 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.4-alpha",
+            status = "알파",
+            summary = "설정 메뉴 배치를 정리했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "메뉴 정리",
+                    items = listOf(
+                        "모델 A/B 테스트를 실험실 섹션으로 옮겨 비교 기능을 더 찾기 쉽게 정리했습니다.",
+                        "모델 호환성 가이드를 모델 섹션으로 옮겨 모델 관련 안내와 더 가깝게 배치했습니다.",
+                        "사용 가이드를 앱 정보 섹션으로 옮겨 하단 안내 영역에서 바로 확인할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안정성",
+                    items = listOf(
+                        "이번 패치는 메뉴 배치만 수정하며 화면 내용과 동작은 변경하지 않았습니다.",
+                        "채팅, 모델 실행, 메모리, 벤치마크, A/B 테스트 로직은 그대로 유지했습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.3-alpha",
             status = "알파",
             summary = "모델 호환성 가이드를 추가했습니다.",
