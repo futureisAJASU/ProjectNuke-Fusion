@@ -140,6 +140,7 @@ fun ConversationListScreenV2(
     var pendingChatMarkdownExport by remember { mutableStateOf<String?>(null) }
     var showSettingsBackupDialog by remember { mutableStateOf(false) }
     var pendingSettingsRestoreJson by remember { mutableStateOf<String?>(null) }
+    var showModelCompatibilityGuide by remember { mutableStateOf(false) }
 
     LaunchedEffect(isDrawerOpen) {
         if (!isDrawerOpen) {
@@ -762,6 +763,14 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow(
+                            "모델 호환성 가이드",
+                            "모델군별 특징과 실행 기준을 확인합니다."
+                        ) {
+                            showModelCompatibilityGuide = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("사용 가이드", "Fusion의 주요 기능과 사용 방법을 확인합니다.") {
                             showHelpDialog = true
                         }
@@ -1105,6 +1114,12 @@ fun ConversationListScreenV2(
             context = context,
             clipboard = clipboard,
             onDismiss = { showHelpDialog = false }
+        )
+    }
+
+    if (showModelCompatibilityGuide) {
+        ModelCompatibilityGuideDialog(
+            onDismiss = { showModelCompatibilityGuide = false }
         )
     }
 

@@ -163,6 +163,35 @@ private fun ReleaseCard(content: @Composable ColumnScope.() -> Unit) {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.3-alpha",
+            status = "알파",
+            summary = "모델 호환성 가이드를 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "모델 가이드",
+                    items = listOf(
+                        "모델군별 특징과 실행 기준을 확인할 수 있는 모델 호환성 가이드를 추가했습니다.",
+                        "Gemma, Qwen, Llama, Phi, DeepSeek, Mistral, Kimi 모델군의 용도와 주의사항을 정리했습니다.",
+                        "8GB 기기에서 권장되는 모델 크기와 실행 기준을 확인할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "사용성",
+                    items = listOf(
+                        "설정 화면에서 모델 호환성 가이드를 열 수 있도록 했습니다.",
+                        "가이드 내용을 클립보드로 복사할 수 있도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 읽기 전용 가이드 화면만 추가합니다.",
+                        "채팅, 모델 실행, 벤치마크, 메모리 데이터는 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.2-alpha",
             status = "알파",
             summary = "사용 가이드를 추가했습니다.",
