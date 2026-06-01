@@ -20,6 +20,9 @@ interface BenchmarkDao {
     @Query("SELECT * FROM benchmark_results ORDER BY createdAt DESC LIMIT 1")
     suspend fun getLatest(): BenchmarkResultEntity?
 
+    @Query("SELECT COUNT(*) FROM benchmark_results")
+    suspend fun countResults(): Int
+
     @Delete
     suspend fun delete(result: BenchmarkResultEntity)
 

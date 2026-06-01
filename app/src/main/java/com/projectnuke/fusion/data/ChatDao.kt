@@ -82,6 +82,9 @@ interface ChatDao {
     @Query("SELECT COUNT(*) FROM conversations")
     suspend fun getConversationCount(): Int
 
+    @Query("SELECT COUNT(*) FROM messages")
+    suspend fun getMessageCount(): Int
+
     @Query("SELECT COUNT(*) FROM conversations WHERE isArchived = 1")
     suspend fun getArchivedConversationCount(): Int
 

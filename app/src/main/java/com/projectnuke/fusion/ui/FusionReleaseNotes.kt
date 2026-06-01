@@ -260,6 +260,35 @@ private fun releaseNoteGroupOrder(groupKey: String): Int {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.18-alpha",
+            status = "알파",
+            summary = "Fusion 상태 점검 화면을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "상태 점검",
+                    items = listOf(
+                        "설정 메뉴에 Fusion 상태 점검 항목을 추가했습니다.",
+                        "모델, 설정, 저장소, 메모리, 데이터베이스, 권한, 벤치마크, 내보내기, 개발자 로그 상태를 한 번에 확인할 수 있습니다.",
+                        "다시 점검과 점검 보고서 복사 기능을 추가했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "보고서",
+                    items = listOf(
+                        "점검 보고서에 앱 버전, 기기 정보, 메모리 상태, 선택 모델, 생성 설정, 데이터베이스 개수, 벤치마크 개수를 포함하도록 했습니다.",
+                        "채팅 본문, 프롬프트, 첨부파일 내용, 비밀값은 보고서에 포함하지 않도록 유지했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 경량 상태 점검과 조회 기능만 추가합니다.",
+                        "Room 스키마, 채팅 생성, 모델 런타임, 벤치마크 실행 동작은 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.17-alpha",
             status = "알파",
             summary = "사이드바 상단 헤더 배치를 더 정돈했습니다.",

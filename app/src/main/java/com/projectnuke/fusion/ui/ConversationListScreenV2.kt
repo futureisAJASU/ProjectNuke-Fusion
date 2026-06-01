@@ -149,6 +149,7 @@ fun ConversationListScreenV2(
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
     var showDeveloperLogDialog by remember { mutableStateOf(false) }
     var showStatusDashboardDialog by remember { mutableStateOf(false) }
+    var showFusionHealthDialog by remember { mutableStateOf(false) }
     var showDeviceInfoDialog by remember { mutableStateOf(false) }
     var showReleaseChecklistDialog by remember { mutableStateOf(false) }
     var showPromptPresetsDialog by remember { mutableStateOf(false) }
@@ -871,6 +872,11 @@ fun ConversationListScreenV2(
                         }
                     }
                     item {
+                        DrawerSettingActionRow("Fusion 상태 점검", "모델, 설정, 저장소, 메모리, 권한 상태를 확인합니다.") {
+                            showFusionHealthDialog = true
+                        }
+                    }
+                    item {
                         DrawerSettingActionRow("상태 대시보드", "현재 모델, 메모리, 벤치마크, 앱 상태를 한눈에 확인합니다.") {
                             showStatusDashboardDialog = true
                         }
@@ -1219,6 +1225,18 @@ fun ConversationListScreenV2(
             clipboard = clipboard,
             benchmarkResults = benchmarkResults,
             onDismiss = { showStatusDashboardDialog = false }
+        )
+    }
+
+    if (showFusionHealthDialog) {
+        FusionHealthCheckDialog(
+            context = context,
+            prefs = prefs,
+            db = db,
+            clipboard = clipboard,
+            onDismiss = { showFusionHealthDialog = false },
+            onOpenModelLibrary = onOpenModelLibrary,
+            onOpenAdvancedSettings = onOpenAdvancedSettings
         )
     }
 
