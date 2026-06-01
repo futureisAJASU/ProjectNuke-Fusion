@@ -108,8 +108,6 @@ private val DrawerCardSelectedBg = Color(0xFF202020)
 private val DrawerTextPrimary = Color(0xFFF5F5F5)
 private val DrawerTextSecondary = Color(0xFF9E9E9E)
 private val DrawerAccentBlue = Color(0xFF9FD0FF)
-private val DrawerTopActionSize = 44.dp
-private val DrawerTopActionCorner = 22.dp
 
 private enum class SidebarPage {
     HOME,
@@ -381,11 +379,7 @@ fun ConversationListScreenV2(
                 .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
             if (!isSearchMode) {
-                DrawerTopBar(
-                    onClose = { closeDrawer() },
-                    onNewChat = onNewChat,
-                    onGithubClick = { openFusionGithubUrl(context) }
-                )
+                DrawerTopBar(onClose = { closeDrawer() }, onNewChat = onNewChat)
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
@@ -481,11 +475,7 @@ fun ConversationListScreenV2(
         if (!isSearchMode) {
             item {
                 when (page) {
-                    SidebarPage.HOME -> DrawerTopBar(
-                        onClose = { closeDrawer() },
-                        onNewChat = onNewChat,
-                        onGithubClick = { openFusionGithubUrl(context) }
-                    )
+                    SidebarPage.HOME -> DrawerTopBar(onClose = { closeDrawer() }, onNewChat = onNewChat)
                     SidebarPage.SETTINGS -> DrawerPageTopBar("설정", onBack = { leaveArchive() })
                     SidebarPage.ARCHIVE -> DrawerPageTopBar("아카이브", onBack = { leaveArchive() })
                     SidebarPage.PROMPT_LAB -> DrawerPageTopBar("Prompt Lab", onBack = { leaveArchive() })
@@ -1474,9 +1464,10 @@ private fun DrawerPageTopBar(
 @Composable
 private fun DrawerTopBar(
     onClose: () -> Unit,
-    onNewChat: () -> Unit,
-    onGithubClick: () -> Unit
+    onNewChat: () -> Unit
 ) {
+    val context = LocalContext.current
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -1502,60 +1493,20 @@ private fun DrawerTopBar(
                 color = DrawerTextSecondary,
                 fontSize = 12.sp,
                 maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                softWrap = false
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
             )
         }
 
         Row(
+            modifier = Modifier.wrapContentWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            DrawerGithubChip(
-                onClick = onGithubClick
+            DrawerGitHubPill(
+                onClick = { openFusionGithubUrl(context) }
             )
             DrawerCircleButton("+", onNewChat)
-        }
-    }
-}
-
-@Composable
-private fun DrawerGithubChip(
-    onClick: () -> Unit
-) {
-    Surface(
-        onClick = onClick,
-        modifier = Modifier
-            .height(DrawerTopActionSize)
-            .wrapContentWidth(),
-        shape = RoundedCornerShape(DrawerTopActionCorner),
-        color = DrawerPanelBg
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 10.dp),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "GitHub",
-                color = DrawerTextPrimary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                softWrap = false
-            )
-
-            Spacer(modifier = Modifier.width(6.dp))
-
-            Text(
-                text = "↗",
-                color = DrawerTextPrimary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium
-            )
         }
     }
 }
@@ -1806,26 +1757,16 @@ private fun DrawerAvatar(text: String, accent: Boolean) {
 }
 
 @Composable
-private fun DrawerCircleButton(
-    label: String,
-    onClick: () -> Unit
-) {
-    Surface(
-        onClick = onClick,
-        modifier = Modifier.size(DrawerTopActionSize),
-        shape = CircleShape,
-        color = DrawerPanelBg
+private fun DrawerCircleButton(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(DrawerPanelBg)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
     ) {
-        Box(
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = label,
-                color = DrawerTextPrimary,
-                fontSize = 25.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
+        Text(text = text, color = DrawerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -1838,11 +1779,12 @@ private fun DrawerGitHubPill(
 
     Row(
         modifier = modifier
-            .height(52.dp)
+            .wrapContentWidth()
+            .height(34.dp)
             .clip(shape)
             .background(Color(0xFF17191F))
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {
@@ -1850,17 +1792,19 @@ private fun DrawerGitHubPill(
             text = "GitHub",
             color = Color.White,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 15.sp,
-            maxLines = 1
+            fontSize = 12.sp,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
         )
 
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(6.dp))
 
         Text(
             text = "↗",
             color = Color.White.copy(alpha = 0.9f),
             fontWeight = FontWeight.SemiBold,
-            fontSize = 16.sp,
+            fontSize = 12.sp,
             maxLines = 1
         )
     }
