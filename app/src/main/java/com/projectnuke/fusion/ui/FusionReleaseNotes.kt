@@ -260,6 +260,34 @@ private fun releaseNoteGroupOrder(groupKey: String): Int {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.17-alpha",
+            status = "알파",
+            summary = "사이드바 상단 헤더 배치를 더 정돈했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "헤더 배치",
+                    items = listOf(
+                        "오른쪽 액션을 GitHub와 새 채팅 버튼의 묶음으로 정리해 간격을 더 자연스럽게 조정했습니다.",
+                        "대화 제목 영역이 우선 폭을 갖도록 정리해 서브타이틀이 한 줄로 더 안정적으로 보이게 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "GitHub 칩",
+                    items = listOf(
+                        "GitHub 칩의 고정 폭을 줄이고 좌우 여백을 줄여 상단 헤더에서 차지하는 공간을 축소했습니다.",
+                        "GitHub 링크 동작은 그대로 유지했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "이번 업데이트는 헤더 UI 정리만 포함합니다.",
+                        "채팅, 모델 실행, 벤치마크, 데이터 구조, 설정 백업/복원은 변경하지 않았습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.16-alpha",
             status = "알파",
             summary = "GitHub 바로가기 표시를 개선했습니다.",

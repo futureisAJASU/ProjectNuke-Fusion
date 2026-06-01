@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -107,6 +108,8 @@ private val DrawerCardSelectedBg = Color(0xFF202020)
 private val DrawerTextPrimary = Color(0xFFF5F5F5)
 private val DrawerTextSecondary = Color(0xFF9E9E9E)
 private val DrawerAccentBlue = Color(0xFF9FD0FF)
+private val DrawerTopActionSize = 44.dp
+private val DrawerTopActionCorner = 22.dp
 
 private enum class SidebarPage {
     HOME,
@@ -378,7 +381,11 @@ fun ConversationListScreenV2(
                 .padding(horizontal = 14.dp, vertical = 12.dp)
         ) {
             if (!isSearchMode) {
-                DrawerTopBar(onClose = { closeDrawer() }, onNewChat = onNewChat)
+                DrawerTopBar(
+                    onClose = { closeDrawer() },
+                    onNewChat = onNewChat,
+                    onGithubClick = { openFusionGithubUrl(context) }
+                )
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
@@ -474,7 +481,11 @@ fun ConversationListScreenV2(
         if (!isSearchMode) {
             item {
                 when (page) {
-                    SidebarPage.HOME -> DrawerTopBar(onClose = { closeDrawer() }, onNewChat = onNewChat)
+                    SidebarPage.HOME -> DrawerTopBar(
+                        onClose = { closeDrawer() },
+                        onNewChat = onNewChat,
+                        onGithubClick = { openFusionGithubUrl(context) }
+                    )
                     SidebarPage.SETTINGS -> DrawerPageTopBar("설정", onBack = { leaveArchive() })
                     SidebarPage.ARCHIVE -> DrawerPageTopBar("아카이브", onBack = { leaveArchive() })
                     SidebarPage.PROMPT_LAB -> DrawerPageTopBar("Prompt Lab", onBack = { leaveArchive() })
@@ -1463,10 +1474,9 @@ private fun DrawerPageTopBar(
 @Composable
 private fun DrawerTopBar(
     onClose: () -> Unit,
-    onNewChat: () -> Unit
+    onNewChat: () -> Unit,
+    onGithubClick: () -> Unit
 ) {
-    val context = LocalContext.current
-
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -1476,7 +1486,9 @@ private fun DrawerTopBar(
         Spacer(modifier = Modifier.width(10.dp))
 
         Column(
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 8.dp)
         ) {
             Text(
                 text = "Fusion",
@@ -1489,18 +1501,62 @@ private fun DrawerTopBar(
                 text = "Local AI Workspace",
                 color = DrawerTextSecondary,
                 fontSize = 12.sp,
-                maxLines = 1
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                softWrap = false
             )
         }
 
-        DrawerGitHubPill(
-            onClick = { openFusionGithubUrl(context) },
-            modifier = Modifier.widthIn(min = 112.dp, max = 138.dp)
-        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            DrawerGithubChip(
+                onClick = onGithubClick
+            )
+            DrawerCircleButton("+", onNewChat)
+        }
+    }
+}
 
-        Spacer(modifier = Modifier.width(10.dp))
+@Composable
+private fun DrawerGithubChip(
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier
+            .height(DrawerTopActionSize)
+            .wrapContentWidth(),
+        shape = RoundedCornerShape(DrawerTopActionCorner),
+        color = DrawerPanelBg
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "GitHub",
+                color = DrawerTextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                softWrap = false
+            )
 
-        DrawerCircleButton("+", onNewChat)
+            Spacer(modifier = Modifier.width(6.dp))
+
+            Text(
+                text = "↗",
+                color = DrawerTextPrimary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
     }
 }
 
@@ -1750,16 +1806,26 @@ private fun DrawerAvatar(text: String, accent: Boolean) {
 }
 
 @Composable
-private fun DrawerCircleButton(text: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(44.dp)
-            .clip(CircleShape)
-            .background(DrawerPanelBg)
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
+private fun DrawerCircleButton(
+    label: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.size(DrawerTopActionSize),
+        shape = CircleShape,
+        color = DrawerPanelBg
     ) {
-        Text(text = text, color = DrawerTextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+        Box(
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = label,
+                color = DrawerTextPrimary,
+                fontSize = 25.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
     }
 }
 
