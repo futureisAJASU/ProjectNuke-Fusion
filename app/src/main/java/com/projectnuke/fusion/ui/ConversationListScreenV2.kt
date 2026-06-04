@@ -1698,11 +1698,11 @@ private fun ConversationRow(
                     Text(text = "⋯", color = DrawerTextSecondary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = onDismissMenu, containerColor = DrawerPanelBg) {
-                    DropdownMenuItem(text = { Text(pinMenuLabel, color = DrawerTextPrimary) }, onClick = onTogglePinned)
-                    DropdownMenuItem(text = { Text("이름 변경", color = DrawerTextPrimary) }, onClick = onRename)
-                    DropdownMenuItem(text = { Text("제목 다시 생성", color = DrawerTextPrimary) }, onClick = onRegenerateTitle)
-                    DropdownMenuItem(text = { Text(archiveMenuLabel, color = DrawerTextPrimary) }, onClick = onArchive)
-                    DropdownMenuItem(text = { Text("삭제", color = Color(0xFFFF7A7A)) }, onClick = onDelete)
+                    DropdownMenuItem(text = { Text(pinMenuLabel, color = DrawerTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }, onClick = onTogglePinned)
+                    DropdownMenuItem(text = { Text("이름 변경", color = DrawerTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }, onClick = onRename)
+                    DropdownMenuItem(text = { Text("제목 다시 생성", color = DrawerTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }, onClick = onRegenerateTitle)
+                    DropdownMenuItem(text = { Text(archiveMenuLabel, color = DrawerTextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) }, onClick = onArchive)
+                    DropdownMenuItem(text = { Text("삭제", color = Color(0xFFFF7A7A), maxLines = 1, overflow = TextOverflow.Ellipsis) }, onClick = onDelete)
                 }
             }
         }

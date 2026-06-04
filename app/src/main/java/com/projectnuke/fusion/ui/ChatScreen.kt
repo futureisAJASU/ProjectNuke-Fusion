@@ -13,6 +13,12 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -66,6 +72,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
@@ -191,6 +199,81 @@ private enum class ResponseRegenerationAction(
     MoreDetailed("더 자세히", "이전 답변의 핵심 내용을 유지하면서 더 자세히 풀어서 설명해 주세요."),
     Table("표로 정리", "이전 답변의 핵심 내용을 표로 정리해 주세요. 필요한 경우 짧은 요약도 함께 포함해 주세요."),
     ExpertTone("전문가 톤", "이전 답변의 핵심 내용을 유지하면서 더 전문적이고 정확한 톤으로 다시 작성해 주세요.")
+}
+
+@Composable
+private fun AmbientResponseLight(
+    visible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (!visible) return
+
+    val transition = rememberInfiniteTransition(label = "ambient-response-light")
+    val breath by transition.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 0.85f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2600),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "ambient-response-alpha"
+    )
+    val drift by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 4600),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "ambient-response-drift"
+    )
+
+    Canvas(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(24.dp)
+    ) {
+        val phase = size.width * drift
+        drawRect(
+            brush = Brush.verticalGradient(
+                colorStops = arrayOf(
+                    0f to Color(0xFF0A1B3D).copy(alpha = 0.42f * breath),
+                    0.18f to Color(0xFF2E8DFF).copy(alpha = 0.26f * breath),
+                    0.42f to Color(0xFF4FD8FF).copy(alpha = 0.12f * breath),
+                    1f to Color.Transparent
+                )
+            ),
+            size = size
+        )
+        drawRect(
+            brush = Brush.linearGradient(
+                colorStops = arrayOf(
+                    0f to Color.Transparent,
+                    0.22f to Color(0xFF0A1B3D).copy(alpha = 0.10f * breath),
+                    0.45f to Color(0xFF4FD8FF).copy(alpha = 0.34f * breath),
+                    0.62f to Color(0xFF63F2D7).copy(alpha = 0.28f * breath),
+                    1f to Color.Transparent
+                ),
+                start = Offset(-size.width * 0.55f + phase * 0.55f, 0f),
+                end = Offset(size.width * 1.25f + phase * 0.55f, size.height * 0.6f)
+            ),
+            size = size
+        )
+        drawRect(
+            brush = Brush.linearGradient(
+                colorStops = arrayOf(
+                    0f to Color.Transparent,
+                    0.18f to Color(0xFF2E8DFF).copy(alpha = 0.12f * breath),
+                    0.5f to Color(0xFF63F2D7).copy(alpha = 0.20f * breath),
+                    0.72f to AccentBlue.copy(alpha = 0.16f * breath),
+                    1f to Color.Transparent
+                ),
+                start = Offset(size.width * 1.15f - phase * 0.45f, 0f),
+                end = Offset(-size.width * 0.25f - phase * 0.45f, size.height * 0.75f)
+            ),
+            size = size
+        )
+    }
 }
 
 private const val ChatOptionConversationSummary = "대화 요약"
@@ -1715,89 +1798,93 @@ fun ChatScreen(
             }
         }
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(BlackBg)
                 .padding(top = innerPadding.calculateTopPadding())
-                .padding(horizontal = 16.dp)
         ) {
-            if (inChatSearchMode) {
-                InChatSearchBar(
-                    query = inChatSearchQuery,
-                    onQueryChange = { inChatSearchQuery = it },
-                    onClose = {
-                        inChatSearchMode = false
-                        inChatSearchQuery = ""
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 16.dp)
+            ) {
+                if (inChatSearchMode) {
+                    InChatSearchBar(
+                        query = inChatSearchQuery,
+                        onQueryChange = { inChatSearchQuery = it },
+                        onClose = {
+                            inChatSearchMode = false
+                            inChatSearchQuery = ""
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "검색 결과",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                if (messageEntities.isEmpty() && !isGenerating) {
+                    EmptyChatBody(bottomPadding = chatContentBottomPadding)
+                } else if (inChatSearchMode) {
+                    if (inChatSearchQuery.trim().isNotEmpty() && inChatSearchResults.isEmpty()) {
+                        EmptyInChatSearchResults()
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            contentPadding = PaddingValues(top = 6.dp, bottom = chatContentBottomPadding)
+                        ) {
+                            items(
+                                items = inChatSearchResults,
+                                key = { it.id }
+                            ) { result ->
+                                InChatSearchResultRow(
+                                    role = if (result.role == "user") "사용자" else "Fusion",
+                                    preview = visibleSearchText(result.content),
+                                    onClick = {
+                                        scope.launch {
+                                            val idx = messageEntities.indexOfFirst { it.id == result.id }
+                                            if (idx >= 0) {
+                                                listState.animateScrollToItem(idx)
+                                                inChatSearchMode = false
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
                     }
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "검색 결과",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
-            if (messageEntities.isEmpty() && !isGenerating) {
-                EmptyChatBody(bottomPadding = chatContentBottomPadding)
-            } else if (inChatSearchMode) {
-                if (inChatSearchQuery.trim().isNotEmpty() && inChatSearchResults.isEmpty()) {
-                    EmptyInChatSearchResults()
                 } else {
                     LazyColumn(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
-                        contentPadding = PaddingValues(top = 6.dp, bottom = chatContentBottomPadding)
+                        state = listState,
+                        verticalArrangement = Arrangement.spacedBy(18.dp),
+                        contentPadding = PaddingValues(top = 12.dp, bottom = chatContentBottomPadding)
                     ) {
                         items(
-                            items = inChatSearchResults,
+                            items = messageEntities,
                             key = { it.id }
-                        ) { result ->
-                            InChatSearchResultRow(
-                                role = if (result.role == "user") "사용자" else "Fusion",
-                                preview = visibleSearchText(result.content),
-                                onClick = {
-                                    scope.launch {
-                                        val idx = messageEntities.indexOfFirst { it.id == result.id }
-                                        if (idx >= 0) {
-                                            listState.animateScrollToItem(idx)
-                                            inChatSearchMode = false
-                                        }
-                                    }
-                                }
-                            )
-                        }
-                    }
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    state = listState,
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                    contentPadding = PaddingValues(top = 12.dp, bottom = chatContentBottomPadding)
-                ) {
-                    items(
-                        items = messageEntities,
-                        key = { it.id }
-                    ) { message ->
-                        when (message.role) {
-                            "user" -> UserMessageBubble(message.content)
-                            else -> AssistantMessage(
-                                content = message.content,
-                                createdAt = message.createdAt,
-                                selectedModel = selectedModel,
-                                webSearchEnabled = webSearchEnabled,
-                                reasoningEnabled = reasoningEnabled,
-                                isRegenerating = regeneratingMessageId == message.id,
-                                onRetry = { startRegenerateResponse(message, ResponseRegenerationAction.Retry) },
+                        ) { message ->
+                            when (message.role) {
+                                "user" -> UserMessageBubble(message.content)
+                                else -> AssistantMessage(
+                                    content = message.content,
+                                    createdAt = message.createdAt,
+                                    selectedModel = selectedModel,
+                                    webSearchEnabled = webSearchEnabled,
+                                    reasoningEnabled = reasoningEnabled,
+                                    isRegenerating = regeneratingMessageId == message.id,
+                                    onRetry = { startRegenerateResponse(message, ResponseRegenerationAction.Retry) },
                                 onRegenerate = { action -> startRegenerateResponse(message, action) },
                                 onBranch = {
                                     Toast.makeText(
@@ -1848,6 +1935,11 @@ fun ChatScreen(
                     }
                 }
             }
+            }
+            AmbientResponseLight(
+                visible = isGenerating && !extractingMemoryCandidates,
+                modifier = Modifier.align(Alignment.TopCenter)
+            )
         }
     }
 
@@ -2605,39 +2697,39 @@ private fun ChatTopBar(
                     containerColor = MenuBg
                 ) {
                     DropdownMenuItem(
-                        text = { Text("채팅 고정", color = TextPrimary) },
+                        text = { Text("채팅 고정", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption("채팅 고정") }
                     )
                     DropdownMenuItem(
-                        text = { Text("새 프로젝트", color = TextPrimary) },
+                        text = { Text("새 프로젝트", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption("새 프로젝트") }
                     )
                     DropdownMenuItem(
-                        text = { Text("프로젝트에 추가", color = TextPrimary) },
+                        text = { Text("프로젝트에 추가", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption("프로젝트에 추가") }
                     )
                     DropdownMenuItem(
-                        text = { Text("업로드한 파일", color = TextPrimary) },
+                        text = { Text("업로드한 파일", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption("업로드한 파일") }
                     )
                     DropdownMenuItem(
-                        text = { Text("홈 화면에 추가", color = TextPrimary) },
+                        text = { Text("홈 화면에 추가", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption("홈 화면에 추가") }
                     )
                     DropdownMenuItem(
-                        text = { Text("아카이브에 보관", color = TextPrimary) },
+                        text = { Text("아카이브에 보관", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption("아카이브에 보관") }
                     )
                     DropdownMenuItem(
-                        text = { Text("대화 요약", color = TextPrimary) },
+                        text = { Text("대화 요약", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption(ChatOptionConversationSummary) }
                     )
                     DropdownMenuItem(
-                        text = { Text("메모리 후보 추출", color = TextPrimary) },
+                        text = { Text("메모리 후보 추출", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption(ChatOptionMemoryCandidateExtraction) }
                     )
                     DropdownMenuItem(
-                        text = { Text("삭제", color = DangerRed) },
+                        text = { Text("삭제", color = DangerRed, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption("대화 내 검색") }
                     )
                 }
@@ -3056,7 +3148,9 @@ private fun AssistantMoreMenu(
                 Text(
                     text = timeText,
                     color = TextSecondary,
-                    fontSize = 13.sp
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             },
             onClick = {},
@@ -3071,42 +3165,42 @@ private fun AssistantMoreMenu(
         )
 
         DropdownMenuItem(
-            text = { Text("↗  새 채팅으로 가지치기", color = TextPrimary) },
+            text = { Text("↗  새 채팅으로 가지치기", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = onBranch
         )
 
         DropdownMenuItem(
-            text = { Text("$selectedModel 사용함", color = TextSecondary) },
+            text = { Text("$selectedModel 사용함", color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = {},
             enabled = false
         )
 
         DropdownMenuItem(
-            text = { Text("답변 다시 생성", color = TextPrimary) },
+            text = { Text("답변 다시 생성", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = onRetry,
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("더 짧게", color = TextPrimary) },
+            text = { Text("더 짧게", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.Shorter) },
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("더 자세히", color = TextPrimary) },
+            text = { Text("더 자세히", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.MoreDetailed) },
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("표로 정리", color = TextPrimary) },
+            text = { Text("표로 정리", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.Table) },
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("전문가 톤", color = TextPrimary) },
+            text = { Text("전문가 톤", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.ExpertTone) },
             enabled = !isRegenerating
         )
@@ -3115,7 +3209,9 @@ private fun AssistantMoreMenu(
             text = {
                 Text(
                     text = if (webSearchEnabled) "🌐  웹 검색 끄기" else "🌐  웹 검색",
-                    color = TextPrimary
+                    color = TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             },
             onClick = onToggleWebSearch
@@ -6386,15 +6482,15 @@ private fun importFormatLabel(fileName: String, format: ModelRuntimeFormat): Str
         "task" -> "MediaPipe LLM"
         "gguf" -> "GGUF"
         "onnx" -> "ONNX"
-        "safetensors" -> "Safetensors"
-        "bin" -> "Binary model file"
+        "safetensors" -> "변환 필요"
+        "bin" -> "확인 필요"
         else -> when (format) {
             ModelRuntimeFormat.LITERT_LM -> "LiteRT-LM"
             ModelRuntimeFormat.MEDIAPIPE_LLM -> "MediaPipe LLM"
             ModelRuntimeFormat.GGUF -> "GGUF"
             ModelRuntimeFormat.ONNX -> "ONNX"
-            ModelRuntimeFormat.NEEDS_CONVERSION -> "Safetensors"
-            else -> "Unknown"
+            ModelRuntimeFormat.NEEDS_CONVERSION -> "변환 필요"
+            else -> "지원 확인 필요"
         }
     }
 }
