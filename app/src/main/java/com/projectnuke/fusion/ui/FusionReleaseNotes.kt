@@ -260,6 +260,35 @@ private fun releaseNoteGroupOrder(groupKey: String): Int {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.19-alpha",
+            status = "알파",
+            summary = "모델 파일 가져오기와 외부 연결 과정을 더 명확하게 정리했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "모델 파일 확인",
+                    items = listOf(
+                        "파일 가져오기와 외부 모델 파일 연결 뒤에 모델 파일 확인 단계를 추가했습니다.",
+                        "파일 이름, 파일 크기, 확장자, 추정 형식, 실행 상태, 권장 다음 동작을 한 번에 확인할 수 있습니다.",
+                        "모델 패밀리를 직접 선택한 뒤 연결 또는 실행용 복사를 진행할 수 있습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "가져온 모델",
+                    items = listOf(
+                        "외부 파일 연결을 기본 동작으로 유지하고, 대용량 모델 파일을 자동으로 복사하지 않도록 정리했습니다.",
+                        "지원 확인 필요, 변환 필요, 외부 파일 연결, Fusion 내부 저장소 상태를 더 분명하게 표시하도록 정리했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "안전성",
+                    items = listOf(
+                        "지원되지 않는 형식이나 변환이 필요한 형식은 바로 실행 모델로 선택되지 않도록 했습니다.",
+                        "원본 외부 파일은 삭제하지 않으며, 연결 해제는 Fusion 참조만 제거합니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.18-alpha",
             status = "알파",
             summary = "Fusion 상태 점검 화면을 추가했습니다.",

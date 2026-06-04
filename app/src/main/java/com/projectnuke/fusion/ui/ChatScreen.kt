@@ -154,6 +154,14 @@ private data class PendingExternalModel(
     val uri: Uri,
     val fileSizeBytes: Long?
 )
+private data class PendingModelImport(
+    val displayName: String,
+    val originalFileName: String,
+    val uri: Uri,
+    val fileSizeBytes: Long?,
+    val permissionPersisted: Boolean,
+    val initialFamily: ModelFamily
+)
 private data class ParsedAssistantOutput(
     val thinking: String?,
     val answer: String
@@ -320,8 +328,7 @@ fun ChatScreen(
     }
 
     val customModels = remember { mutableStateListOf<LocalModel>() }
-    var pendingImportedModel by remember { mutableStateOf<Pair<String, String>?>(null) }
-    var pendingExternalModel by remember { mutableStateOf<PendingExternalModel?>(null) }
+    var pendingModelImport by remember { mutableStateOf<PendingModelImport?>(null) }
     var showModelStorageManager by remember { mutableStateOf(false) }
     var storageRefreshKey by remember { mutableStateOf(0) }
 
@@ -1135,32 +1142,25 @@ fun ChatScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
+            var permissionPersisted = true
             try {
                 context.contentResolver.takePersistableUriPermission(
                     uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             } catch (_: SecurityException) {
+                permissionPersisted = false
             }
 
             val displayName = getDisplayNameFromUri(context, uri)
-            Toast.makeText(context, "모델 파일을 가져오는 중입니다.", Toast.LENGTH_SHORT).show()
-
-            scope.launch {
-                val copiedFile = copyUriToModelFile(
-                    context = context,
-                    uri = uri,
-                    displayName = displayName
-                )
-
-                if (copiedFile == null) {
-                    Toast.makeText(context, "모델 파일을 가져오지 못했습니다.", Toast.LENGTH_SHORT).show()
-                    return@launch
-                }
-
-                pendingImportedModel = displayName to copiedFile.absolutePath
-                Toast.makeText(context, "모델 패밀리를 선택해 주세요.", Toast.LENGTH_SHORT).show()
-            }
+            pendingModelImport = PendingModelImport(
+                displayName = displayName,
+                originalFileName = displayName,
+                uri = uri,
+                fileSizeBytes = getFileSizeFromUri(context, uri),
+                permissionPersisted = permissionPersisted,
+                initialFamily = FusionModelCatalog.inferFamily(context, displayName)
+            )
         }
     }
 
@@ -1174,22 +1174,25 @@ fun ChatScreen(
             return@rememberLauncherForActivityResult
         }
 
+        var permissionPersisted = true
         try {
             context.contentResolver.takePersistableUriPermission(
                 uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         } catch (_: SecurityException) {
+            permissionPersisted = false
             Toast.makeText(context, "모델 파일 권한을 유지할 수 없습니다.", Toast.LENGTH_SHORT).show()
         }
 
-        pendingExternalModel = PendingExternalModel(
+        pendingModelImport = PendingModelImport(
             displayName = displayName,
             originalFileName = displayName,
             uri = uri,
-            fileSizeBytes = getFileSizeFromUri(context, uri)
+            fileSizeBytes = getFileSizeFromUri(context, uri),
+            permissionPersisted = permissionPersisted,
+            initialFamily = FusionModelCatalog.inferFamily(context, displayName)
         )
-        Toast.makeText(context, "모델 패밀리를 선택해 주세요.", Toast.LENGTH_SHORT).show()
     }
 
     val attachmentPickerLauncher = rememberLauncherForActivityResult(
@@ -1949,44 +1952,11 @@ fun ChatScreen(
         )
     }
 
-    pendingImportedModel?.let { (displayName, path) ->
-        CustomModelFamilyDialog(
-            onDismiss = { pendingImportedModel = null },
-            onFamilySelected = { family ->
-                val spec = FusionModelCatalog.importedSpec(displayName, path, family)
-                FusionModelCatalog.saveImported(context, spec)
-                val model = LocalModel(
-                    name = spec.displayName,
-                    fileName = spec.fileName ?: displayName,
-                    customPath = path
-                )
-                if (customModels.none { it.customPath == path }) {
-                    customModels.add(model)
-                }
-                if (spec.runtimeFormat == ModelRuntimeFormat.GGUF || spec.runtimeFormat == ModelRuntimeFormat.UNKNOWN) {
-                    Toast.makeText(context, "이 형식은 현재 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
-                } else {
-                    selectedModel = spec.displayName
-                    selectedModelPath = path
-                    saveFusionSettings(
-                        prefs = settingsPrefs,
-                        settings = generationSettings,
-                        reasoningEnabled = reasoningEnabled,
-                        webSearchEnabled = webSearchEnabled,
-                        selectedModel = selectedModel,
-                        selectedModelPath = selectedModelPath
-                    )
-                    Toast.makeText(context, "모델 파일을 가져왔습니다.", Toast.LENGTH_SHORT).show()
-                }
-                pendingImportedModel = null
-            }
-        )
-    }
-
-    pendingExternalModel?.let { pending ->
-        CustomModelFamilyDialog(
-            onDismiss = { pendingExternalModel = null },
-            onFamilySelected = { family ->
+    pendingModelImport?.let { pending ->
+        ModelImportWizardDialog(
+            pending = pending,
+            onDismiss = { pendingModelImport = null },
+            onLink = { family ->
                 val spec = FusionModelCatalog.externalLinkedSpec(
                     displayName = pending.displayName,
                     originalFileName = pending.originalFileName,
@@ -1996,12 +1966,46 @@ fun ChatScreen(
                 )
                 FusionModelCatalog.saveImported(context, spec)
                 storageRefreshKey += 1
-                pendingExternalModel = null
+                pendingModelImport = null
                 Toast.makeText(context, "외부 모델 파일을 연결했습니다.", Toast.LENGTH_SHORT).show()
-                if (spec.availability == ModelAvailability.CUSTOM_IMPORTED) {
-                    Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 합니다.", Toast.LENGTH_LONG).show()
-                } else {
-                    Toast.makeText(context, "이 파일은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                when {
+                    !pending.permissionPersisted -> Toast.makeText(context, "모델 파일 권한을 유지할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    spec.availability == ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", Toast.LENGTH_LONG).show()
+                    spec.availability == ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                    else -> Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onCopyForRun = { family ->
+                scope.launch {
+                    val copiedFile = copyUriToModelFile(
+                        context = context,
+                        uri = pending.uri,
+                        displayName = pending.displayName
+                    )
+                    if (copiedFile == null) {
+                        Toast.makeText(context, "모델 파일을 가져올 수 없습니다.", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    val spec = FusionModelCatalog.importedSpec(pending.displayName, copiedFile.absolutePath, family)
+                    FusionModelCatalog.saveImported(context, spec)
+                    if (spec.availability == ModelAvailability.CUSTOM_IMPORTED &&
+                        customModels.none { it.customPath == copiedFile.absolutePath }
+                    ) {
+                        customModels.add(
+                            LocalModel(
+                                name = spec.displayName,
+                                fileName = spec.fileName ?: pending.displayName,
+                                customPath = copiedFile.absolutePath
+                            )
+                        )
+                    }
+                    storageRefreshKey += 1
+                    pendingModelImport = null
+                    when (spec.availability) {
+                        ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "모델 파일을 가져왔습니다.", Toast.LENGTH_SHORT).show()
+                        ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                        else -> Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         )
@@ -2015,6 +2019,12 @@ fun ChatScreen(
             onSelect = { spec ->
                 val localPath = spec.localPath
                 when {
+                    spec.availability == ModelAvailability.NEEDS_CONVERSION -> {
+                        Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                    }
+                    spec.availability != ModelAvailability.CUSTOM_IMPORTED && !spec.externallyReferenced -> {
+                        Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    }
                     spec.externallyReferenced && localPath.isNullOrBlank() -> {
                         if (spec.availability == ModelAvailability.CUSTOM_IMPORTED) {
                             Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 합니다.", Toast.LENGTH_LONG).show()
@@ -4274,10 +4284,21 @@ private fun ModelSelectDialog(
                     )
                     ModelZooSection(
                         title = "가져온 모델",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.CUSTOM_IMPORTED && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
+                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.id.startsWith("custom-") || it.id.startsWith("external-")) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = { spec ->
-                            onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
+                            when {
+                                spec.availability == ModelAvailability.NEEDS_CONVERSION -> {
+                                    Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                                }
+                                spec.availability != ModelAvailability.CUSTOM_IMPORTED -> {
+                                    Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                }
+                                spec.localPath.isNullOrBlank() -> {
+                                    Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", Toast.LENGTH_LONG).show()
+                                }
+                                else -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
+                            }
                         },
                         onUploadCustomModel = onUploadCustomModel,
                         onApplyRecommendedSettings = {},
@@ -5467,6 +5488,80 @@ private fun CustomModelFamilyDialog(
     )
 }
 
+@Composable
+private fun ModelImportWizardDialog(
+    pending: PendingModelImport,
+    onDismiss: () -> Unit,
+    onLink: (ModelFamily) -> Unit,
+    onCopyForRun: (ModelFamily) -> Unit
+) {
+    var selectedFamily by remember(pending.uri) { mutableStateOf(pending.initialFamily) }
+    val format = remember(pending.originalFileName) { FusionModelCatalog.runtimeFormatForFile(pending.originalFileName) }
+    val extension = pending.originalFileName.substringAfterLast('.', "").ifBlank { "-" }
+    val formatLabel = remember(pending.originalFileName, format) { importFormatLabel(pending.originalFileName, format) }
+    val executionStatus = remember(format) { importExecutionStatusMessage(format) }
+    val nextAction = remember(format) { importRecommendedActionMessage(format) }
+    val canCopyForRun = format == ModelRuntimeFormat.LITERT_LM || format == ModelRuntimeFormat.MEDIAPIPE_LLM
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("모델 파일 확인") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                DetailMetaRow("파일 이름", pending.originalFileName)
+                DetailMetaRow("파일 크기", pending.fileSizeBytes?.let { formatBytes(it) } ?: "모델 파일 크기를 확인할 수 없습니다.")
+                DetailMetaRow("확장자", extension)
+                DetailMetaRow("추정 형식", formatLabel)
+                DetailMetaRow("실행 상태", executionStatus)
+                Text("모델 패밀리를 선택해 주세요.", color = TextSecondary, fontSize = 12.sp)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        ModelFamily.GEMMA to "Gemma",
+                        ModelFamily.QWEN to "Qwen",
+                        ModelFamily.LLAMA to "Llama",
+                        ModelFamily.PHI to "Phi",
+                        ModelFamily.DEEPSEEK to "DeepSeek",
+                        ModelFamily.MISTRAL to "Mistral",
+                        ModelFamily.KIMI to "Kimi",
+                        ModelFamily.CUSTOM to "Custom"
+                    ).forEach { (family, label) ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (selectedFamily == family) AccentBlue.copy(alpha = 0.18f) else PanelBg,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (selectedFamily == family) AccentBlue.copy(alpha = 0.6f) else LineColor
+                            ),
+                            modifier = Modifier.fillMaxWidth().clickable { selectedFamily = family }
+                        ) {
+                            Text(label, color = TextPrimary, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp), fontSize = 14.sp)
+                        }
+                    }
+                }
+                if (!pending.permissionPersisted) {
+                    Text("모델 파일 권한을 유지할 수 없습니다.", color = DangerRed, fontSize = 12.sp)
+                }
+                if (format == ModelRuntimeFormat.MEDIAPIPE_LLM) {
+                    Text("이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", color = TextSecondary, fontSize = 12.sp)
+                }
+                Text(nextAction, color = TextSecondary, fontSize = 12.sp)
+            }
+        },
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { onLink(selectedFamily) }) { Text("연결", color = AccentBlue, maxLines = 1) }
+                TextButton(onClick = { onCopyForRun(selectedFamily) }, enabled = canCopyForRun) {
+                    Text("실행용으로 복사", color = if (canCopyForRun) AccentBlue else TextSecondary, maxLines = 1)
+                }
+                TextButton(onClick = onDismiss) { Text("취소", color = TextSecondary, maxLines = 1) }
+            }
+        },
+        containerColor = PanelBg,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary
+    )
+}
+
 private fun isCatalogModelAvailable(context: Context, spec: FusionModelSpec): Boolean {
     if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return false
     spec.localPath?.let { return File(it).exists() && spec.canRunLocalRuntime }
@@ -6283,6 +6378,41 @@ private fun storageStatusLabel(spec: FusionModelSpec, uriAvailable: Boolean): St
     if (spec.availability != ModelAvailability.CUSTOM_IMPORTED) return "실행 준비 필요"
     if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return "실행 준비 필요"
     return "사용 가능"
+}
+
+private fun importFormatLabel(fileName: String, format: ModelRuntimeFormat): String {
+    return when (fileName.substringAfterLast('.', "").lowercase(Locale.US)) {
+        "litertlm" -> "LiteRT-LM"
+        "task" -> "MediaPipe LLM"
+        "gguf" -> "GGUF"
+        "onnx" -> "ONNX"
+        "safetensors" -> "Safetensors"
+        "bin" -> "Binary model file"
+        else -> when (format) {
+            ModelRuntimeFormat.LITERT_LM -> "LiteRT-LM"
+            ModelRuntimeFormat.MEDIAPIPE_LLM -> "MediaPipe LLM"
+            ModelRuntimeFormat.GGUF -> "GGUF"
+            ModelRuntimeFormat.ONNX -> "ONNX"
+            ModelRuntimeFormat.NEEDS_CONVERSION -> "Safetensors"
+            else -> "Unknown"
+        }
+    }
+}
+
+private fun importExecutionStatusMessage(format: ModelRuntimeFormat): String {
+    return when (format) {
+        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "이 모델 파일은 Fusion에서 실행 후보로 사용할 수 있습니다."
+        ModelRuntimeFormat.NEEDS_CONVERSION -> "이 모델은 변환 후 사용할 수 있습니다."
+        else -> "이 형식은 현재 직접 실행할 수 없습니다."
+    }
+}
+
+private fun importRecommendedActionMessage(format: ModelRuntimeFormat): String {
+    return when (format) {
+        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "권장 동작: 먼저 연결하고, 실행이 필요하면 실행용으로 복사해 주세요."
+        ModelRuntimeFormat.NEEDS_CONVERSION -> "권장 동작: 연결로 보관하고 변환 후 다시 가져와 주세요."
+        else -> "권장 동작: 연결로 보관하고 지원 여부를 확인해 주세요."
+    }
 }
 
 private fun isModelLikeFileName(name: String): Boolean {
