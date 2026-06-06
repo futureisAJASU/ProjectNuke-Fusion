@@ -5182,6 +5182,7 @@ private fun ModelZooSection(
             modelNote = modelNotes[spec.id].orEmpty(),
             onSaveModelNote = { note -> onSaveModelNote(spec.id, note) },
             benchmarkSummary = benchmarkSummaryByModelId[spec.id],
+            recommendation = recommendationMap[spec.id],
             onOpenBenchmark = { openHistory ->
                 selectedSpec = null
                 onOpenBenchmark(spec.displayName, openHistory)
@@ -5275,6 +5276,7 @@ private fun ModelZooDetailDialog(
     modelNote: String,
     onSaveModelNote: (String?) -> Unit,
     benchmarkSummary: ModelBenchmarkSummary?,
+    recommendation: ModelRecommendationEvaluation?,
     onOpenBenchmark: (openHistory: Boolean) -> Unit
 ) {
     val context = LocalContext.current
@@ -5308,6 +5310,7 @@ private fun ModelZooDetailDialog(
     var overflowExpanded by remember { mutableStateOf(false) }
     var compatibilityReport by remember { mutableStateOf<FusionModelCompatibilityReport?>(null) }
     var showConversionGuide by remember { mutableStateOf(false) }
+    var showModelPassport by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -5470,6 +5473,14 @@ private fun ModelZooDetailDialog(
                             onDismissRequest = { overflowExpanded = false },
                             containerColor = PanelBg
                         ) {
+                            DropdownMenuItem(
+                                text = { Text("모델 여권", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                colors = menuItemColors,
+                                onClick = {
+                                    overflowExpanded = false
+                                    showModelPassport = true
+                                }
+                            )
                             DropdownMenuItem(
                                 text = {
                                     Text(
@@ -5685,6 +5696,31 @@ private fun ModelZooDetailDialog(
             textContentColor = TextPrimary
         )
     }
+    if (showModelPassport) {
+        ModelPassportDialog(
+            spec = spec,
+            available = available,
+            memoryInfo = memoryInfo,
+            tokenRecommendation = tokenRecommendation,
+            recommendation = recommendation,
+            benchmarkSummary = benchmarkSummary,
+            modelNote = modelNote,
+            onDismiss = { showModelPassport = false },
+            onSelect = onSelect,
+            onApplyRecommendedSettings = onApplyRecommendedSettings,
+            onOpenBenchmark = {
+                showModelPassport = false
+                onOpenBenchmark(false)
+            },
+            onOpenModelPage = onOpenModelPage,
+            onCopyLink = onCopyLink,
+            onUploadCustomModel = onUploadCustomModel,
+            onEditNote = {
+                noteDraft = modelNote
+                noteEditorOpen = true
+            }
+        )
+    }
 }
 
 private enum class ModelSelectRiskLevel { DIRECT, CAUTION, BLOCKED }
@@ -5782,6 +5818,245 @@ private fun logModelSelectionDecision(
             "availableRamGb=${memoryInfo.availableRamGb}, decision=${decision.reason}"
     )
 }
+
+@Composable
+private fun ModelPassportDialog(
+    spec: FusionModelSpec,
+    available: Boolean,
+    memoryInfo: ModelMemoryUiInfo,
+    tokenRecommendation: TokenRecommendation,
+    recommendation: ModelRecommendationEvaluation?,
+    benchmarkSummary: ModelBenchmarkSummary?,
+    modelNote: String,
+    onDismiss: () -> Unit,
+    onSelect: () -> Unit,
+    onApplyRecommendedSettings: () -> Unit,
+    onOpenBenchmark: () -> Unit,
+    onOpenModelPage: () -> Unit,
+    onCopyLink: () -> Unit,
+    onUploadCustomModel: () -> Unit,
+    onEditNote: () -> Unit
+) {
+    val socInfo = remember { collectFusionSocInfo() }
+    val isImported = spec.availability == ModelAvailability.CUSTOM_IMPORTED ||
+        spec.externallyReferenced ||
+        spec.copiedInternally
+    val source = spec.sourceLabel
+        ?: spec.huggingFaceModelId
+        ?: spec.officialUrl
+        ?: "출처 정보 없음"
+    val tier = recommendation?.tier ?: memoryInfo.tier
+    val reason = recommendation?.reason
+        ?: memoryInfo.warning
+        ?: spec.localExecutionWarning
+        ?: "현재 기기 정보를 기준으로 모델 적합도를 계산했습니다."
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.92f)
+                .navigationBarsPadding(),
+            shape = RoundedCornerShape(20.dp),
+            color = PanelBg
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("모델 여권", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "모델의 상태, 권장 설정, 벤치마크, 메모를 한눈에 확인합니다.",
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(top = 4.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PassportSection("프로필") {
+                        Text(
+                            spec.displayName,
+                            color = TextPrimary,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            "${spec.family.name} · ${spec.parameterLabel} · ${passportRuntimeLabel(spec.runtimeFormat)}",
+                            color = AccentBlue,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        DetailMetaRow("패밀리", spec.family.name)
+                        DetailMetaRow("크기", modelFootprintLabel(spec))
+                        DetailMetaRow("실행 형식", passportRuntimeLabel(spec.runtimeFormat))
+                        DetailMetaRow("상태", passportAvailabilityLabel(spec.availability, available))
+                        DetailMetaRow("권장 기기", passportDeviceClassLabel(spec.recommendedDeviceClass))
+                        DetailMetaRow("모델 출처", source)
+                    }
+
+                    PassportSection("기기 적합도") {
+                        DetailMetaRow("적합도", tier)
+                        Text(reason, color = TextSecondary, fontSize = 12.sp)
+                        DetailMetaRow("기기 RAM", ramClassLabel(memoryInfo.totalRamGb))
+                        DetailMetaRow("사용 가능 RAM", "약 ${formatGb(memoryInfo.availableRamGb)}GB")
+                        DetailMetaRow("권장 maxTokens", tokenRecommendation.value.takeIf { it > 0 }?.toString() ?: "원격 실행 권장")
+                        DetailMetaRow("MTP", if (spec.recommendedMtpEnabled) "켬 권장" else "끔 권장")
+                        DetailMetaRow("Reasoning", if (spec.recommendedReasoningEnabled) "켬 권장" else "끔 권장")
+                    }
+
+                    PassportSection("NPU 및 가속 안내") {
+                        DetailMetaRow("감지된 AP", socInfo.vendorLabel)
+                        DetailMetaRow("SoC", socInfo.compactSocLabel)
+                        Text(
+                            if (spec.supportsNpuCandidate) {
+                                fusionNpuCandidateLabel(socInfo.detectedSocVendor, true)
+                            } else {
+                                "현재 모델은 전용 NPU 실행 후보로 확인되지 않았습니다."
+                            },
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                        Text(fusionNpuNoteText(socInfo.detectedSocVendor), color = TextSecondary, fontSize = 12.sp)
+                    }
+
+                    PassportSection("벤치마크 요약") {
+                        if (benchmarkSummary == null) {
+                            Text("아직 측정된 벤치마크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
+                        } else {
+                            DetailMetaRow("측정 횟수", "${benchmarkSummary.count}회")
+                            DetailMetaRow("중앙값", benchmarkSummary.medianDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음")
+                            DetailMetaRow("최고 속도", benchmarkSummary.bestDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음")
+                            DetailMetaRow("최근 측정", formatTimestamp(benchmarkSummary.latestAt))
+                            DetailMetaRow("최근 가속기", benchmarkSummary.recentAccelerator ?: "정보 없음")
+                            DetailMetaRow("MTP 추천", benchmarkSummary.mtpRecommendation)
+                        }
+                    }
+
+                    PassportSection("사용자 메모") {
+                        Text(
+                            modelNote.ifBlank { "저장된 메모가 없습니다." },
+                            color = TextSecondary,
+                            fontSize = 12.sp,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        FusionTextButton(onClick = onEditNote) {
+                            Text(if (modelNote.isBlank()) "메모 작성" else "메모 수정", fontSize = 12.sp)
+                        }
+                    }
+
+                    PassportSection("파일 및 연결 상태") {
+                        if (isImported) {
+                            DetailMetaRow(
+                                "저장 위치",
+                                if (spec.externallyReferenced) "외부 파일 연결됨" else "Fusion 내부 저장소"
+                            )
+                            DetailMetaRow("파일 이름", spec.originalFileName ?: spec.fileName ?: "정보 없음")
+                            DetailMetaRow("파일 크기", spec.fileSizeBytes?.let { formatBytes(it) } ?: "정보 없음")
+                            DetailMetaRow("실행 상태", passportExecutionStatus(spec, available))
+                        } else {
+                            Text(
+                                if (available) "Fusion에서 사용할 수 있는 모델 파일입니다."
+                                else "모델 파일이 아직 연결되지 않았습니다.",
+                                color = TextSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FusionTextButton(enabled = available, onClick = onSelect) { Text("선택", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onApplyRecommendedSettings) { Text("권장 설정", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onOpenBenchmark) { Text("벤치마크", fontSize = 12.sp) }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    FusionTextButton(onClick = onOpenModelPage) { Text("모델 페이지", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onCopyLink) { Text("링크 복사", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onUploadCustomModel) { Text("파일 가져오기", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onDismiss) { Text("닫기", fontSize = 12.sp) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PassportSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        color = Color(0xFF151515)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp)
+        ) {
+            Text(title, color = AccentBlue, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            content()
+        }
+    }
+}
+
+private fun passportRuntimeLabel(format: ModelRuntimeFormat): String = when (format) {
+    ModelRuntimeFormat.LITERT_LM -> "LiteRT-LM"
+    ModelRuntimeFormat.MEDIAPIPE_LLM -> "MediaPipe LLM"
+    ModelRuntimeFormat.GGUF -> "GGUF"
+    ModelRuntimeFormat.ONNX -> "ONNX"
+    ModelRuntimeFormat.NEEDS_CONVERSION -> "변환 필요"
+    ModelRuntimeFormat.EXYNOS_AI_STUDIO -> "Exynos AI Studio 후보"
+    ModelRuntimeFormat.REMOTE_API -> "원격 API"
+    ModelRuntimeFormat.UNKNOWN -> "지원 확인 필요"
+}
+
+private fun passportAvailabilityLabel(availability: ModelAvailability, available: Boolean): String = when {
+    available -> "사용 가능"
+    availability == ModelAvailability.NEEDS_CONVERSION -> "변환 필요"
+    availability == ModelAvailability.NEEDS_DOWNLOAD -> "파일 필요"
+    availability == ModelAvailability.REMOTE_ONLY -> "원격 전용"
+    availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "지원 확인 필요"
+    else -> "실행 준비 필요"
+}
+
+private fun passportDeviceClassLabel(deviceClass: ModelRecommendedDeviceClass): String = when (deviceClass) {
+    ModelRecommendedDeviceClass.RAM_8GB_SAFE -> "8GB 기기"
+    ModelRecommendedDeviceClass.RAM_12GB_RECOMMENDED -> "12GB 이상 기기"
+    ModelRecommendedDeviceClass.RAM_16GB_RECOMMENDED -> "16GB 이상 기기"
+    ModelRecommendedDeviceClass.SERVER_ONLY -> "서버 또는 원격 실행"
+}
+
+private fun passportExecutionStatus(spec: FusionModelSpec, available: Boolean): String = when {
+    available -> "실행 후보"
+    spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION ||
+        spec.availability == ModelAvailability.NEEDS_CONVERSION -> "변환 필요"
+    spec.runtimeFormat == ModelRuntimeFormat.UNKNOWN ||
+        spec.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "지원 확인 필요"
+    else -> "실행 준비 필요"
+}
+
 @Composable
 private fun DetailMetaRow(
     label: String,
@@ -6796,6 +7071,7 @@ private fun importFormatLabel(fileName: String, format: ModelRuntimeFormat): Str
             else -> "지원 확인 필요"
         }
     }
+
 }
 
 private fun importExecutionStatusMessage(format: ModelRuntimeFormat): String {

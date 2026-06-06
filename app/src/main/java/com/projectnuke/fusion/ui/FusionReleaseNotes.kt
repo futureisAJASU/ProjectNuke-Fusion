@@ -260,6 +260,34 @@ private fun releaseNoteGroupOrder(groupKey: String): Int {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.23-alpha",
+            status = "알파",
+            summary = "모델 정보를 한 화면에서 확인할 수 있는 모델 여권을 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "모델 여권",
+                    items = listOf(
+                        "모델 상세 메뉴에서 모델 여권을 열 수 있도록 추가했습니다.",
+                        "모델 패밀리, 크기, 실행 형식, 상태, 권장 기기, 출처를 통합해 표시합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "기기 적합도와 실행 정보",
+                    items = listOf(
+                        "현재 기기 RAM을 기준으로 적합도, 권장 maxTokens, MTP와 Reasoning 권장 상태를 확인할 수 있습니다.",
+                        "감지된 AP와 SoC, NPU 변환 후보 안내, 가져온 모델의 파일 및 연결 상태를 함께 표시합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "벤치마크와 메모",
+                    items = listOf(
+                        "측정 횟수, 중앙값, 최고 속도, 최근 측정 정보와 MTP 추천을 요약해 표시합니다.",
+                        "기존 모델 메모를 확인하거나 수정하고 모델 선택, 권장 설정, 벤치마크, 모델 페이지 등의 기존 작업을 바로 실행할 수 있습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.22-alpha",
             status = "알파",
             summary = "Fusion의 작업 상태를 은은한 주변광으로 구분하는 Fusion Pulse를 추가했습니다.",
