@@ -260,6 +260,34 @@ private fun releaseNoteGroupOrder(groupKey: String): Int {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.20-alpha",
+            status = "알파",
+            summary = "응답 생성 중 표시되는 주변광 효과를 부드러운 오로라 형태로 개선했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "오로라 주변광",
+                    items = listOf(
+                        "기존 띠 형태의 주변광을 여러 겹의 파란색, 청록색 세로 빛줄기로 구성된 오로라 효과로 교체했습니다.",
+                        "빛의 위아래가 자연스럽게 투명해지도록 정리해 단단한 경계가 보이지 않도록 했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "위치와 전환",
+                    items = listOf(
+                        "오로라를 대화 입력창 바로 위에 배치해 응답 생성 상태를 자연스럽게 확인할 수 있도록 했습니다.",
+                        "응답 생성 시작과 종료 시 주변광이 부드럽게 나타나고 사라지도록 전환 효과를 개선했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "움직임",
+                    items = listOf(
+                        "여러 주기의 느린 흔들림과 밝기 변화를 조합해 반복 경계에서 움직임이 갑자기 되돌아가는 현상을 없앴습니다.",
+                        "주변광은 응답 생성 중에만 표시되며 대화 입력 조작을 방해하지 않습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.19-alpha",
             status = "알파",
             summary = "모델 파일 가져오기와 외부 연결 과정을 더 명확하게 정리했습니다.",
