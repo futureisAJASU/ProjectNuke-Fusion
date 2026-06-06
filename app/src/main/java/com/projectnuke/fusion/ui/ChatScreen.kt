@@ -13,11 +13,14 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -72,9 +75,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -127,6 +133,8 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
@@ -208,71 +216,134 @@ private fun AmbientResponseLight(
 ) {
     if (!visible) return
 
+    val deepNavy = Color(0xFF06132D)
+    val darkBlue = Color(0xFF0B2A5B)
+    val blue = Color(0xFF1677FF)
+    val cyan = Color(0xFF3FD8FF)
+    val brightTeal = Color(0xFF5FF2D6)
     val transition = rememberInfiniteTransition(label = "ambient-response-light")
-    val breath by transition.animateFloat(
-        initialValue = 0.55f,
-        targetValue = 0.85f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 2600),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "ambient-response-alpha"
-    )
-    val drift by transition.animateFloat(
+    val phaseA by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4600),
-            repeatMode = RepeatMode.Reverse
+            animation = tween(durationMillis = 9000),
+            repeatMode = RepeatMode.Restart
         ),
-        label = "ambient-response-drift"
+        label = "ambient-response-phase-a"
+    )
+    val phaseB by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 13000),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "ambient-response-phase-b"
+    )
+    val phaseC by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 17000),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "ambient-response-phase-c"
     )
 
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(24.dp)
+            .height(190.dp)
     ) {
-        val phase = size.width * drift
+        val width = size.width
+        val height = size.height
+        val angleA = phaseA * 6.28318f
+        val angleB = phaseB * 6.28318f
+        val angleC = phaseC * 6.28318f
+        val breath = 0.88f + 0.12f * sin(angleC)
+        val maxStreakWidth = 56.dp.toPx()
+        val minStreakWidth = 18.dp.toPx()
+        val minStreakHeight = 82.dp.toPx()
+        val highlightMinWidth = 8.dp.toPx()
+        val highlightMaxWidth = 20.dp.toPx()
+
         drawRect(
             brush = Brush.verticalGradient(
                 colorStops = arrayOf(
-                    0f to Color(0xFF0A1B3D).copy(alpha = 0.42f * breath),
-                    0.18f to Color(0xFF2E8DFF).copy(alpha = 0.26f * breath),
-                    0.42f to Color(0xFF4FD8FF).copy(alpha = 0.12f * breath),
+                    0f to Color.Transparent,
+                    0.16f to deepNavy.copy(alpha = 0.10f * breath),
+                    0.36f to darkBlue.copy(alpha = 0.16f * breath),
+                    0.70f to blue.copy(alpha = 0.045f * breath),
                     1f to Color.Transparent
                 )
             ),
             size = size
         )
-        drawRect(
-            brush = Brush.linearGradient(
-                colorStops = arrayOf(
-                    0f to Color.Transparent,
-                    0.22f to Color(0xFF0A1B3D).copy(alpha = 0.10f * breath),
-                    0.45f to Color(0xFF4FD8FF).copy(alpha = 0.34f * breath),
-                    0.62f to Color(0xFF63F2D7).copy(alpha = 0.28f * breath),
-                    1f to Color.Transparent
+
+        repeat(24) { index ->
+            val seed = index * 1.618f
+            val baseFraction = (index + 0.35f * sin(seed)) / 23f
+            val sway = sin(angleA + seed) * width * 0.028f +
+                cos(angleB + seed * 0.7f) * width * 0.012f
+            val x = width * baseFraction + sway
+            val streakWidth = minStreakWidth + (maxStreakWidth - minStreakWidth) * (0.5f + 0.5f * sin(seed * 1.7f))
+            val baseHeight = minStreakHeight + (height - minStreakHeight) * (0.62f + 0.18f * sin(seed * 0.9f))
+            val streakHeight = baseHeight * (0.90f + 0.10f * cos(angleB + seed))
+            val top = height * (0.02f + 0.04f * (0.5f + 0.5f * sin(seed * 1.3f)))
+            val colorWave = 0.5f + 0.5f * sin(angleC + seed * 1.25f)
+            val coreColor = if (colorWave < 0.5f) {
+                lerp(blue, cyan, colorWave * 2f)
+            } else {
+                lerp(cyan, brightTeal, (colorWave - 0.5f) * 2f)
+            }
+            val baseAlpha = 0.06f + 0.14f * (0.5f + 0.5f * sin(seed * 2.1f))
+            val alpha = baseAlpha * (0.78f + 0.22f * sin(angleC + seed)) * breath
+
+            drawRoundRect(
+                brush = Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0f to Color.Transparent,
+                        0.18f to darkBlue.copy(alpha = alpha * 0.28f),
+                        0.42f to coreColor.copy(alpha = alpha * 0.72f),
+                        0.62f to brightTeal.copy(alpha = alpha * 0.52f),
+                        0.84f to blue.copy(alpha = alpha * 0.18f),
+                        1f to Color.Transparent
+                    ),
+                    startY = top,
+                    endY = top + streakHeight
                 ),
-                start = Offset(-size.width * 0.55f + phase * 0.55f, 0f),
-                end = Offset(size.width * 1.25f + phase * 0.55f, size.height * 0.6f)
-            ),
-            size = size
-        )
-        drawRect(
-            brush = Brush.linearGradient(
-                colorStops = arrayOf(
-                    0f to Color.Transparent,
-                    0.18f to Color(0xFF2E8DFF).copy(alpha = 0.12f * breath),
-                    0.5f to Color(0xFF63F2D7).copy(alpha = 0.20f * breath),
-                    0.72f to AccentBlue.copy(alpha = 0.16f * breath),
-                    1f to Color.Transparent
+                topLeft = Offset(x - streakWidth / 2f, top),
+                size = Size(streakWidth, streakHeight),
+                cornerRadius = CornerRadius(streakWidth, streakWidth)
+            )
+        }
+
+        repeat(5) { index ->
+            val seed = index * 2.37f + 0.6f
+            val x = width * (0.12f + index * 0.19f) +
+                sin(angleA + seed) * width * 0.035f +
+                cos(angleB + seed * 0.7f) * width * 0.014f
+            val rayWidth = highlightMinWidth + (highlightMaxWidth - highlightMinWidth) * (0.5f + 0.5f * sin(seed))
+            val rayHeight = height * (0.72f + 0.12f * cos(angleB + seed))
+            val alpha = (0.10f + 0.11f * (0.5f + 0.5f * sin(angleC + seed))) * breath
+
+            drawRoundRect(
+                brush = Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0f to Color.Transparent,
+                        0.20f to cyan.copy(alpha = alpha * 0.36f),
+                        0.46f to brightTeal.copy(alpha = alpha),
+                        0.70f to cyan.copy(alpha = alpha * 0.35f),
+                        1f to Color.Transparent
+                    ),
+                    startY = 0f,
+                    endY = rayHeight
                 ),
-                start = Offset(size.width * 1.15f - phase * 0.45f, 0f),
-                end = Offset(-size.width * 0.25f - phase * 0.45f, size.height * 0.75f)
-            ),
-            size = size
-        )
+                topLeft = Offset(x - rayWidth / 2f, 0f),
+                size = Size(rayWidth, rayHeight),
+                cornerRadius = CornerRadius(rayWidth, rayWidth)
+            )
+        }
     }
 }
 
@@ -1936,10 +2007,19 @@ fun ChatScreen(
                 }
             }
             }
-            AmbientResponseLight(
+            AnimatedVisibility(
                 visible = isGenerating && !extractingMemoryCandidates,
-                modifier = Modifier.align(Alignment.TopCenter)
-            )
+                enter = fadeIn(animationSpec = tween(durationMillis = 450)),
+                exit = fadeOut(animationSpec = tween(durationMillis = 750)),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 132.dp)
+            ) {
+                AmbientResponseLight(
+                    visible = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 
