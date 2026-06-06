@@ -1120,7 +1120,7 @@ fun ConversationListScreenV2(
                                                     return@launch
                                                 }
                                                 val title = conversation.title.ifBlank { "새 대화" }
-                                                pendingChatMarkdownExport = buildChatExportMarkdown(title, messages)
+                                                pendingChatMarkdownExport = buildChatExportMarkdown(context, title, messages)
                                                 chatMarkdownExportLauncher.launch("fusion-chat-${safeMarkdownExportTitle(title)}.md")
                                                 showChatMarkdownExportPicker = false
                                                 markdownExportSearchQuery = ""
@@ -1896,6 +1896,7 @@ private fun truncateTitle(text: String): String {
 }
 
 private fun buildChatExportMarkdown(
+    context: android.content.Context,
     title: String,
     messages: List<MessageEntity>
 ): String {
@@ -1908,7 +1909,11 @@ private fun buildChatExportMarkdown(
         appendLine("- 내보낸 날짜: $dateText")
         appendLine("- 메시지 수: ${messages.size}")
         appendLine()
-        messages.forEach { message ->
+        val conversationId = messages.firstOrNull()?.conversationId ?: 0L
+        activeTimelineMessages(
+            messages,
+            loadResponseVersionState(context, conversationId)
+        ).forEach { message ->
             val heading = if (message.role == "user") "사용자" else "Fusion"
             val visibleContent = stripHiddenFusionBlocks(message.content).trim()
             if (visibleContent.isNotBlank()) {

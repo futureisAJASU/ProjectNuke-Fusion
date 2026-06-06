@@ -38,6 +38,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AddComment
+import androidx.compose.material.icons.rounded.ChevronLeft
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreVert
@@ -571,6 +573,15 @@ fun ChatScreen(
     }
 
     val messageEntities by messageFlow.collectAsState(initial = emptyList())
+    var responseVersionState by remember(conversationId) {
+        mutableStateOf(loadResponseVersionState(context, conversationId))
+    }
+    val chatTimeline = remember(messageEntities, responseVersionState) {
+        buildChatTimeline(messageEntities, responseVersionState)
+    }
+    val activeMessageEntities = remember(messageEntities, responseVersionState) {
+        activeTimelineMessages(messageEntities, responseVersionState)
+    }
     val conversationSummary = remember(conversationId, conversationSummaryRefreshKey) {
         loadConversationSummary(context, conversationId)
     }
@@ -581,19 +592,19 @@ fun ChatScreen(
         memoryCandidateText = ""
     }
 
-    val messages = messageEntities.map {
+    val messages = activeMessageEntities.map {
         ChatMessage(
             role = it.role,
             content = it.content
         )
     }
     val listState = rememberLazyListState()
-    val inChatSearchResults = remember(messageEntities, inChatSearchQuery) {
+    val inChatSearchResults = remember(activeMessageEntities, inChatSearchQuery) {
         val query = inChatSearchQuery.trim()
         if (query.isBlank()) {
             emptyList()
         } else {
-            messageEntities.filter { message ->
+            activeMessageEntities.filter { message ->
                 visibleSearchText(message.content).contains(query, ignoreCase = true)
             }
         }
@@ -619,7 +630,11 @@ fun ChatScreen(
             return
         }
 
-        val previousUserIndex = (targetIndex - 1 downTo 0).firstOrNull { snapshot[it].role == "user" }
+        val storedGroupId = responseVersionState.groupByMessageId[targetMessage.id]
+        val previousUserIndex = storedGroupId
+            ?.let { groupId -> snapshot.indexOfFirst { it.id == groupId && it.role == "user" } }
+            ?.takeIf { it >= 0 }
+            ?: (targetIndex - 1 downTo 0).firstOrNull { snapshot[it].role == "user" }
         if (previousUserIndex == null) {
             Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
@@ -809,9 +824,40 @@ fun ChatScreen(
                     )
                 )
 
-                dao.updateMessageContent(targetMessage.id, appendFusionMetrics(rawReply, metricsLine))
+                val newMessageId = dao.insertMessage(
+                    MessageEntity(
+                        conversationId = activeConversationId,
+                        role = "assistant",
+                        content = appendFusionMetrics(rawReply, metricsLine),
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
+                val groupId = previousUser.id
+                val updatedVersionState = responseVersionState.copy(
+                    groupByMessageId = responseVersionState.groupByMessageId +
+                        (targetMessage.id to groupId) +
+                        (newMessageId to groupId),
+                    activeMessageIdByGroup = responseVersionState.activeMessageIdByGroup +
+                        (groupId to newMessageId)
+                )
+                saveResponseVersionState(context, activeConversationId, updatedVersionState)
+                responseVersionState = updatedVersionState
                 dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
-                DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 성공", action.menuLabel)
+                val versionCount = buildChatTimeline(
+                    messageEntities + MessageEntity(
+                        id = newMessageId,
+                        conversationId = activeConversationId,
+                        role = "assistant",
+                        content = "",
+                        createdAt = System.currentTimeMillis()
+                    ),
+                    updatedVersionState
+                ).filterIsInstance<ChatTimelineItem.AssistantVersions>()
+                    .firstOrNull { it.groupId == groupId }
+                    ?.versions
+                    ?.size
+                    ?: 1
+                DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 성공", "versions=$versionCount")
                 Toast.makeText(context, "답변을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Log.e("FusionEngine", "Response regeneration failed", e)
@@ -1922,7 +1968,7 @@ fun ChatScreen(
                                     preview = visibleSearchText(result.content),
                                     onClick = {
                                         scope.launch {
-                                            val idx = messageEntities.indexOfFirst { it.id == result.id }
+                                            val idx = activeMessageEntities.indexOfFirst { it.id == result.id }
                                             if (idx >= 0) {
                                                 listState.animateScrollToItem(idx)
                                                 inChatSearchMode = false
@@ -1943,18 +1989,42 @@ fun ChatScreen(
                         contentPadding = PaddingValues(top = 12.dp, bottom = chatContentBottomPadding)
                     ) {
                         items(
-                            items = messageEntities,
+                            items = activeMessageEntities,
                             key = { it.id }
                         ) { message ->
                             when (message.role) {
                                 "user" -> UserMessageBubble(message.content)
-                                else -> AssistantMessage(
+                                else -> {
+                                    val versionGroup = chatTimeline
+                                        .filterIsInstance<ChatTimelineItem.AssistantVersions>()
+                                        .first { group -> group.activeMessage.id == message.id }
+                                    AssistantMessage(
                                     content = message.content,
                                     createdAt = message.createdAt,
                                     selectedModel = selectedModel,
                                     webSearchEnabled = webSearchEnabled,
                                     reasoningEnabled = reasoningEnabled,
                                     isRegenerating = regeneratingMessageId == message.id,
+                                    versionIndex = versionGroup.activeIndex,
+                                    versionCount = versionGroup.versions.size,
+                                    onPreviousVersion = {
+                                        val selected = versionGroup.versions[versionGroup.activeIndex - 1]
+                                        val updated = responseVersionState.copy(
+                                            activeMessageIdByGroup = responseVersionState.activeMessageIdByGroup +
+                                                (versionGroup.groupId to selected.id)
+                                        )
+                                        saveResponseVersionState(context, conversationId, updated)
+                                        responseVersionState = updated
+                                    },
+                                    onNextVersion = {
+                                        val selected = versionGroup.versions[versionGroup.activeIndex + 1]
+                                        val updated = responseVersionState.copy(
+                                            activeMessageIdByGroup = responseVersionState.activeMessageIdByGroup +
+                                                (versionGroup.groupId to selected.id)
+                                        )
+                                        saveResponseVersionState(context, conversationId, updated)
+                                        responseVersionState = updated
+                                    },
                                     onRetry = { startRegenerateResponse(message, ResponseRegenerationAction.Retry) },
                                 onRegenerate = { action -> startRegenerateResponse(message, action) },
                                 onBranch = {
@@ -1975,7 +2045,8 @@ fun ChatScreen(
                                         selectedModelPath = selectedModelPath
                                     )
                                 }
-                            )
+                                    )
+                                }
                         }
                     }
 
@@ -3031,6 +3102,10 @@ private fun AssistantMessage(
     reasoningEnabled: Boolean,
     showActions: Boolean = true,
     isRegenerating: Boolean = false,
+    versionIndex: Int = 0,
+    versionCount: Int = 1,
+    onPreviousVersion: () -> Unit = {},
+    onNextVersion: () -> Unit = {},
     onRetry: () -> Unit,
     onRegenerate: (ResponseRegenerationAction) -> Unit,
     onBranch: () -> Unit,
@@ -3072,6 +3147,32 @@ private fun AssistantMessage(
         }
 
         if (showActions) {
+        if (versionCount > 1) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                ActionIcon(
+                    icon = Icons.Rounded.ChevronLeft,
+                    contentDescription = "이전 답변",
+                    enabled = versionIndex > 0,
+                    onClick = onPreviousVersion
+                )
+                Text(
+                    text = "${versionIndex + 1} / $versionCount",
+                    color = AccentBlue,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                ActionIcon(
+                    icon = Icons.Rounded.ChevronRight,
+                    contentDescription = "다음 답변",
+                    enabled = versionIndex < versionCount - 1,
+                    onClick = onNextVersion
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+        }
         metricsSplit.metricsLine?.let { metricsLine ->
             Spacer(modifier = Modifier.height(8.dp))
             Text(
@@ -3303,19 +3404,20 @@ private fun AssistantMoreMenu(
 private fun ActionIcon(
     icon: ImageVector,
     contentDescription: String,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     Box(
         modifier = Modifier
             .size(34.dp)
             .clip(CircleShape)
-            .clickable { onClick() },
+            .clickable(enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = TextSecondary,
+            tint = if (enabled) TextSecondary else TextSecondary.copy(alpha = 0.35f),
             modifier = Modifier.size(23.dp)
         )
     }

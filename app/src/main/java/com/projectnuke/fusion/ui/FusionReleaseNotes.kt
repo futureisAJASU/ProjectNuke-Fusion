@@ -260,6 +260,34 @@ private fun releaseNoteGroupOrder(groupKey: String): Int {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.21-alpha",
+            status = "알파",
+            summary = "답변을 다시 생성할 때 이전 답변을 함께 보관하고 선택할 수 있도록 개선했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "답변 버전",
+                    items = listOf(
+                        "답변 다시 생성과 스타일 변경으로 만든 답변을 기존 답변 위에 덮어쓰지 않고 별도 버전으로 보관합니다.",
+                        "새로 생성된 답변은 자동으로 현재 답변으로 표시되며 이전 답변의 내용도 유지됩니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "버전 탐색",
+                    items = listOf(
+                        "답변이 두 개 이상인 경우 좌우 이동 버튼과 현재 버전 번호를 표시합니다.",
+                        "선택한 답변 버전을 저장해 대화를 다시 열어도 마지막으로 본 답변을 표시합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "호환성과 내보내기",
+                    items = listOf(
+                        "기존 대화의 답변은 별도 변경 없이 단일 답변으로 표시됩니다.",
+                        "채팅 Markdown 내보내기에는 현재 선택된 답변 버전을 포함하도록 정리했습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.20-alpha",
             status = "알파",
             summary = "응답 생성 중 표시되는 주변광 효과를 부드러운 오로라 형태로 개선했습니다.",
