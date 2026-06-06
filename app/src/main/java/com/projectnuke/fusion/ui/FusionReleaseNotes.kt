@@ -260,6 +260,34 @@ private fun releaseNoteGroupOrder(groupKey: String): Int {
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
         FusionReleaseNote(
+            version = "0.4.22-alpha",
+            status = "알파",
+            summary = "Fusion의 작업 상태를 은은한 주변광으로 구분하는 Fusion Pulse를 추가했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "Fusion Pulse",
+                    items = listOf(
+                        "응답 생성, 모델 준비, 웹 검색, 메모리 후보 추출 상태에 따라 서로 다른 주변광 효과를 표시합니다.",
+                        "기존 응답 오로라는 유지하면서 각 작업 상태를 색상과 움직임으로 자연스럽게 구분했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "상태별 효과",
+                    items = listOf(
+                        "모델 준비 중에는 짙은 파란색 호흡광을 표시하고, 웹 검색 중에는 청록색 스캔광을 표시합니다.",
+                        "메모리 후보 추출 중에는 응답 오로라보다 차분한 흰색과 파란색 세로 빛을 표시합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "전환과 성능",
+                    items = listOf(
+                        "작업 시작과 종료 시 주변광이 부드럽게 나타나고 사라지도록 전환을 유지했습니다.",
+                        "상태가 없을 때는 애니메이션을 실행하지 않으며 전체 화면 효과나 무거운 흐림 처리를 사용하지 않습니다."
+                    )
+                )
+            )
+        ),
+        FusionReleaseNote(
             version = "0.4.21-alpha",
             status = "알파",
             summary = "답변을 다시 생성할 때 이전 답변을 함께 보관하고 선택할 수 있도록 개선했습니다.",

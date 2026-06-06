@@ -200,6 +200,15 @@ private data class FusionMetricsSplit(
     val metricsLine: String?
 )
 
+private enum class FusionPulseState {
+    Idle,
+    Responding,
+    ModelLoading,
+    WebSearching,
+    MemoryExtracting,
+    ErrorPulse
+}
+
 private enum class ResponseRegenerationAction(
     val menuLabel: String,
     val instruction: String?
@@ -212,18 +221,20 @@ private enum class ResponseRegenerationAction(
 }
 
 @Composable
-private fun AmbientResponseLight(
-    visible: Boolean,
+private fun FusionPulseAmbientLight(
+    state: FusionPulseState,
     modifier: Modifier = Modifier
 ) {
-    if (!visible) return
+    if (state == FusionPulseState.Idle) return
 
     val deepNavy = Color(0xFF06132D)
     val darkBlue = Color(0xFF0B2A5B)
     val blue = Color(0xFF1677FF)
     val cyan = Color(0xFF3FD8FF)
     val brightTeal = Color(0xFF5FF2D6)
-    val transition = rememberInfiniteTransition(label = "ambient-response-light")
+    val softWhiteBlue = Color(0xFFE1F6FF)
+    val errorRed = Color(0xFFFF6B7A)
+    val transition = rememberInfiniteTransition(label = "fusion-pulse")
     val phaseA by transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
@@ -231,7 +242,7 @@ private fun AmbientResponseLight(
             animation = tween(durationMillis = 9000),
             repeatMode = RepeatMode.Restart
         ),
-        label = "ambient-response-phase-a"
+        label = "fusion-pulse-phase-a"
     )
     val phaseB by transition.animateFloat(
         initialValue = 0f,
@@ -240,7 +251,7 @@ private fun AmbientResponseLight(
             animation = tween(durationMillis = 13000),
             repeatMode = RepeatMode.Restart
         ),
-        label = "ambient-response-phase-b"
+        label = "fusion-pulse-phase-b"
     )
     val phaseC by transition.animateFloat(
         initialValue = 0f,
@@ -249,7 +260,7 @@ private fun AmbientResponseLight(
             animation = tween(durationMillis = 17000),
             repeatMode = RepeatMode.Restart
         ),
-        label = "ambient-response-phase-c"
+        label = "fusion-pulse-phase-c"
     )
 
     Canvas(
@@ -269,82 +280,177 @@ private fun AmbientResponseLight(
         val highlightMinWidth = 8.dp.toPx()
         val highlightMaxWidth = 20.dp.toPx()
 
-        drawRect(
-            brush = Brush.verticalGradient(
-                colorStops = arrayOf(
-                    0f to Color.Transparent,
-                    0.16f to deepNavy.copy(alpha = 0.10f * breath),
-                    0.36f to darkBlue.copy(alpha = 0.16f * breath),
-                    0.70f to blue.copy(alpha = 0.045f * breath),
-                    1f to Color.Transparent
+        when (state) {
+            FusionPulseState.Responding -> {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0f to Color.Transparent,
+                            0.16f to deepNavy.copy(alpha = 0.10f * breath),
+                            0.36f to darkBlue.copy(alpha = 0.16f * breath),
+                            0.70f to blue.copy(alpha = 0.045f * breath),
+                            1f to Color.Transparent
+                        )
+                    ),
+                    size = size
                 )
-            ),
-            size = size
-        )
 
-        repeat(24) { index ->
-            val seed = index * 1.618f
-            val baseFraction = (index + 0.35f * sin(seed)) / 23f
-            val sway = sin(angleA + seed) * width * 0.028f +
-                cos(angleB + seed * 0.7f) * width * 0.012f
-            val x = width * baseFraction + sway
-            val streakWidth = minStreakWidth + (maxStreakWidth - minStreakWidth) * (0.5f + 0.5f * sin(seed * 1.7f))
-            val baseHeight = minStreakHeight + (height - minStreakHeight) * (0.62f + 0.18f * sin(seed * 0.9f))
-            val streakHeight = baseHeight * (0.90f + 0.10f * cos(angleB + seed))
-            val top = height * (0.02f + 0.04f * (0.5f + 0.5f * sin(seed * 1.3f)))
-            val colorWave = 0.5f + 0.5f * sin(angleC + seed * 1.25f)
-            val coreColor = if (colorWave < 0.5f) {
-                lerp(blue, cyan, colorWave * 2f)
-            } else {
-                lerp(cyan, brightTeal, (colorWave - 0.5f) * 2f)
+                repeat(24) { index ->
+                    val seed = index * 1.618f
+                    val baseFraction = (index + 0.35f * sin(seed)) / 23f
+                    val sway = sin(angleA + seed) * width * 0.028f +
+                        cos(angleB + seed * 0.7f) * width * 0.012f
+                    val x = width * baseFraction + sway
+                    val streakWidth = minStreakWidth + (maxStreakWidth - minStreakWidth) * (0.5f + 0.5f * sin(seed * 1.7f))
+                    val baseHeight = minStreakHeight + (height - minStreakHeight) * (0.62f + 0.18f * sin(seed * 0.9f))
+                    val streakHeight = baseHeight * (0.90f + 0.10f * cos(angleB + seed))
+                    val top = height * (0.02f + 0.04f * (0.5f + 0.5f * sin(seed * 1.3f)))
+                    val colorWave = 0.5f + 0.5f * sin(angleC + seed * 1.25f)
+                    val coreColor = if (colorWave < 0.5f) {
+                        lerp(blue, cyan, colorWave * 2f)
+                    } else {
+                        lerp(cyan, brightTeal, (colorWave - 0.5f) * 2f)
+                    }
+                    val baseAlpha = 0.06f + 0.14f * (0.5f + 0.5f * sin(seed * 2.1f))
+                    val alpha = baseAlpha * (0.78f + 0.22f * sin(angleC + seed)) * breath
+
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            colorStops = arrayOf(
+                                0f to Color.Transparent,
+                                0.18f to darkBlue.copy(alpha = alpha * 0.28f),
+                                0.42f to coreColor.copy(alpha = alpha * 0.72f),
+                                0.62f to brightTeal.copy(alpha = alpha * 0.52f),
+                                0.84f to blue.copy(alpha = alpha * 0.18f),
+                                1f to Color.Transparent
+                            ),
+                            startY = top,
+                            endY = top + streakHeight
+                        ),
+                        topLeft = Offset(x - streakWidth / 2f, top),
+                        size = Size(streakWidth, streakHeight),
+                        cornerRadius = CornerRadius(streakWidth, streakWidth)
+                    )
+                }
+
+                repeat(5) { index ->
+                    val seed = index * 2.37f + 0.6f
+                    val x = width * (0.12f + index * 0.19f) +
+                        sin(angleA + seed) * width * 0.035f +
+                        cos(angleB + seed * 0.7f) * width * 0.014f
+                    val rayWidth = highlightMinWidth + (highlightMaxWidth - highlightMinWidth) * (0.5f + 0.5f * sin(seed))
+                    val rayHeight = height * (0.72f + 0.12f * cos(angleB + seed))
+                    val alpha = (0.10f + 0.11f * (0.5f + 0.5f * sin(angleC + seed))) * breath
+
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            colorStops = arrayOf(
+                                0f to Color.Transparent,
+                                0.20f to cyan.copy(alpha = alpha * 0.36f),
+                                0.46f to brightTeal.copy(alpha = alpha),
+                                0.70f to cyan.copy(alpha = alpha * 0.35f),
+                                1f to Color.Transparent
+                            ),
+                            startY = 0f,
+                            endY = rayHeight
+                        ),
+                        topLeft = Offset(x - rayWidth / 2f, 0f),
+                        size = Size(rayWidth, rayHeight),
+                        cornerRadius = CornerRadius(rayWidth, rayWidth)
+                    )
+                }
             }
-            val baseAlpha = 0.06f + 0.14f * (0.5f + 0.5f * sin(seed * 2.1f))
-            val alpha = baseAlpha * (0.78f + 0.22f * sin(angleC + seed)) * breath
 
-            drawRoundRect(
-                brush = Brush.verticalGradient(
-                    colorStops = arrayOf(
+            FusionPulseState.ModelLoading -> {
+                val loadingBreath = 0.55f + 0.25f * (0.5f + 0.5f * sin(angleB))
+                drawRect(
+                    brush = Brush.verticalGradient(
                         0f to Color.Transparent,
-                        0.18f to darkBlue.copy(alpha = alpha * 0.28f),
-                        0.42f to coreColor.copy(alpha = alpha * 0.72f),
-                        0.62f to brightTeal.copy(alpha = alpha * 0.52f),
-                        0.84f to blue.copy(alpha = alpha * 0.18f),
+                        0.34f to deepNavy.copy(alpha = 0.11f * loadingBreath),
+                        0.58f to darkBlue.copy(alpha = 0.17f * loadingBreath),
                         1f to Color.Transparent
                     ),
-                    startY = top,
-                    endY = top + streakHeight
-                ),
-                topLeft = Offset(x - streakWidth / 2f, top),
-                size = Size(streakWidth, streakHeight),
-                cornerRadius = CornerRadius(streakWidth, streakWidth)
-            )
-        }
+                    size = size
+                )
+                repeat(8) { index ->
+                    val seed = index * 1.91f
+                    val streakWidth = width * (0.10f + 0.025f * sin(seed))
+                    val x = width * (index + 0.5f) / 8f + sin(angleA + seed) * width * 0.012f
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.48f to darkBlue.copy(alpha = 0.09f * loadingBreath),
+                            0.72f to blue.copy(alpha = 0.055f * loadingBreath),
+                            1f to Color.Transparent
+                        ),
+                        topLeft = Offset(x - streakWidth / 2f, height * 0.12f),
+                        size = Size(streakWidth, height * 0.78f),
+                        cornerRadius = CornerRadius(streakWidth, streakWidth)
+                    )
+                }
+            }
 
-        repeat(5) { index ->
-            val seed = index * 2.37f + 0.6f
-            val x = width * (0.12f + index * 0.19f) +
-                sin(angleA + seed) * width * 0.035f +
-                cos(angleB + seed * 0.7f) * width * 0.014f
-            val rayWidth = highlightMinWidth + (highlightMaxWidth - highlightMinWidth) * (0.5f + 0.5f * sin(seed))
-            val rayHeight = height * (0.72f + 0.12f * cos(angleB + seed))
-            val alpha = (0.10f + 0.11f * (0.5f + 0.5f * sin(angleC + seed))) * breath
-
-            drawRoundRect(
-                brush = Brush.verticalGradient(
-                    colorStops = arrayOf(
+            FusionPulseState.WebSearching -> {
+                val scanX = width * (0.16f + 0.68f * (0.5f + 0.5f * sin(angleA)))
+                drawRect(
+                    brush = Brush.verticalGradient(
                         0f to Color.Transparent,
-                        0.20f to cyan.copy(alpha = alpha * 0.36f),
-                        0.46f to brightTeal.copy(alpha = alpha),
-                        0.70f to cyan.copy(alpha = alpha * 0.35f),
+                        0.44f to darkBlue.copy(alpha = 0.07f),
+                        0.66f to cyan.copy(alpha = 0.055f),
                         1f to Color.Transparent
                     ),
-                    startY = 0f,
-                    endY = rayHeight
-                ),
-                topLeft = Offset(x - rayWidth / 2f, 0f),
-                size = Size(rayWidth, rayHeight),
-                cornerRadius = CornerRadius(rayWidth, rayWidth)
-            )
+                    size = size
+                )
+                repeat(3) { index ->
+                    val scanWidth = width * (0.16f + index * 0.035f)
+                    val x = scanX + sin(angleB + index * 1.7f) * width * 0.055f
+                    val top = height * (0.18f + index * 0.17f)
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.48f to cyan.copy(alpha = 0.13f - index * 0.025f),
+                            1f to Color.Transparent
+                        ),
+                        topLeft = Offset(x - scanWidth / 2f, top),
+                        size = Size(scanWidth, height * 0.42f),
+                        cornerRadius = CornerRadius(scanWidth, scanWidth)
+                    )
+                }
+            }
+
+            FusionPulseState.MemoryExtracting -> {
+                val memoryBreath = 0.72f + 0.18f * sin(angleC)
+                repeat(12) { index ->
+                    val seed = index * 1.43f
+                    val streakWidth = 12.dp.toPx() + 22.dp.toPx() * (0.5f + 0.5f * sin(seed))
+                    val x = width * (index + 0.5f) / 12f + sin(angleB + seed) * width * 0.014f
+                    val streakHeight = height * (0.48f + 0.16f * (0.5f + 0.5f * cos(seed)))
+                    drawRoundRect(
+                        brush = Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.38f to blue.copy(alpha = 0.055f * memoryBreath),
+                            0.58f to softWhiteBlue.copy(alpha = 0.11f * memoryBreath),
+                            1f to Color.Transparent
+                        ),
+                        topLeft = Offset(x - streakWidth / 2f, height * 0.20f),
+                        size = Size(streakWidth, streakHeight),
+                        cornerRadius = CornerRadius(streakWidth, streakWidth)
+                    )
+                }
+            }
+
+            FusionPulseState.ErrorPulse -> {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        0.52f to errorRed.copy(alpha = 0.16f * breath),
+                        1f to Color.Transparent
+                    ),
+                    size = size
+                )
+            }
+
+            FusionPulseState.Idle -> Unit
         }
     }
 }
@@ -581,6 +687,21 @@ fun ChatScreen(
     }
     val activeMessageEntities = remember(messageEntities, responseVersionState) {
         activeTimelineMessages(messageEntities, responseVersionState)
+    }
+    val fusionPulseState = when {
+        generationStatus?.contains("모델 로딩") == true ||
+            generationStatus?.contains("이미지 분석 준비") == true -> FusionPulseState.ModelLoading
+        generationStatus?.contains("인터넷 검색") == true ||
+            generationStatus?.contains("검색 결과") == true -> FusionPulseState.WebSearching
+        extractingMemoryCandidates -> FusionPulseState.MemoryExtracting
+        isGenerating -> FusionPulseState.Responding
+        else -> FusionPulseState.Idle
+    }
+    var displayedPulseState by remember { mutableStateOf(FusionPulseState.Responding) }
+    LaunchedEffect(fusionPulseState) {
+        if (fusionPulseState != FusionPulseState.Idle) {
+            displayedPulseState = fusionPulseState
+        }
     }
     val conversationSummary = remember(conversationId, conversationSummaryRefreshKey) {
         loadConversationSummary(context, conversationId)
@@ -2079,15 +2200,15 @@ fun ChatScreen(
             }
             }
             AnimatedVisibility(
-                visible = isGenerating && !extractingMemoryCandidates,
+                visible = fusionPulseState != FusionPulseState.Idle,
                 enter = fadeIn(animationSpec = tween(durationMillis = 450)),
                 exit = fadeOut(animationSpec = tween(durationMillis = 750)),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 132.dp)
             ) {
-                AmbientResponseLight(
-                    visible = true,
+                FusionPulseAmbientLight(
+                    state = displayedPulseState,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
