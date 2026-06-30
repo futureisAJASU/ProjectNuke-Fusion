@@ -64,6 +64,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.projectnuke.fusion.ai.ui.AiProviderSettingsScreen
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.ConversationEntity
@@ -174,6 +175,7 @@ fun ConversationListScreenV2(
     var pendingSettingsRestoreJson by remember { mutableStateOf<String?>(null) }
     var showModelCompatibilityGuide by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
+    var showAiProviderSettingsDialog by remember { mutableStateOf(false) }
     var appLanguage by remember { mutableStateOf(getFusionAppLanguage(context)) }
     var developerModeEnabled by remember { mutableStateOf(isFusionDeveloperModeEnabled(context)) }
 
@@ -669,6 +671,15 @@ fun ConversationListScreenV2(
                     val topK = prefs.getInt("top_k", 64)
                     val topP = prefs.getFloat("top_p", 0.95f)
                     val temperature = prefs.getFloat("temperature", 1.0f)
+
+                    item {
+                        DrawerSettingActionRow(
+                            "AI API 제공자",
+                            "OpenAI 호환 API 키와 Base URL을 기기 내에 저장합니다."
+                        ) {
+                            showAiProviderSettingsDialog = true
+                        }
+                    }
 
                     item { DrawerSectionTitle("모델") }
                     item {
@@ -1315,6 +1326,12 @@ fun ConversationListScreenV2(
                 appLanguage = getFusionAppLanguage(context)
             },
             onDismiss = { showLanguageDialog = false }
+        )
+    }
+
+    if (showAiProviderSettingsDialog) {
+        AiProviderSettingsScreen(
+            onDismiss = { showAiProviderSettingsDialog = false }
         )
     }
 
