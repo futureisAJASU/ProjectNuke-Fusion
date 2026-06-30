@@ -674,7 +674,7 @@ fun ConversationListScreenV2(
 
                     item {
                         DrawerSettingActionRow(
-                            "AI API 제공자",
+                            "외부 AI API 설정",
                             "OpenAI 호환 API 키와 Base URL을 기기 내에 저장합니다."
                         ) {
                             showAiProviderSettingsDialog = true
