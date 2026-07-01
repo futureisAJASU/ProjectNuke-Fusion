@@ -46,11 +46,16 @@ internal fun GenerationModeSelector(
     onExternalProviderSelected: (String) -> Unit
 ) {
     var providerExpanded by remember { mutableStateOf(false) }
-    val enabledProviders = externalProviders.filter { it.isEnabled }
+    val runnableProviders = externalProviders.filter { provider ->
+        provider.isEnabled &&
+            !provider.apiKeySecretId.isNullOrBlank() &&
+            provider.baseUrl.isNotBlank() &&
+            provider.modelId.isNotBlank()
+    }
     val providerLabel = selectedProviderName
         ?.takeIf { it.isNotBlank() }
         ?.let { "API: $it" }
-        ?: "API: 제공자 선택"
+        ?: "API: 제공자를 설정해 주세요."
 
     Column(
         modifier = Modifier
@@ -112,7 +117,7 @@ internal fun GenerationModeSelector(
                     onDismissRequest = { providerExpanded = false },
                     containerColor = SelectorMenuBg
                 ) {
-                    if (enabledProviders.isEmpty()) {
+                    if (runnableProviders.isEmpty()) {
                         DropdownMenuItem(
                             text = {
                                 Text(
@@ -124,7 +129,7 @@ internal fun GenerationModeSelector(
                             enabled = false
                         )
                     } else {
-                        enabledProviders.forEach { provider ->
+                        runnableProviders.forEach { provider ->
                             val selected = provider.id == selectedProviderId
                             DropdownMenuItem(
                                 text = {

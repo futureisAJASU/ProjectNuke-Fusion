@@ -636,9 +636,16 @@ fun ChatScreen(
     var downloadProgressPercent by remember { mutableStateOf<Int?>(null) }
     var generationStatus by remember { mutableStateOf<String?>(null) }
 
+    fun isRunnableExternalProvider(provider: AiProviderConfig): Boolean {
+        return provider.isEnabled &&
+            !provider.apiKeySecretId.isNullOrBlank() &&
+            provider.baseUrl.isNotBlank() &&
+            provider.modelId.isNotBlank()
+    }
+
     suspend fun refreshExternalProviderState() {
         val providers = aiProviderRepository.getProviders()
-        val selected = aiProviderRepository.getSelectedProvider()?.takeIf { it.isEnabled }
+        val selected = aiProviderRepository.getSelectedProvider()?.takeIf(::isRunnableExternalProvider)
         externalProviders = providers
         selectedExternalProviderId = selected?.id
         selectedExternalProviderName = selected?.displayName
