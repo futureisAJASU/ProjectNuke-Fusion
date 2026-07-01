@@ -97,6 +97,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.net.toUri
+import com.projectnuke.fusion.ai.data.AiProviderRepository
+import com.projectnuke.fusion.ai.model.AiChatRequest
+import com.projectnuke.fusion.ai.model.AiMessage
+import com.projectnuke.fusion.ai.model.AiRole
+import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
+import com.projectnuke.fusion.ai.secure.AndroidKeystoreSecretStore
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.data.ConversationEntity
@@ -166,6 +172,10 @@ private data class LocalModel(
     val downloadUrl: String? = null,
     val customPath: String? = null
 )
+private enum class ChatGenerationMode {
+    LOCAL_MODEL,
+    EXTERNAL_AI_API
+}
 private data class PendingExternalModel(
     val displayName: String,
     val originalFileName: String,
@@ -468,6 +478,7 @@ private const val PrefReasoningEnabled = "reasoning_enabled"
 private const val PrefWebSearchEnabled = "web_search_enabled"
 private const val PrefSelectedModel = "selected_model"
 private const val PrefSelectedModelPath = "selected_model_path"
+private const val PrefGenerationMode = "generation_mode"
 private const val PrefSpeculativeDecoding = "speculative_decoding_enabled"
 private const val PrefFavoriteModelIds = "favorite_model_ids"
 private const val PrefHiddenModelIds = "hidden_model_ids"
@@ -543,6 +554,9 @@ fun ChatScreen(
     }
     val db = remember { AppDatabase.getInstance(context) }
     val dao = remember { db.chatDao() }
+    val aiSecretStore = remember { AndroidKeystoreSecretStore(context) }
+    val aiProviderRepository = remember { AiProviderRepository(context, aiSecretStore) }
+    val openAiCompatibleClient = remember { OpenAiCompatibleClient(aiSecretStore) }
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
     var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }
@@ -600,11 +614,26 @@ fun ChatScreen(
     var selectedModelPath by remember {
         mutableStateOf(settingsPrefs.getString(PrefSelectedModelPath, null))
     }
+    var generationMode by remember {
+        mutableStateOf(
+            runCatching {
+                ChatGenerationMode.valueOf(
+                    settingsPrefs.getString(PrefGenerationMode, ChatGenerationMode.LOCAL_MODEL.name)
+                        ?: ChatGenerationMode.LOCAL_MODEL.name
+                )
+            }.getOrDefault(ChatGenerationMode.LOCAL_MODEL)
+        )
+    }
+    var selectedExternalProviderName by remember { mutableStateOf<String?>(null) }
 
     var pendingDownloadModel by remember { mutableStateOf<LocalModel?>(null) }
     var downloadingModelName by remember { mutableStateOf<String?>(null) }
     var downloadProgressPercent by remember { mutableStateOf<Int?>(null) }
     var generationStatus by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        selectedExternalProviderName = aiProviderRepository.getSelectedProvider()?.displayName
+    }
 
     DisposableEffect(settingsPrefs) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
@@ -1614,6 +1643,21 @@ fun ChatScreen(
                     .imePadding(),
                 contentAlignment = Alignment.BottomCenter
             ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    GenerationModeSelector(
+                        mode = generationMode,
+                        selectedProviderName = selectedExternalProviderName,
+                        enabled = !isGenerating,
+                        onModeSelected = { mode ->
+                            generationMode = mode
+                            settingsPrefs.edit().putString(PrefGenerationMode, mode.name).apply()
+                            if (mode == ChatGenerationMode.EXTERNAL_AI_API) {
+                                scope.launch {
+                                    selectedExternalProviderName = aiProviderRepository.getSelectedProvider()?.displayName
+                                }
+                            }
+                        }
+                    )
                 ChatInputBar(
                     value = input,
                     onValueChange = { input = it },
@@ -1703,6 +1747,60 @@ fun ChatScreen(
                                     )
 
                                     dao.updateConversationTime(activeConversationId, now)
+
+                                    if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+                                        if (attachmentsToSend.isNotEmpty()) {
+                                            val message = "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다."
+                                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                            dao.insertMessage(
+                                                MessageEntity(
+                                                    conversationId = activeConversationId,
+                                                    role = "assistant",
+                                                    content = message,
+                                                    createdAt = System.currentTimeMillis()
+                                                )
+                                            )
+                                            dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            return@launch
+                                        }
+
+                                        generationStatus = "외부 AI API 응답을 기다리는 중..."
+                                        val provider = aiProviderRepository.getSelectedProvider()
+                                        selectedExternalProviderName = provider?.displayName
+                                        if (provider == null || !provider.isEnabled) {
+                                            dao.insertMessage(
+                                                MessageEntity(
+                                                    conversationId = activeConversationId,
+                                                    role = "assistant",
+                                                    content = "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정을 확인해 주세요.",
+                                                    createdAt = System.currentTimeMillis()
+                                                )
+                                            )
+                                            dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            return@launch
+                                        }
+
+                                        val externalMessages = buildExternalAiMessages(messages, userInput)
+                                        val response = openAiCompatibleClient.chatCompletion(
+                                            config = provider,
+                                            request = AiChatRequest(
+                                                messages = externalMessages,
+                                                temperature = provider.temperature,
+                                                maxTokens = provider.maxTokens
+                                            )
+                                        )
+                                        generationStatus = "답변 저장 중..."
+                                        dao.insertMessage(
+                                            MessageEntity(
+                                                conversationId = activeConversationId,
+                                                role = "assistant",
+                                                content = response.content.ifBlank { "외부 AI API에서 빈 응답을 받았습니다." },
+                                                createdAt = System.currentTimeMillis()
+                                            )
+                                        )
+                                        dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                        return@launch
+                                    }
 
                                     val previousUserMessage = messages
                                         .asReversed()
@@ -2034,8 +2132,9 @@ fun ChatScreen(
                     }
                 )
             }
-        }
-    ) { innerPadding ->
+            }
+        },
+        content = { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -2211,9 +2310,10 @@ fun ChatScreen(
                     state = displayedPulseState,
                     modifier = Modifier.fillMaxWidth()
                 )
+                }
             }
         }
-    }
+    )
 
     if (showModelDialog) {
         ModelSelectDialog(
@@ -3053,6 +3153,70 @@ private fun ModelPill(
     }
 
 }
+
+@Composable
+private fun GenerationModeSelector(
+    mode: ChatGenerationMode,
+    selectedProviderName: String?,
+    enabled: Boolean,
+    onModeSelected: (ChatGenerationMode) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val label = when (mode) {
+        ChatGenerationMode.LOCAL_MODEL -> "생성 모드: 로컬 모델"
+        ChatGenerationMode.EXTERNAL_AI_API -> "생성 모드: 외부 AI API" +
+            selectedProviderName?.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = enabled) { expanded = true },
+            shape = RoundedCornerShape(8.dp),
+            color = PanelBg
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = label,
+                    color = TextPrimary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(text = "▼", color = TextSecondary, fontSize = 12.sp)
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = MenuBg
+        ) {
+            DropdownMenuItem(
+                text = { Text("로컬 모델", color = TextPrimary) },
+                onClick = {
+                    expanded = false
+                    onModeSelected(ChatGenerationMode.LOCAL_MODEL)
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("외부 AI API", color = TextPrimary) },
+                onClick = {
+                    expanded = false
+                    onModeSelected(ChatGenerationMode.EXTERNAL_AI_API)
+                }
+            )
+        }
+    }
+}
+
 @Composable
 private fun EmptyChatBody(bottomPadding: androidx.compose.ui.unit.Dp) {
     Column(
@@ -7953,6 +8117,33 @@ private fun isLiteRtModelLoadException(error: Throwable): Boolean {
         message.contains("Failed to create engine", ignoreCase = true) ||
         message.contains("litert_compiled_model", ignoreCase = true) ||
         message.contains("INTERNAL", ignoreCase = true)
+}
+
+private fun buildExternalAiMessages(
+    history: List<ChatMessage>,
+    userInput: String
+): List<AiMessage> {
+    return buildList {
+        history.forEach { message ->
+            val role = message.role.toAiRoleOrNull() ?: return@forEach
+            val content = parseMessageAttachments(message.content).body.trim()
+            if (content.isNotBlank()) {
+                add(AiMessage(role = role, content = content))
+            }
+        }
+        if (userInput.isNotBlank()) {
+            add(AiMessage(role = AiRole.USER, content = userInput))
+        }
+    }
+}
+
+private fun String.toAiRoleOrNull(): AiRole? {
+    return when (lowercase(Locale.US)) {
+        "system" -> AiRole.SYSTEM
+        "user" -> AiRole.USER
+        "assistant" -> AiRole.ASSISTANT
+        else -> null
+    }
 }
 
 private fun estimateOutputTokens(text: String): Int {
