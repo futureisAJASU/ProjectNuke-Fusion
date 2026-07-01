@@ -981,7 +981,7 @@ fun ChatScreen(
                         is ExternalAiChatResult.NoProvider -> {
                             selectedExternalProviderName = null
                             generationStatus = "답변 저장 중..."
-                            dao.insertMessage(
+                            val newMessageId = dao.insertMessage(
                                 MessageEntity(
                                     conversationId = activeConversationId,
                                     role = "assistant",
@@ -989,6 +989,16 @@ fun ChatScreen(
                                     createdAt = System.currentTimeMillis()
                                 )
                             )
+                            val groupId = previousUser.id
+                            val updatedVersionState = responseVersionState.copy(
+                                groupByMessageId = responseVersionState.groupByMessageId +
+                                    (targetMessage.id to groupId) +
+                                    (newMessageId to groupId),
+                                activeMessageIdByGroup = responseVersionState.activeMessageIdByGroup +
+                                    (groupId to newMessageId)
+                            )
+                            saveResponseVersionState(context, activeConversationId, updatedVersionState)
+                            responseVersionState = updatedVersionState
                             dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
                         }
                     }
@@ -1894,6 +1904,21 @@ fun ChatScreen(
                                     )
 
                                     dao.updateConversationTime(activeConversationId, now)
+
+                                    if (generationMode == ChatGenerationMode.EXTERNAL_AI_API && attachmentsToSend.isNotEmpty()) {
+                                        val message = "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다."
+                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                        dao.insertMessage(
+                                            MessageEntity(
+                                                conversationId = activeConversationId,
+                                                role = "assistant",
+                                                content = message,
+                                                createdAt = System.currentTimeMillis()
+                                            )
+                                        )
+                                        dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                        return@launch
+                                    }
 
                                     val previousUserMessage = messages
                                         .asReversed()
