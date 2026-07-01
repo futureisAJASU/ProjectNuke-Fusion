@@ -1,10 +1,15 @@
 package com.projectnuke.fusion.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
@@ -17,74 +22,158 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.projectnuke.fusion.ai.model.AiProviderConfig
 
 private val SelectorPanelBg = Color(0xFF171717)
 private val SelectorMenuBg = Color(0xFF202020)
 private val SelectorTextPrimary = Color(0xFFF5F5F5)
 private val SelectorTextSecondary = Color(0xFF9E9E9E)
+private val SelectorBorder = Color(0xFF2F2F2F)
+private val SelectorActiveBg = Color(0xFF2A2A2A)
 
 @Composable
 internal fun GenerationModeSelector(
     mode: ChatGenerationMode,
     selectedProviderName: String?,
+    selectedProviderId: String?,
+    externalProviders: List<AiProviderConfig>,
     enabled: Boolean,
-    onModeSelected: (ChatGenerationMode) -> Unit
+    onModeSelected: (ChatGenerationMode) -> Unit,
+    onExternalProviderSelected: (String) -> Unit
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    val label = when (mode) {
-        ChatGenerationMode.LOCAL_MODEL -> "생성 모드: 로컬 모델"
-        ChatGenerationMode.EXTERNAL_AI_API -> "생성 모드: 외부 AI API" +
-            selectedProviderName?.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
-    }
-    Box(
+    var providerExpanded by remember { mutableStateOf(false) }
+    val enabledProviders = externalProviders.filter { it.isEnabled }
+    val providerLabel = selectedProviderName
+        ?.takeIf { it.isNotBlank() }
+        ?.let { "API: $it" }
+        ?: "API: 제공자 선택"
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(enabled = enabled) { expanded = true },
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-            color = SelectorPanelBg
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = label,
-                    color = SelectorTextPrimary,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(text = "▼", color = SelectorTextSecondary, fontSize = 12.sp)
+            ModeChip(
+                label = "로컬 모델",
+                selected = mode == ChatGenerationMode.LOCAL_MODEL,
+                enabled = enabled,
+                modifier = Modifier.weight(1f),
+                onClick = { onModeSelected(ChatGenerationMode.LOCAL_MODEL) }
+            )
+            ModeChip(
+                label = "외부 AI API",
+                selected = mode == ChatGenerationMode.EXTERNAL_AI_API,
+                enabled = enabled,
+                modifier = Modifier.weight(1f),
+                onClick = { onModeSelected(ChatGenerationMode.EXTERNAL_AI_API) }
+            )
+        }
+
+        if (mode == ChatGenerationMode.EXTERNAL_AI_API) {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = enabled) { providerExpanded = true },
+                    shape = RoundedCornerShape(8.dp),
+                    color = SelectorPanelBg
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = providerLabel,
+                            color = SelectorTextPrimary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "▼",
+                            color = SelectorTextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = providerExpanded,
+                    onDismissRequest = { providerExpanded = false },
+                    containerColor = SelectorMenuBg
+                ) {
+                    if (enabledProviders.isEmpty()) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "사용 가능한 API 제공자가 없습니다.",
+                                    color = SelectorTextSecondary
+                                )
+                            },
+                            onClick = {},
+                            enabled = false
+                        )
+                    } else {
+                        enabledProviders.forEach { provider ->
+                            val selected = provider.id == selectedProviderId
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = buildString {
+                                            if (selected) append("✓ ")
+                                            append("API: ")
+                                            append(provider.displayName)
+                                        },
+                                        color = if (selected) SelectorTextPrimary else SelectorTextSecondary
+                                    )
+                                },
+                                onClick = {
+                                    providerExpanded = false
+                                    onExternalProviderSelected(provider.id)
+                                }
+                            )
+                        }
+                    }
+                }
             }
         }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            containerColor = SelectorMenuBg
-        ) {
-            DropdownMenuItem(
-                text = { Text("로컬 모델", color = SelectorTextPrimary) },
-                onClick = {
-                    expanded = false
-                    onModeSelected(ChatGenerationMode.LOCAL_MODEL)
-                }
-            )
-            DropdownMenuItem(
-                text = { Text("외부 AI API", color = SelectorTextPrimary) },
-                onClick = {
-                    expanded = false
-                    onModeSelected(ChatGenerationMode.EXTERNAL_AI_API)
-                }
-            )
-        }
+    }
+}
+
+@Composable
+private fun ModeChip(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        modifier = modifier
+            .border(width = 1.dp, color = if (selected) SelectorTextPrimary else SelectorBorder, shape = shape)
+            .background(color = if (selected) SelectorActiveBg else SelectorPanelBg, shape = shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            color = if (selected) SelectorTextPrimary else SelectorTextSecondary,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }

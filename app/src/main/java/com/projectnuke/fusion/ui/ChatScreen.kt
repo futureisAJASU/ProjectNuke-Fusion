@@ -101,6 +101,7 @@ import com.projectnuke.fusion.ai.buildExternalAiMessages
 import com.projectnuke.fusion.ai.ExternalAiChatResult
 import com.projectnuke.fusion.ai.ExternalAiChatRunner
 import com.projectnuke.fusion.ai.data.AiProviderRepository
+import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
 import com.projectnuke.fusion.ai.secure.AndroidKeystoreSecretStore
 import com.projectnuke.fusion.data.AppDatabase
@@ -145,6 +146,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -625,6 +627,8 @@ fun ChatScreen(
             }.getOrDefault(ChatGenerationMode.LOCAL_MODEL)
         )
     }
+    var externalProviders by remember { mutableStateOf<List<AiProviderConfig>>(emptyList()) }
+    var selectedExternalProviderId by remember { mutableStateOf<String?>(null) }
     var selectedExternalProviderName by remember { mutableStateOf<String?>(null) }
 
     var pendingDownloadModel by remember { mutableStateOf<LocalModel?>(null) }
@@ -632,8 +636,18 @@ fun ChatScreen(
     var downloadProgressPercent by remember { mutableStateOf<Int?>(null) }
     var generationStatus by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) {
-        selectedExternalProviderName = aiProviderRepository.getSelectedProvider()?.displayName
+    suspend fun refreshExternalProviderState() {
+        val providers = aiProviderRepository.getProviders()
+        val selected = aiProviderRepository.getSelectedProvider()?.takeIf { it.isEnabled }
+        externalProviders = providers
+        selectedExternalProviderId = selected?.id
+        selectedExternalProviderName = selected?.displayName
+    }
+
+    LaunchedEffect(aiProviderRepository) {
+        aiProviderRepository.observeProviderChanges().collect {
+            refreshExternalProviderState()
+        }
     }
 
     DisposableEffect(settingsPrefs) {
@@ -915,7 +929,7 @@ fun ChatScreen(
                         )
                     ) {
                         is ExternalAiChatResult.Success -> {
-                            selectedExternalProviderName = result.providerDisplayName
+                            refreshExternalProviderState()
                             generationStatus = "답변 저장 중..."
                             val newMessageId = dao.insertMessage(
                                 MessageEntity(
@@ -979,7 +993,7 @@ fun ChatScreen(
                         }
 
                         is ExternalAiChatResult.NoProvider -> {
-                            selectedExternalProviderName = null
+                            refreshExternalProviderState()
                             generationStatus = "답변 저장 중..."
                             val newMessageId = dao.insertMessage(
                                 MessageEntity(
@@ -1225,7 +1239,7 @@ fun ChatScreen(
                         )
                     ) {
                         is ExternalAiChatResult.Success -> {
-                            selectedExternalProviderName = result.providerDisplayName
+                            refreshExternalProviderState()
                             memoryCandidateText = result.content.trim()
                             DeveloperLogStore.record(
                                 context,
@@ -1236,7 +1250,7 @@ fun ChatScreen(
                         }
 
                         is ExternalAiChatResult.NoProvider -> {
-                            selectedExternalProviderName = null
+                            refreshExternalProviderState()
                             Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
                         }
 
@@ -1804,14 +1818,26 @@ fun ChatScreen(
                     GenerationModeSelector(
                         mode = generationMode,
                         selectedProviderName = selectedExternalProviderName,
+                        selectedProviderId = selectedExternalProviderId,
+                        externalProviders = externalProviders,
                         enabled = !isGenerating,
                         onModeSelected = { mode ->
                             generationMode = mode
                             settingsPrefs.edit().putString(PrefGenerationMode, mode.name).apply()
                             if (mode == ChatGenerationMode.EXTERNAL_AI_API) {
                                 scope.launch {
-                                    selectedExternalProviderName = aiProviderRepository.getSelectedProvider()?.displayName
+                                    refreshExternalProviderState()
                                 }
+                            }
+                        },
+                        onExternalProviderSelected = { providerId ->
+                            scope.launch {
+                                aiProviderRepository.setSelectedProvider(providerId)
+                                generationMode = ChatGenerationMode.EXTERNAL_AI_API
+                                settingsPrefs.edit()
+                                    .putString(PrefGenerationMode, ChatGenerationMode.EXTERNAL_AI_API.name)
+                                    .apply()
+                                refreshExternalProviderState()
                             }
                         }
                     )
@@ -2046,7 +2072,7 @@ fun ChatScreen(
                                             )
                                         ) {
                                             is ExternalAiChatResult.Success -> {
-                                                selectedExternalProviderName = result.providerDisplayName
+                                                refreshExternalProviderState()
                                                 generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(
                                                     MessageEntity(
@@ -2074,7 +2100,7 @@ fun ChatScreen(
                                             }
 
                                             is ExternalAiChatResult.NoProvider -> {
-                                                selectedExternalProviderName = null
+                                                refreshExternalProviderState()
                                                 generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(
                                                     MessageEntity(

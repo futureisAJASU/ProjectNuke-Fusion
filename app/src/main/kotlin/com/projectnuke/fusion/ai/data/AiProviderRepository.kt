@@ -1,6 +1,7 @@
 package com.projectnuke.fusion.ai.data
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiProviderType
 import com.projectnuke.fusion.ai.provider.AiProviderPresets
@@ -9,6 +10,9 @@ import java.util.UUID
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 
 class AiProviderRepository(
@@ -62,6 +66,19 @@ class AiProviderRepository(
         val providers = getProviders()
         val selectedId = withContext(Dispatchers.IO) { prefs.getString(KeySelectedProvider, null) }
         return providers.firstOrNull { it.id == selectedId } ?: providers.firstOrNull()
+    }
+
+    fun observeProviderChanges(): Flow<Unit> = callbackFlow {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == KeyProviders || key == KeySelectedProvider) {
+                trySend(Unit)
+            }
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        trySend(Unit)
+        awaitClose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
     }
 
     suspend fun setSelectedProvider(id: String) {
