@@ -2,6 +2,7 @@ package com.projectnuke.fusion.ai
 
 import com.projectnuke.fusion.ai.data.AiProviderRepository
 import com.projectnuke.fusion.ai.model.AiChatRequest
+import com.projectnuke.fusion.ai.model.AiMessage
 import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
 import com.projectnuke.fusion.model.ChatMessage
 
@@ -21,6 +22,22 @@ internal class ExternalAiChatRunner(
         hasAttachments: Boolean,
         stripAttachments: (String) -> String
     ): ExternalAiChatResult {
+        val messages = buildExternalAiMessages(
+            history = history,
+            userInput = userInput,
+            stripAttachments = stripAttachments
+        )
+
+        return generateFromMessages(
+            messages = messages,
+            hasAttachments = hasAttachments
+        )
+    }
+
+    suspend fun generateFromMessages(
+        messages: List<AiMessage>,
+        hasAttachments: Boolean = false
+    ): ExternalAiChatResult {
         if (hasAttachments) {
             return ExternalAiChatResult.BlockedAttachment(
                 "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다."
@@ -33,12 +50,6 @@ internal class ExternalAiChatRunner(
                 "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정을 확인해 주세요."
             )
         }
-
-        val messages = buildExternalAiMessages(
-            history = history,
-            userInput = userInput,
-            stripAttachments = stripAttachments
-        )
 
         val response = client.chatCompletion(
             config = provider,

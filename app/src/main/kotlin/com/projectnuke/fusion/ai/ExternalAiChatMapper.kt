@@ -24,6 +24,21 @@ internal fun buildExternalAiMessages(
     }
 }
 
+internal fun buildExternalAiMessages(
+    messages: List<ChatMessage>,
+    stripAttachments: (String) -> String
+): List<AiMessage> {
+    return buildList {
+        messages.forEach { message ->
+            val role = message.role.toAiRoleOrNull() ?: return@forEach
+            val content = stripAttachments(message.content).trim()
+            if (content.isNotBlank()) {
+                add(AiMessage(role = role, content = content))
+            }
+        }
+    }
+}
+
 private fun String.toAiRoleOrNull(): AiRole? {
     return when (lowercase(Locale.US)) {
         "system" -> AiRole.SYSTEM

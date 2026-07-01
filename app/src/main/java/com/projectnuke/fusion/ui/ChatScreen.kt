@@ -97,6 +97,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.net.toUri
+import com.projectnuke.fusion.ai.buildExternalAiMessages
 import com.projectnuke.fusion.ai.ExternalAiChatResult
 import com.projectnuke.fusion.ai.ExternalAiChatRunner
 import com.projectnuke.fusion.ai.data.AiProviderRepository
@@ -877,8 +878,10 @@ fun ChatScreen(
                         )
                     )
                     add(ChatMessage(role = "system", content = fusionSystemPrompt))
-                    selectedModelPath?.let { modelPath ->
-                        add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+                    if (generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
+                        selectedModelPath?.let { modelPath ->
+                            add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+                        }
                     }
                     add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
                     buildSavedMemoryContext(context, settingsPrefs, targetMessage.conversationId, selectedModel).text?.let { memoryContext ->
@@ -899,6 +902,97 @@ fun ChatScreen(
                             )
                         )
                     )
+                }
+
+                if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+                    when (
+                        val result = externalAiChatRunner.generateFromMessages(
+                            messages = buildExternalAiMessages(
+                                messages = currentMessages,
+                                stripAttachments = { parseMessageAttachments(it).body }
+                            ),
+                            hasAttachments = attachmentsToSend.isNotEmpty()
+                        )
+                    ) {
+                        is ExternalAiChatResult.Success -> {
+                            selectedExternalProviderName = result.providerDisplayName
+                            generationStatus = "답변 저장 중..."
+                            val newMessageId = dao.insertMessage(
+                                MessageEntity(
+                                    conversationId = activeConversationId,
+                                    role = "assistant",
+                                    content = result.content,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            val groupId = previousUser.id
+                            val updatedVersionState = responseVersionState.copy(
+                                groupByMessageId = responseVersionState.groupByMessageId +
+                                    (targetMessage.id to groupId) +
+                                    (newMessageId to groupId),
+                                activeMessageIdByGroup = responseVersionState.activeMessageIdByGroup +
+                                    (groupId to newMessageId)
+                            )
+                            saveResponseVersionState(context, activeConversationId, updatedVersionState)
+                            responseVersionState = updatedVersionState
+                            dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                            val versionCount = buildChatTimeline(
+                                messageEntities + MessageEntity(
+                                    id = newMessageId,
+                                    conversationId = activeConversationId,
+                                    role = "assistant",
+                                    content = "",
+                                    createdAt = System.currentTimeMillis()
+                                ),
+                                updatedVersionState
+                            ).filterIsInstance<ChatTimelineItem.AssistantVersions>()
+                                .firstOrNull { it.groupId == groupId }
+                                ?.versions
+                                ?.size
+                                ?: 1
+                            DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 성공", "versions=$versionCount")
+                            Toast.makeText(context, "답변을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
+                        }
+
+                        is ExternalAiChatResult.BlockedAttachment -> {
+                            generationStatus = "답변 저장 중..."
+                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                            val newMessageId = dao.insertMessage(
+                                MessageEntity(
+                                    conversationId = activeConversationId,
+                                    role = "assistant",
+                                    content = result.message,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            val groupId = previousUser.id
+                            val updatedVersionState = responseVersionState.copy(
+                                groupByMessageId = responseVersionState.groupByMessageId +
+                                    (targetMessage.id to groupId) +
+                                    (newMessageId to groupId),
+                                activeMessageIdByGroup = responseVersionState.activeMessageIdByGroup +
+                                    (groupId to newMessageId)
+                            )
+                            saveResponseVersionState(context, activeConversationId, updatedVersionState)
+                            responseVersionState = updatedVersionState
+                            dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                        }
+
+                        is ExternalAiChatResult.NoProvider -> {
+                            selectedExternalProviderName = null
+                            generationStatus = "답변 저장 중..."
+                            dao.insertMessage(
+                                MessageEntity(
+                                    conversationId = activeConversationId,
+                                    role = "assistant",
+                                    content = result.message,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                        }
+                    }
+                    return@launch
                 }
 
                 val activeModelPath = selectedModelPath?.takeIf { File(it).exists() }
@@ -1091,8 +1185,10 @@ fun ChatScreen(
                     )
                 )
             )
-            selectedModelPath?.let { modelPath ->
-                add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+            if (generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
+                selectedModelPath?.let { modelPath ->
+                    add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+                }
             }
             add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"))
             buildConversationSummaryContextText(loadConversationSummary(context, conversationId))?.let { summaryContext ->
@@ -1100,6 +1196,57 @@ fun ChatScreen(
             }
             addAll(recentVisibleMessages)
             add(ChatMessage(role = "user", content = extractionPrompt))
+        }
+
+        if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+            isGenerating = true
+            extractingMemoryCandidates = true
+            generationStatus = "메모리 후보를 추출하는 중입니다."
+            DeveloperLogStore.record(context, "memory", "메모리 후보 추출 시작", "conversationId=$conversationId")
+
+            scope.launch {
+                try {
+                    when (
+                        val result = externalAiChatRunner.generateFromMessages(
+                            messages = buildExternalAiMessages(
+                                messages = currentMessages,
+                                stripAttachments = { parseMessageAttachments(it).body }
+                            )
+                        )
+                    ) {
+                        is ExternalAiChatResult.Success -> {
+                            selectedExternalProviderName = result.providerDisplayName
+                            memoryCandidateText = result.content.trim()
+                            DeveloperLogStore.record(
+                                context,
+                                "memory",
+                                "메모리 후보 추출 성공",
+                                "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
+                            )
+                        }
+
+                        is ExternalAiChatResult.NoProvider -> {
+                            selectedExternalProviderName = null
+                            Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+                        }
+
+                        is ExternalAiChatResult.BlockedAttachment -> {
+                            Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("FusionMemory", "Memory candidate extraction failed", e)
+                    DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", e::class.java.simpleName)
+                    Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                } finally {
+                    generationStatus = null
+                    extractingMemoryCandidates = false
+                    isGenerating = false
+                    streamingAssistantText = null
+                    streamingMetricsLine = null
+                }
+            }
+            return
         }
 
         val activeModelPath = selectedModelPath?.takeIf { File(it).exists() }
@@ -1748,60 +1895,6 @@ fun ChatScreen(
 
                                     dao.updateConversationTime(activeConversationId, now)
 
-                                    if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
-                                        generationStatus = "외부 AI API 응답을 기다리는 중..."
-
-                                        when (
-                                            val result = externalAiChatRunner.generate(
-                                                history = messages,
-                                                userInput = userInput,
-                                                hasAttachments = attachmentsToSend.isNotEmpty(),
-                                                stripAttachments = { parseMessageAttachments(it).body }
-                                            )
-                                        ) {
-                                            is ExternalAiChatResult.Success -> {
-                                                selectedExternalProviderName = result.providerDisplayName
-                                                generationStatus = "답변 저장 중..."
-                                                dao.insertMessage(
-                                                    MessageEntity(
-                                                        conversationId = activeConversationId,
-                                                        role = "assistant",
-                                                        content = result.content,
-                                                        createdAt = System.currentTimeMillis()
-                                                    )
-                                                )
-                                                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
-                                            }
-
-                                            is ExternalAiChatResult.BlockedAttachment -> {
-                                                Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                                                dao.insertMessage(
-                                                    MessageEntity(
-                                                        conversationId = activeConversationId,
-                                                        role = "assistant",
-                                                        content = result.message,
-                                                        createdAt = System.currentTimeMillis()
-                                                    )
-                                                )
-                                                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
-                                            }
-
-                                            is ExternalAiChatResult.NoProvider -> {
-                                                selectedExternalProviderName = null
-                                                dao.insertMessage(
-                                                    MessageEntity(
-                                                        conversationId = activeConversationId,
-                                                        role = "assistant",
-                                                        content = result.message,
-                                                        createdAt = System.currentTimeMillis()
-                                                    )
-                                                )
-                                                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
-                                            }
-                                        }
-                                        return@launch
-                                    }
-
                                     val previousUserMessage = messages
                                         .asReversed()
                                         .firstOrNull { it.role == "user" }
@@ -1872,13 +1965,15 @@ fun ChatScreen(
                                             )
                                         )
 
-                                        selectedModelPath?.let { modelPath ->
-                                            add(
-                                                ChatMessage(
-                                                    role = "system",
-                                                    content = "FUSION_SELECTED_MODEL_PATH=$modelPath"
+                                        if (generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
+                                            selectedModelPath?.let { modelPath ->
+                                                add(
+                                                    ChatMessage(
+                                                        role = "system",
+                                                        content = "FUSION_SELECTED_MODEL_PATH=$modelPath"
+                                                    )
                                                 )
-                                            )
+                                            }
                                         }
 
                                         add(
@@ -1911,6 +2006,63 @@ fun ChatScreen(
                                                 content = finalUserContent
                                             )
                                         )
+                                    }
+
+                                    if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+                                        generationStatus = "외부 AI API 응답을 기다리는 중..."
+
+                                        when (
+                                            val result = externalAiChatRunner.generateFromMessages(
+                                                messages = buildExternalAiMessages(
+                                                    messages = currentMessages,
+                                                    stripAttachments = { parseMessageAttachments(it).body }
+                                                ),
+                                                hasAttachments = attachmentsToSend.isNotEmpty()
+                                            )
+                                        ) {
+                                            is ExternalAiChatResult.Success -> {
+                                                selectedExternalProviderName = result.providerDisplayName
+                                                generationStatus = "답변 저장 중..."
+                                                dao.insertMessage(
+                                                    MessageEntity(
+                                                        conversationId = activeConversationId,
+                                                        role = "assistant",
+                                                        content = result.content,
+                                                        createdAt = System.currentTimeMillis()
+                                                    )
+                                                )
+                                                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            }
+
+                                            is ExternalAiChatResult.BlockedAttachment -> {
+                                                Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                                generationStatus = "답변 저장 중..."
+                                                dao.insertMessage(
+                                                    MessageEntity(
+                                                        conversationId = activeConversationId,
+                                                        role = "assistant",
+                                                        content = result.message,
+                                                        createdAt = System.currentTimeMillis()
+                                                    )
+                                                )
+                                                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            }
+
+                                            is ExternalAiChatResult.NoProvider -> {
+                                                selectedExternalProviderName = null
+                                                generationStatus = "답변 저장 중..."
+                                                dao.insertMessage(
+                                                    MessageEntity(
+                                                        conversationId = activeConversationId,
+                                                        role = "assistant",
+                                                        content = result.message,
+                                                        createdAt = System.currentTimeMillis()
+                                                    )
+                                                )
+                                                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            }
+                                        }
+                                        return@launch
                                     }
 
                                     val activeModelPath = selectedModelPath?.takeIf { File(it).exists() }
