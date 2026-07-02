@@ -1,6 +1,5 @@
 package com.projectnuke.fusion.ai.ui
 
-import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -51,10 +50,32 @@ import kotlinx.coroutines.launch
 
 private val PanelColor = Color(0xFF151515)
 private val CardColor = Color(0xFF202020)
+private val CardSelectedColor = Color(0xFF24384A)
 private val TextPrimary = Color(0xFFF4F4F4)
 private val TextSecondary = Color(0xFFB8B8B8)
 private val AccentColor = Color(0xFF8CCBFF)
+private val SuccessColor = Color(0xFF9BE2AF)
+private val WarningColor = Color(0xFFFFD38A)
 private val DangerColor = Color(0xFFFF8A8A)
+
+private data class ProviderStatus(
+    val title: String,
+    val detail: String,
+    val color: Color
+)
+
+private data class ProviderDraft(
+    val id: String,
+    val type: AiProviderType,
+    val displayName: String,
+    val baseUrl: String,
+    val modelId: String,
+    val apiKeySecretId: String?,
+    val apiKeyInput: String,
+    val isEnabled: Boolean,
+    val temperatureText: String,
+    val maxTokensText: String
+)
 
 @Composable
 fun AiProviderSettingsScreen(
@@ -90,35 +111,83 @@ fun AiProviderSettingsScreen(
         enabled = target.isEnabled
         temperatureText = target.temperature.toString()
         maxTokensText = target.maxTokens?.toString().orEmpty()
-        statusText = if (target.apiKeySecretId == null) "API 키가 저장되어 있지 않습니다." else "API 키가 저장되어 있습니다."
+        statusText = null
     }
 
-    fun currentConfig(): AiProviderConfig? {
+    fun currentDraft(): ProviderDraft? {
         val id = selectedId ?: return null
         val previous = providers.firstOrNull { it.id == id }
-        return AiProviderConfig(
+        return ProviderDraft(
             id = id,
             type = type,
             displayName = displayName.trim(),
             baseUrl = baseUrl.trim(),
             modelId = modelId.trim(),
             apiKeySecretId = previous?.apiKeySecretId,
+            apiKeyInput = apiKey.trim(),
             isEnabled = enabled,
+            temperatureText = temperatureText.trim(),
+            maxTokensText = maxTokensText.trim()
+        )
+    }
+
+    fun ProviderDraft.toConfig(): AiProviderConfig {
+        return AiProviderConfig(
+            id = id,
+            type = type,
+            displayName = displayName,
+            baseUrl = baseUrl,
+            modelId = modelId,
+            apiKeySecretId = apiKeySecretId,
+            isEnabled = isEnabled,
             temperature = temperatureText.toDoubleOrNull() ?: 0.7,
             maxTokens = maxTokensText.toIntOrNull()
         )
     }
 
-    fun refreshProviders() {
-        scope.launch {
-            providers = repository.getProviders()
-            loadEditor(repository.getSelectedProvider() ?: providers.firstOrNull())
+    fun buildProviderStatus(config: AiProviderConfig, hasApiKey: Boolean): ProviderStatus {
+        if (!config.isEnabled) {
+            return ProviderStatus("비활성화됨", "이 제공자는 현재 사용하지 않습니다.", TextSecondary)
+        }
+        val missing = buildList {
+            if (!hasApiKey) add("API 키")
+            if (config.baseUrl.isBlank()) add("Base URL")
+            if (config.modelId.isBlank()) add("모델 ID")
+        }
+        if (missing.isEmpty()) {
+            return ProviderStatus("사용 가능", "즉시 외부 AI API 대화에 사용할 수 있습니다.", SuccessColor)
+        }
+        return ProviderStatus(
+            title = "설정 필요",
+            detail = "${missing.joinToString(", ")} 항목을 확인해 주세요.",
+            color = WarningColor
+        )
+    }
+
+    fun validateForSave(draft: ProviderDraft): String? {
+        return when {
+            draft.displayName.isBlank() -> "표시 이름을 입력해 주세요."
+            draft.baseUrl.isBlank() -> "Base URL을 입력해 주세요."
+            draft.modelId.isBlank() -> "모델 ID를 입력해 주세요."
+            else -> null
         }
     }
 
-    LaunchedEffect(Unit) {
+    suspend fun refreshProviders() {
         providers = repository.getProviders()
         loadEditor(repository.getSelectedProvider() ?: providers.firstOrNull())
+    }
+
+    LaunchedEffect(Unit) {
+        refreshProviders()
+    }
+
+    val currentDraft = currentDraft()
+    val editorStatus = currentDraft?.let {
+        buildProviderStatus(
+            config = it.toConfig(),
+            hasApiKey = it.apiKeyInput.isNotBlank() || !it.apiKeySecretId.isNullOrBlank()
+        )
     }
 
     AlertDialog(
@@ -126,7 +195,7 @@ fun AiProviderSettingsScreen(
         containerColor = PanelColor,
         titleContentColor = TextPrimary,
         textContentColor = TextPrimary,
-        title = { Text("AI API 제공자 설정") },
+        title = { Text("외부 AI API 설정") },
         text = {
             LazyColumn(
                 modifier = Modifier.heightIn(max = 620.dp),
@@ -134,14 +203,14 @@ fun AiProviderSettingsScreen(
             ) {
                 item {
                     Text(
-                        text = "Fusion은 AI 모델을 직접 제공하지 않습니다. 사용자가 직접 발급한 API 키를 사용하여 외부 OpenAI 호환 API 제공자에 연결합니다. API 키, 사용량, 요금, 모델 라이선스, 이용 약관은 각 API 제공자의 정책을 따릅니다. 입력한 API 키는 기기 내에 암호화되어 저장되며 Fusion 서버로 전송되지 않습니다. 단, 프롬프트와 첨부 데이터는 선택한 API 제공자에게 전송됩니다.",
+                        text = "Fusion은 외부 AI 모델을 직접 제공하지 않습니다. 사용자가 직접 발급한 OpenAI 호환 API 정보를 기기 내에 저장하여 연결합니다. 입력한 API 키는 Android Keystore로 보호되며 Fusion 서버로 전송되지 않습니다.",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         lineHeight = 17.sp
                     )
                 }
 
-                item { SectionTitle("제공자") }
+                item { SectionTitle("제공자 목록") }
                 items(providers, key = { it.id }) { provider ->
                     ProviderRow(
                         config = provider,
@@ -198,7 +267,7 @@ fun AiProviderSettingsScreen(
                         value = apiKey,
                         onValueChange = { apiKey = it },
                         label = { Text("API 키") },
-                        placeholder = { Text("새 API 키를 입력하면 저장된 키가 교체됩니다.") },
+                        placeholder = { Text("새 API 키를 입력하면 저장된 키를 교체합니다.") },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth()
@@ -235,7 +304,15 @@ fun AiProviderSettingsScreen(
                         )
                     }
                 }
-
+                editorStatus?.let { providerStatus ->
+                    item {
+                        StatusCard(
+                            title = providerStatus.title,
+                            detail = providerStatus.detail,
+                            color = providerStatus.color
+                        )
+                    }
+                }
                 statusText?.let { message ->
                     item { Text(message, color = TextSecondary, fontSize = 12.sp) }
                 }
@@ -245,19 +322,19 @@ fun AiProviderSettingsScreen(
                         Button(
                             enabled = !busy,
                             onClick = {
-                                val config = currentConfig()
-                                if (config == null || config.displayName.isBlank() || config.baseUrl.isBlank() || config.modelId.isBlank()) {
-                                    statusText = "표시 이름, Base URL, 모델 ID를 입력해 주세요."
+                                val draft = currentDraft ?: return@Button
+                                validateForSave(draft)?.let {
+                                    statusText = it
                                     return@Button
                                 }
                                 busy = true
                                 scope.launch {
-                                    repository.saveProvider(config, apiKey.takeIf { it.isNotBlank() })
-                                    repository.setSelectedProvider(config.id)
-                                    providers = repository.getProviders()
+                                    repository.saveProvider(draft.toConfig(), draft.apiKeyInput.ifBlank { null })
+                                    repository.setSelectedProvider(draft.id)
+                                    refreshProviders()
                                     apiKey = ""
                                     busy = false
-                                    statusText = "저장되었습니다."
+                                    statusText = "설정을 저장했습니다."
                                 }
                             }
                         ) { Text("저장") }
@@ -266,15 +343,22 @@ fun AiProviderSettingsScreen(
                             enabled = !busy,
                             colors = ButtonDefaults.buttonColors(containerColor = AccentColor, contentColor = Color.Black),
                             onClick = {
-                                val config = currentConfig()
-                                if (config == null) return@Button
+                                val draft = currentDraft ?: return@Button
+                                validateForSave(draft)?.let {
+                                    statusText = it
+                                    return@Button
+                                }
+                                if (draft.apiKeyInput.isBlank() && draft.apiKeySecretId.isNullOrBlank()) {
+                                    statusText = "API 키를 입력한 뒤 연결 테스트를 진행해 주세요."
+                                    return@Button
+                                }
                                 busy = true
                                 scope.launch {
-                                    val savedConfig = if (apiKey.isNotBlank()) {
-                                        repository.saveProvider(config, apiKey)
-                                        repository.getProviders().firstOrNull { it.id == config.id } ?: config
+                                    val savedConfig = if (draft.apiKeyInput.isNotBlank()) {
+                                        repository.saveProvider(draft.toConfig(), draft.apiKeyInput)
+                                        repository.getProviders().firstOrNull { it.id == draft.id } ?: draft.toConfig()
                                     } else {
-                                        config
+                                        draft.toConfig()
                                     }
                                     val result = tester(savedConfig)
                                     statusText = result.getOrElse { it.message ?: "연결 테스트에 실패했습니다." }
@@ -291,16 +375,16 @@ fun AiProviderSettingsScreen(
                         TextButton(
                             enabled = !busy,
                             onClick = {
-                                val config = currentConfig() ?: return@TextButton
-                                val secretId = config.apiKeySecretId
-                                if (secretId == null) {
+                                val draft = currentDraft ?: return@TextButton
+                                val secretId = draft.apiKeySecretId
+                                if (secretId.isNullOrBlank()) {
                                     statusText = "삭제할 API 키가 없습니다."
                                     return@TextButton
                                 }
                                 busy = true
                                 scope.launch {
                                     secretStore.deleteSecret(secretId)
-                                    repository.saveProvider(config.copy(apiKeySecretId = null), rawApiKey = null)
+                                    repository.saveProvider(draft.toConfig().copy(apiKeySecretId = null), rawApiKey = null)
                                     refreshProviders()
                                     busy = false
                                     statusText = "저장된 API 키를 삭제했습니다."
@@ -313,14 +397,13 @@ fun AiProviderSettingsScreen(
                             onClick = {
                                 val id = selectedId ?: return@TextButton
                                 if (id in AiProviderPresets.defaults.map { it.id }) {
-                                    Toast.makeText(context, "기본 제공자는 삭제하지 않고 비활성화해 주세요.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "기본 제공자는 삭제할 수 없습니다. 비활성화로 관리해 주세요.", Toast.LENGTH_SHORT).show()
                                     return@TextButton
                                 }
                                 busy = true
                                 scope.launch {
                                     repository.deleteProvider(id)
-                                    providers = repository.getProviders()
-                                    loadEditor(repository.getSelectedProvider() ?: providers.firstOrNull())
+                                    refreshProviders()
                                     busy = false
                                 }
                             }
@@ -343,22 +426,60 @@ private fun ProviderRow(
     selected: Boolean,
     onClick: () -> Unit
 ) {
+    val status = when {
+        !config.isEnabled -> ProviderStatus("비활성화됨", "현재 사용하지 않습니다.", TextSecondary)
+        config.apiKeySecretId.isNullOrBlank() && config.baseUrl.isBlank() && config.modelId.isBlank() ->
+            ProviderStatus("설정 필요", "API 키, Base URL, 모델 ID가 필요합니다.", WarningColor)
+        config.apiKeySecretId.isNullOrBlank() ->
+            ProviderStatus("설정 필요", "API 키가 필요합니다.", WarningColor)
+        config.baseUrl.isBlank() ->
+            ProviderStatus("설정 필요", "Base URL이 필요합니다.", WarningColor)
+        config.modelId.isBlank() ->
+            ProviderStatus("설정 필요", "모델 ID가 필요합니다.", WarningColor)
+        else -> ProviderStatus("사용 가능", "외부 AI API 대화에 사용할 수 있습니다.", SuccessColor)
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFF24384A) else CardColor)
+        colors = CardDefaults.cardColors(containerColor = if (selected) CardSelectedColor else CardColor)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(config.displayName, color = TextPrimary, fontWeight = FontWeight.SemiBold)
+            Text(config.displayName.ifBlank { "이름 없는 제공자" }, color = TextPrimary, fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(3.dp))
-            Text(config.modelId.ifBlank { "모델 ID가 필요합니다." }, color = TextSecondary, fontSize = 12.sp)
             Text(
-                if (config.apiKeySecretId == null) "API 키 없음" else "API 키 저장됨",
+                config.baseUrl.ifBlank { "Base URL이 아직 없습니다." },
                 color = TextSecondary,
+                fontSize = 12.sp,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "${status.title} · ${status.detail}",
+                color = status.color,
                 fontSize = 12.sp
             )
+        }
+    }
+}
+
+@Composable
+private fun StatusCard(
+    title: String,
+    detail: String,
+    color: Color
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = CardColor)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(title, color = color, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(detail, color = TextSecondary, fontSize = 12.sp)
         }
     }
 }

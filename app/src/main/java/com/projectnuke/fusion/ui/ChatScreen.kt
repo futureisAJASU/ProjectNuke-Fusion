@@ -645,10 +645,152 @@ fun ChatScreen(
 
     suspend fun refreshExternalProviderState() {
         val providers = aiProviderRepository.getProviders()
-        val selected = aiProviderRepository.getSelectedProvider()?.takeIf(::isRunnableExternalProvider)
+        val selected = aiProviderRepository.getSelectedRunnableProvider()
         externalProviders = providers
         selectedExternalProviderId = selected?.id
         selectedExternalProviderName = selected?.displayName
+    }
+
+    suspend fun runExternalAiRequest(
+        currentMessages: List<ChatMessage>,
+        hasAttachments: Boolean = false
+    ): ExternalAiChatResult {
+        return externalAiChatRunner.generateFromMessages(
+            messages = buildExternalAiMessages(
+                messages = currentMessages,
+                stripAttachments = { parseMessageAttachments(it).body }
+            ),
+            hasAttachments = hasAttachments
+        )
+    }
+
+    suspend fun insertAssistantConversationMessage(
+        conversationId: Long,
+        content: String
+    ) {
+        dao.insertMessage(
+            MessageEntity(
+                conversationId = conversationId,
+                role = "assistant",
+                content = content,
+                createdAt = System.currentTimeMillis()
+            )
+        )
+        dao.updateConversationTime(conversationId, System.currentTimeMillis())
+    }
+
+    suspend fun handleExternalSendResult(
+        conversationId: Long,
+        result: ExternalAiChatResult
+    ) {
+        when (result) {
+            is ExternalAiChatResult.Success -> {
+                refreshExternalProviderState()
+                generationStatus = "응답 저장 중..."
+                insertAssistantConversationMessage(conversationId, result.content)
+            }
+
+            is ExternalAiChatResult.BlockedAttachment -> {
+                Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                generationStatus = "응답 저장 중..."
+                insertAssistantConversationMessage(conversationId, result.message)
+            }
+
+            is ExternalAiChatResult.NoProvider -> {
+                refreshExternalProviderState()
+                generationStatus = "응답 저장 중..."
+                insertAssistantConversationMessage(conversationId, result.message)
+            }
+        }
+    }
+
+    suspend fun handleExternalRegenerationResult(
+        conversationId: Long,
+        targetMessage: MessageEntity,
+        previousUser: MessageEntity,
+        result: ExternalAiChatResult,
+        currentResponseVersionState: ResponseVersionState,
+        currentMessageEntities: List<MessageEntity>
+    ): ResponseVersionState {
+        if (result is ExternalAiChatResult.Success) {
+            refreshExternalProviderState()
+        }
+        if (result is ExternalAiChatResult.NoProvider) {
+            refreshExternalProviderState()
+        }
+        generationStatus = "응답 저장 중..."
+        if (result is ExternalAiChatResult.BlockedAttachment) {
+            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+        }
+        val content = when (result) {
+            is ExternalAiChatResult.Success -> result.content
+            is ExternalAiChatResult.BlockedAttachment -> result.message
+            is ExternalAiChatResult.NoProvider -> result.message
+        }
+        val newMessageId = dao.insertMessage(
+            MessageEntity(
+                conversationId = conversationId,
+                role = "assistant",
+                content = content,
+                createdAt = System.currentTimeMillis()
+            )
+        )
+        val groupId = previousUser.id
+        val updatedVersionState = currentResponseVersionState.copy(
+            groupByMessageId = currentResponseVersionState.groupByMessageId +
+                (targetMessage.id to groupId) +
+                (newMessageId to groupId),
+            activeMessageIdByGroup = currentResponseVersionState.activeMessageIdByGroup +
+                (groupId to newMessageId)
+        )
+        saveResponseVersionState(context, conversationId, updatedVersionState)
+        dao.updateConversationTime(conversationId, System.currentTimeMillis())
+        if (result is ExternalAiChatResult.Success) {
+            val versionCount = buildChatTimeline(
+                currentMessageEntities + MessageEntity(
+                    id = newMessageId,
+                    conversationId = conversationId,
+                    role = "assistant",
+                    content = "",
+                    createdAt = System.currentTimeMillis()
+                ),
+                updatedVersionState
+            ).filterIsInstance<ChatTimelineItem.AssistantVersions>()
+                .firstOrNull { it.groupId == groupId }
+                ?.versions
+                ?.size
+                ?: 1
+            DeveloperLogStore.record(context, "regeneration", "응답 다시 생성 성공", "versions=$versionCount")
+            Toast.makeText(context, "응답을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
+        }
+        return updatedVersionState
+    }
+
+    suspend fun handleExternalMemoryExtractionResult(
+        conversationId: Long,
+        result: ExternalAiChatResult
+    ) {
+        when (result) {
+            is ExternalAiChatResult.Success -> {
+                refreshExternalProviderState()
+                memoryCandidateText = result.content.trim()
+                DeveloperLogStore.record(
+                    context,
+                    "memory",
+                    "메모리 후보 추출 성공",
+                    "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
+                )
+            }
+
+            is ExternalAiChatResult.NoProvider -> {
+                refreshExternalProviderState()
+                Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+            }
+
+            is ExternalAiChatResult.BlockedAttachment -> {
+                Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     LaunchedEffect(aiProviderRepository) {
@@ -927,11 +1069,8 @@ fun ChatScreen(
 
                 if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
                     when (
-                        val result = externalAiChatRunner.generateFromMessages(
-                            messages = buildExternalAiMessages(
-                                messages = currentMessages,
-                                stripAttachments = { parseMessageAttachments(it).body }
-                            ),
+                        val result = runExternalAiRequest(
+                            currentMessages = currentMessages,
                             hasAttachments = attachmentsToSend.isNotEmpty()
                         )
                     ) {
@@ -1238,11 +1377,8 @@ fun ChatScreen(
             scope.launch {
                 try {
                     when (
-                        val result = externalAiChatRunner.generateFromMessages(
-                            messages = buildExternalAiMessages(
-                                messages = currentMessages,
-                                stripAttachments = { parseMessageAttachments(it).body }
-                            )
+                        val result = runExternalAiRequest(
+                            currentMessages = currentMessages
                         )
                     ) {
                         is ExternalAiChatResult.Success -> {
@@ -2070,11 +2206,8 @@ fun ChatScreen(
                                         generationStatus = "외부 AI API 응답을 기다리는 중..."
 
                                         when (
-                                            val result = externalAiChatRunner.generateFromMessages(
-                                                messages = buildExternalAiMessages(
-                                                    messages = currentMessages,
-                                                    stripAttachments = { parseMessageAttachments(it).body }
-                                                ),
+                                            val result = runExternalAiRequest(
+                                                currentMessages = currentMessages,
                                                 hasAttachments = attachmentsToSend.isNotEmpty()
                                             )
                                         ) {

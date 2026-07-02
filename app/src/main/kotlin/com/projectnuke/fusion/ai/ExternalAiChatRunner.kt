@@ -44,12 +44,10 @@ internal class ExternalAiChatRunner(
             )
         }
 
-        val provider = providerRepository.getSelectedProvider()
-        if (provider == null || !provider.isEnabled) {
-            return ExternalAiChatResult.NoProvider(
-                "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정을 확인해 주세요."
+        val provider = providerRepository.getSelectedRunnableProvider()
+            ?: return ExternalAiChatResult.NoProvider(
+                "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정에서 필수 항목을 확인해 주세요."
             )
-        }
 
         val response = client.chatCompletion(
             config = provider,

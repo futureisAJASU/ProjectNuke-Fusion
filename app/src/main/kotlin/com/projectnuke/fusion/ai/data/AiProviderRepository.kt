@@ -68,6 +68,20 @@ class AiProviderRepository(
         return providers.firstOrNull { it.id == selectedId } ?: providers.firstOrNull()
     }
 
+    suspend fun getSelectedRunnableProvider(): AiProviderConfig? {
+        val providers = getProviders()
+        val selectedId = withContext(Dispatchers.IO) { prefs.getString(KeySelectedProvider, null) }
+        val runnableProviders = providers.filter(::isRunnableProvider)
+        val resolved = runnableProviders.firstOrNull { it.id == selectedId } ?: runnableProviders.firstOrNull()
+        withContext(Dispatchers.IO) {
+            val normalizedId = resolved?.id
+            if (selectedId != normalizedId) {
+                prefs.edit().putString(KeySelectedProvider, normalizedId).apply()
+            }
+        }
+        return resolved
+    }
+
     fun observeProviderChanges(): Flow<Unit> = callbackFlow {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (key == KeyProviders || key == KeySelectedProvider) {
@@ -85,6 +99,13 @@ class AiProviderRepository(
         withContext(Dispatchers.IO) {
             prefs.edit().putString(KeySelectedProvider, id).apply()
         }
+    }
+
+    private fun isRunnableProvider(provider: AiProviderConfig): Boolean {
+        return provider.isEnabled &&
+            !provider.apiKeySecretId.isNullOrBlank() &&
+            provider.baseUrl.isNotBlank() &&
+            provider.modelId.isNotBlank()
     }
 
     private fun parseProviders(raw: String): List<AiProviderConfig> {

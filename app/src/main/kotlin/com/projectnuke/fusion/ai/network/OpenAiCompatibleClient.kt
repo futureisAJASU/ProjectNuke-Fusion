@@ -2,12 +2,12 @@ package com.projectnuke.fusion.ai.network
 
 import com.projectnuke.fusion.ai.model.AiChatRequest
 import com.projectnuke.fusion.ai.model.AiChatResponse
-import com.projectnuke.fusion.ai.model.AiMessage
 import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiRole
 import com.projectnuke.fusion.ai.secure.SecretStore
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import org.json.JSONArray
 import org.json.JSONObject
@@ -21,11 +21,19 @@ class OpenAiCompatibleClient(
         config: AiProviderConfig,
         request: AiChatRequest
     ): AiChatResponse {
+        val normalizedBaseUrl = normalizeBaseUrl(config.baseUrl)
+        if (normalizedBaseUrl.isBlank()) {
+            throw AiProviderClientException("Base URL을 입력해 주세요.")
+        }
+        if (config.modelId.isBlank()) {
+            throw AiProviderClientException("모델 ID를 입력해 주세요.")
+        }
+
         val secretId = config.apiKeySecretId?.takeIf { it.isNotBlank() }
-            ?: throw AiProviderClientException("API 키가 저장되어 있지 않습니다.")
+            ?: throw AiProviderClientException("API 키를 입력해 주세요.")
         val apiKey = secretStore.getSecret(secretId)?.takeIf { it.isNotBlank() }
-            ?: throw AiProviderClientException("API 키가 저장되어 있지 않습니다.")
-        val endpoint = chatCompletionsUrl(config.baseUrl)
+            ?: throw AiProviderClientException("API 키를 입력해 주세요.")
+        val endpoint = "${normalizedBaseUrl}chat/completions"
 
         return withContext(Dispatchers.IO) {
             val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -49,15 +57,17 @@ class OpenAiCompatibleClient(
                     connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
                 }
                 if (status !in 200..299) {
-                    throw AiProviderClientException(safeHttpError(status, responseText))
+                    throw AiProviderClientException(buildHttpErrorMessage(status, responseText))
                 }
                 parseResponse(responseText)
             } catch (e: AiProviderClientException) {
                 throw e
+            } catch (_: SocketTimeoutException) {
+                throw AiProviderClientException("외부 AI API 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.")
             } catch (_: IOException) {
-                throw AiProviderClientException("API 제공자에 연결할 수 없습니다.")
+                throw AiProviderClientException("네트워크 연결에 실패했습니다. 인터넷 연결과 Base URL을 확인해 주세요.")
             } catch (_: Exception) {
-                throw AiProviderClientException("응답을 처리할 수 없습니다.")
+                throw AiProviderClientException("외부 AI API 응답을 처리할 수 없습니다.")
             } finally {
                 connection.disconnect()
             }
@@ -94,14 +104,8 @@ class OpenAiCompatibleClient(
         )
     }
 
-    private fun chatCompletionsUrl(baseUrl: String): String {
-        val normalized = normalizeBaseUrl(baseUrl)
-        if (normalized.isBlank()) throw AiProviderClientException("Base URL을 입력해 주세요.")
-        return "${normalized}chat/completions"
-    }
-
     private fun normalizeBaseUrl(baseUrl: String): String {
-        return baseUrl.trim().trimEnd('/') + "/"
+        return baseUrl.trim().trimEnd('/').takeIf { it.isNotBlank() }?.plus("/") ?: ""
     }
 
     private fun AiRole.toOpenAiRole(): String {
@@ -112,17 +116,30 @@ class OpenAiCompatibleClient(
         }
     }
 
-    private fun safeHttpError(status: Int, raw: String): String {
-        val message = runCatching {
+    private fun buildHttpErrorMessage(status: Int, raw: String): String {
+        val providerMessage = extractProviderErrorMessage(raw)
+        return when (status) {
+            HttpURLConnection.HTTP_UNAUTHORIZED,
+            HttpURLConnection.HTTP_FORBIDDEN -> "인증에 실패했습니다. API 키와 권한 설정을 확인해 주세요."
+            429 -> "요청 한도를 초과했습니다. 잠시 후 다시 시도해 주세요."
+            in 500..599 -> "외부 AI API 서버에 일시적인 문제가 있습니다. 잠시 후 다시 시도해 주세요."
+            else -> providerMessage?.let {
+                "외부 AI API 요청에 실패했습니다. $it"
+            } ?: "외부 AI API 요청에 실패했습니다. 상태 코드: $status"
+        }
+    }
+
+    private fun extractProviderErrorMessage(raw: String): String? {
+        return runCatching {
             val json = JSONObject(raw)
             json.optJSONObject("error")?.optString("message")
                 ?: json.optString("message")
-        }.getOrNull()?.takeIf { it.isNotBlank() }
-        return if (message.isNullOrBlank()) {
-            "API 요청이 실패했습니다. 상태 코드: $status"
-        } else {
-            "API 요청이 실패했습니다. 상태 코드: $status, 메시지: ${message.take(180)}"
-        }
+        }.getOrNull()
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.replace(Regex("Bearer\\s+[A-Za-z0-9._\\-]+"), "Bearer [redacted]")
+            ?.replace(Regex("(?i)authorization\\s*:\\s*[^\\s,]+"), "Authorization: [redacted]")
+            ?.take(180)
     }
 
     private companion object {

@@ -46,16 +46,12 @@ internal fun GenerationModeSelector(
     onExternalProviderSelected: (String) -> Unit
 ) {
     var providerExpanded by remember { mutableStateOf(false) }
-    val runnableProviders = externalProviders.filter { provider ->
-        provider.isEnabled &&
-            !provider.apiKeySecretId.isNullOrBlank() &&
-            provider.baseUrl.isNotBlank() &&
-            provider.modelId.isNotBlank()
+    val runnableProviders = externalProviders.filter(::isRunnableExternalProvider)
+    val providerLabel = when {
+        runnableProviders.isEmpty() -> "외부 AI API 설정이 필요합니다."
+        !selectedProviderName.isNullOrBlank() -> "API: $selectedProviderName"
+        else -> "외부 AI API 제공자를 선택해 주세요."
     }
-    val providerLabel = selectedProviderName
-        ?.takeIf { it.isNotBlank() }
-        ?.let { "API: $it" }
-        ?: "API: 제공자를 설정해 주세요."
 
     Column(
         modifier = Modifier
@@ -88,7 +84,7 @@ internal fun GenerationModeSelector(
                 Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(enabled = enabled) { providerExpanded = true },
+                        .clickable(enabled = enabled && runnableProviders.isNotEmpty()) { providerExpanded = true },
                     shape = RoundedCornerShape(8.dp),
                     color = SelectorPanelBg
                 ) {
@@ -98,14 +94,14 @@ internal fun GenerationModeSelector(
                     ) {
                         Text(
                             text = providerLabel,
-                            color = SelectorTextPrimary,
+                            color = if (runnableProviders.isEmpty()) SelectorTextSecondary else SelectorTextPrimary,
                             fontSize = 12.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
                         Text(
-                            text = "▼",
+                            text = if (runnableProviders.isEmpty()) "설정 필요" else "변경",
                             color = SelectorTextSecondary,
                             fontSize = 12.sp
                         )
@@ -121,7 +117,7 @@ internal fun GenerationModeSelector(
                         DropdownMenuItem(
                             text = {
                                 Text(
-                                    text = "사용 가능한 API 제공자가 없습니다.",
+                                    text = "사용 가능한 외부 AI API 제공자가 없습니다.",
                                     color = SelectorTextSecondary
                                 )
                             },
@@ -135,7 +131,7 @@ internal fun GenerationModeSelector(
                                 text = {
                                     Text(
                                         text = buildString {
-                                            if (selected) append("✓ ")
+                                            if (selected) append("선택됨 · ")
                                             append("API: ")
                                             append(provider.displayName)
                                         },
@@ -181,4 +177,11 @@ private fun ModeChip(
             overflow = TextOverflow.Ellipsis
         )
     }
+}
+
+private fun isRunnableExternalProvider(provider: AiProviderConfig): Boolean {
+    return provider.isEnabled &&
+        !provider.apiKeySecretId.isNullOrBlank() &&
+        provider.baseUrl.isNotBlank() &&
+        provider.modelId.isNotBlank()
 }
