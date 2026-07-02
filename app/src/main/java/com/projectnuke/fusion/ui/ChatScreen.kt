@@ -664,135 +664,6 @@ fun ChatScreen(
         )
     }
 
-    suspend fun insertAssistantConversationMessage(
-        conversationId: Long,
-        content: String
-    ) {
-        dao.insertMessage(
-            MessageEntity(
-                conversationId = conversationId,
-                role = "assistant",
-                content = content,
-                createdAt = System.currentTimeMillis()
-            )
-        )
-        dao.updateConversationTime(conversationId, System.currentTimeMillis())
-    }
-
-    suspend fun handleExternalSendResult(
-        conversationId: Long,
-        result: ExternalAiChatResult
-    ) {
-        when (result) {
-            is ExternalAiChatResult.Success -> {
-                refreshExternalProviderState()
-                generationStatus = "응답 저장 중..."
-                insertAssistantConversationMessage(conversationId, result.content)
-            }
-
-            is ExternalAiChatResult.BlockedAttachment -> {
-                Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                generationStatus = "응답 저장 중..."
-                insertAssistantConversationMessage(conversationId, result.message)
-            }
-
-            is ExternalAiChatResult.NoProvider -> {
-                refreshExternalProviderState()
-                generationStatus = "응답 저장 중..."
-                insertAssistantConversationMessage(conversationId, result.message)
-            }
-        }
-    }
-
-    suspend fun handleExternalRegenerationResult(
-        conversationId: Long,
-        targetMessage: MessageEntity,
-        previousUser: MessageEntity,
-        result: ExternalAiChatResult,
-        currentResponseVersionState: ResponseVersionState,
-        currentMessageEntities: List<MessageEntity>
-    ): ResponseVersionState {
-        if (result is ExternalAiChatResult.Success) {
-            refreshExternalProviderState()
-        }
-        if (result is ExternalAiChatResult.NoProvider) {
-            refreshExternalProviderState()
-        }
-        generationStatus = "응답 저장 중..."
-        if (result is ExternalAiChatResult.BlockedAttachment) {
-            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-        }
-        val content = when (result) {
-            is ExternalAiChatResult.Success -> result.content
-            is ExternalAiChatResult.BlockedAttachment -> result.message
-            is ExternalAiChatResult.NoProvider -> result.message
-        }
-        val newMessageId = dao.insertMessage(
-            MessageEntity(
-                conversationId = conversationId,
-                role = "assistant",
-                content = content,
-                createdAt = System.currentTimeMillis()
-            )
-        )
-        val groupId = previousUser.id
-        val updatedVersionState = currentResponseVersionState.copy(
-            groupByMessageId = currentResponseVersionState.groupByMessageId +
-                (targetMessage.id to groupId) +
-                (newMessageId to groupId),
-            activeMessageIdByGroup = currentResponseVersionState.activeMessageIdByGroup +
-                (groupId to newMessageId)
-        )
-        saveResponseVersionState(context, conversationId, updatedVersionState)
-        dao.updateConversationTime(conversationId, System.currentTimeMillis())
-        if (result is ExternalAiChatResult.Success) {
-            val versionCount = buildChatTimeline(
-                currentMessageEntities + MessageEntity(
-                    id = newMessageId,
-                    conversationId = conversationId,
-                    role = "assistant",
-                    content = "",
-                    createdAt = System.currentTimeMillis()
-                ),
-                updatedVersionState
-            ).filterIsInstance<ChatTimelineItem.AssistantVersions>()
-                .firstOrNull { it.groupId == groupId }
-                ?.versions
-                ?.size
-                ?: 1
-            DeveloperLogStore.record(context, "regeneration", "응답 다시 생성 성공", "versions=$versionCount")
-            Toast.makeText(context, "응답을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
-        }
-        return updatedVersionState
-    }
-
-    suspend fun handleExternalMemoryExtractionResult(
-        conversationId: Long,
-        result: ExternalAiChatResult
-    ) {
-        when (result) {
-            is ExternalAiChatResult.Success -> {
-                refreshExternalProviderState()
-                memoryCandidateText = result.content.trim()
-                DeveloperLogStore.record(
-                    context,
-                    "memory",
-                    "메모리 후보 추출 성공",
-                    "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
-                )
-            }
-
-            is ExternalAiChatResult.NoProvider -> {
-                refreshExternalProviderState()
-                Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
-            }
-
-            is ExternalAiChatResult.BlockedAttachment -> {
-                Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
     LaunchedEffect(aiProviderRepository) {
         aiProviderRepository.observeProviderChanges().collect {
             refreshExternalProviderState()
@@ -1161,6 +1032,30 @@ fun ChatScreen(
                             responseVersionState = updatedVersionState
                             dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
                         }
+
+                        is ExternalAiChatResult.Error -> {
+                            generationStatus = "?듬? ???以?.."
+                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                            val newMessageId = dao.insertMessage(
+                                MessageEntity(
+                                    conversationId = activeConversationId,
+                                    role = "assistant",
+                                    content = result.message,
+                                    createdAt = System.currentTimeMillis()
+                                )
+                            )
+                            val groupId = previousUser.id
+                            val updatedVersionState = responseVersionState.copy(
+                                groupByMessageId = responseVersionState.groupByMessageId +
+                                    (targetMessage.id to groupId) +
+                                    (newMessageId to groupId),
+                                activeMessageIdByGroup = responseVersionState.activeMessageIdByGroup +
+                                    (groupId to newMessageId)
+                            )
+                            saveResponseVersionState(context, activeConversationId, updatedVersionState)
+                            responseVersionState = updatedVersionState
+                            dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                        }
                     }
                     return@launch
                 }
@@ -1400,6 +1295,10 @@ fun ChatScreen(
                         is ExternalAiChatResult.BlockedAttachment -> {
                             Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
                         }
+
+                        is ExternalAiChatResult.Error -> {
+                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e("FusionMemory", "Memory candidate extraction failed", e)
@@ -1478,6 +1377,7 @@ fun ChatScreen(
         }
         startRegenerateResponse(safeLatestAssistant, ResponseRegenerationAction.Retry)
         return
+        /*
 
         if (isGenerating) return
         if (FusionRuntimeLock.isBenchmarkRunning) {
@@ -1800,6 +1700,7 @@ fun ChatScreen(
                 streamingMetricsLine = null
             }
         }
+        */
     }
 
     val modelPickerLauncher = rememberLauncherForActivityResult(
@@ -2242,6 +2143,20 @@ fun ChatScreen(
                                             is ExternalAiChatResult.NoProvider -> {
                                                 refreshExternalProviderState()
                                                 generationStatus = "답변 저장 중..."
+                                                dao.insertMessage(
+                                                    MessageEntity(
+                                                        conversationId = activeConversationId,
+                                                        role = "assistant",
+                                                        content = result.message,
+                                                        createdAt = System.currentTimeMillis()
+                                                    )
+                                                )
+                                                dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            }
+
+                                            is ExternalAiChatResult.Error -> {
+                                                Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                                generationStatus = "?듬? ???以?.."
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -3445,7 +3360,7 @@ private fun ChatTopBar(
                     )
                     DropdownMenuItem(
                         text = { Text("삭제", color = DangerRed, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("대화 내 검색") }
+                        onClick = { onChatOption("삭제") }
                     )
                 }
             }

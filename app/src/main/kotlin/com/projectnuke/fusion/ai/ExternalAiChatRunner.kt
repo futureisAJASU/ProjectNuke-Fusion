@@ -3,6 +3,7 @@ package com.projectnuke.fusion.ai
 import com.projectnuke.fusion.ai.data.AiProviderRepository
 import com.projectnuke.fusion.ai.model.AiChatRequest
 import com.projectnuke.fusion.ai.model.AiMessage
+import com.projectnuke.fusion.ai.network.AiProviderClientException
 import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
 import com.projectnuke.fusion.model.ChatMessage
 
@@ -10,6 +11,7 @@ internal sealed interface ExternalAiChatResult {
     data class Success(val content: String, val providerDisplayName: String?) : ExternalAiChatResult
     data class BlockedAttachment(val message: String) : ExternalAiChatResult
     data class NoProvider(val message: String) : ExternalAiChatResult
+    data class Error(val message: String) : ExternalAiChatResult
 }
 
 internal class ExternalAiChatRunner(
@@ -49,18 +51,21 @@ internal class ExternalAiChatRunner(
                 "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정에서 필수 항목을 확인해 주세요."
             )
 
-        val response = client.chatCompletion(
-            config = provider,
-            request = AiChatRequest(
-                messages = messages,
-                temperature = provider.temperature,
-                maxTokens = provider.maxTokens
+        return try {
+            val response = client.chatCompletion(
+                config = provider,
+                request = AiChatRequest(
+                    messages = messages,
+                    temperature = provider.temperature,
+                    maxTokens = provider.maxTokens
+                )
             )
-        )
-
-        return ExternalAiChatResult.Success(
-            content = response.content.ifBlank { "외부 AI API에서 빈 응답을 받았습니다." },
-            providerDisplayName = provider.displayName
-        )
+            ExternalAiChatResult.Success(
+                content = response.content.ifBlank { "외부 AI API에서 빈 응답을 받았습니다." },
+                providerDisplayName = provider.displayName
+            )
+        } catch (e: AiProviderClientException) {
+            ExternalAiChatResult.Error(e.message ?: "외부 AI API 요청에 실패했습니다.")
+        }
     }
 }
