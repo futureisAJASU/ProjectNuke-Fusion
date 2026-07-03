@@ -1034,7 +1034,7 @@ fun ChatScreen(
                         }
 
                         is ExternalAiChatResult.Error -> {
-                            generationStatus = "?듬? ???以?.."
+                            generationStatus = "답변 저장 중..."
                             Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
                             val newMessageId = dao.insertMessage(
                                 MessageEntity(
@@ -1372,7 +1372,7 @@ fun ChatScreen(
     fun startRegenerateLatestResponse() {
         val safeLatestAssistant = messageEntities.lastOrNull { it.role != "user" }
         if (safeLatestAssistant == null) {
-            Toast.makeText(context, "???????? ?????????????.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
         startRegenerateResponse(safeLatestAssistant, ResponseRegenerationAction.Retry)
@@ -1831,7 +1831,7 @@ fun ChatScreen(
 
                                             is ExternalAiChatResult.Error -> {
                                                 Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                                                generationStatus = "?듬? ???以?.."
+                                                generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -3035,7 +3035,7 @@ private fun ChatTopBar(
                     )
                     DropdownMenuItem(
                         text = { Text("삭제", color = DangerRed, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("삭제") }
+                        onClick = onDeleteChat
                     )
                 }
             }
