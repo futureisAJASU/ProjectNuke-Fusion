@@ -128,7 +128,14 @@ import com.projectnuke.fusion.modelzoo.ModelRuntimeFormat
 import com.projectnuke.fusion.modelzoo.deviceLabel
 import com.projectnuke.fusion.modelzoo.statusLabel
 import com.projectnuke.fusion.search.FusionWebSearch
+import com.projectnuke.fusion.search.FusionSearchResponse
 import com.projectnuke.fusion.search.SearchIntent
+import com.projectnuke.fusion.search.WebSearchProviderRepository
+import com.projectnuke.fusion.search.WebSearchProviderSettingsSection
+import com.projectnuke.fusion.search.WebSearchSource
+import com.projectnuke.fusion.search.appendSearchSourcesMetadata
+import com.projectnuke.fusion.search.parseSearchSourcesMetadata
+import com.projectnuke.fusion.search.stripSearchSourcesMetadata
 import com.projectnuke.fusion.search.toStructuredContext
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
 import com.projectnuke.fusion.util.buildEffectiveSettingsLine
@@ -554,6 +561,7 @@ fun ChatScreen(
     val dao = remember { db.chatDao() }
     val aiSecretStore = remember { AndroidKeystoreSecretStore(context) }
     val aiProviderRepository = remember { AiProviderRepository(context, aiSecretStore) }
+    val webSearchProviderRepository = remember { WebSearchProviderRepository(context, aiSecretStore) }
     val externalAiChatRunner = remember {
         ExternalAiChatRunner(
             providerRepository = aiProviderRepository,
@@ -658,7 +666,7 @@ fun ChatScreen(
         return externalAiChatRunner.generateFromMessages(
             messages = buildExternalAiMessages(
                 messages = currentMessages,
-                stripAttachments = { parseMessageAttachments(it).body }
+                stripAttachments = { stripSearchSourcesMetadata(parseMessageAttachments(it).body) }
             ),
             hasAttachments = hasAttachments
         )
@@ -852,7 +860,7 @@ fun ChatScreen(
         }
         val historyBeforeUser = snapshot
             .take(previousUserIndex)
-            .map { ChatMessage(role = it.role, content = it.content) }
+            .map { ChatMessage(role = it.role, content = stripSearchSourcesMetadata(it.content)) }
         val shouldUseWebSearch = !isStyleRegeneration && (webSearchEnabled || shouldAutoUseWebSearch(previousUserText))
         val externalApiAttachmentBlocked = generationMode == ChatGenerationMode.EXTERNAL_AI_API &&
             attachmentsToSend.isNotEmpty()
@@ -876,14 +884,17 @@ fun ChatScreen(
                     ?.trim()
                     .orEmpty()
 
-                val webSearchResult = if (shouldUseWebSearchForRequest) {
+                val webSearchResponse = if (shouldUseWebSearchForRequest) {
                     FusionWebSearch.search(
                         userInput = previousUserText,
-                        previousUserMessage = previousUserMessage
-                    ).toStructuredContext()
+                        previousUserMessage = previousUserMessage,
+                        providerRepository = webSearchProviderRepository
+                    )
                 } else {
                     null
                 }
+                val webSearchResult = webSearchResponse?.toStructuredContext()
+                recordWebSearchDiagnostics(context, webSearchResponse)
 
                 val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
                     modelName = selectedModel,
@@ -955,7 +966,7 @@ fun ChatScreen(
                                 MessageEntity(
                                     conversationId = activeConversationId,
                                     role = "assistant",
-                                    content = result.content,
+                                    content = appendSearchSourcesMetadata(result.content, webSearchResponse?.sources.orEmpty()),
                                     createdAt = System.currentTimeMillis()
                                 )
                             )
@@ -1140,7 +1151,7 @@ fun ChatScreen(
                     MessageEntity(
                         conversationId = activeConversationId,
                         role = "assistant",
-                        content = appendFusionMetrics(rawReply, metricsLine),
+                        content = appendSearchSourcesMetadata(appendFusionMetrics(rawReply, metricsLine), webSearchResponse?.sources.orEmpty()),
                         createdAt = System.currentTimeMillis()
                     )
                 )
@@ -1676,7 +1687,7 @@ fun ChatScreen(
                                         ?.trim()
                                         .orEmpty()
 
-                                    val webSearchResult = if (shouldUseWebSearch) {
+                                    val webSearchResponse = if (shouldUseWebSearch) {
                                         generationStatus = "인터넷 검색 중..."
                                         val searchIntent = FusionWebSearch.detectIntent(userInput)
                                         generationStatus = when (searchIntent) {
@@ -1686,14 +1697,17 @@ fun ChatScreen(
 
                                         val response = FusionWebSearch.search(
                                             userInput = userInput,
-                                            previousUserMessage = previousUserMessage
+                                            previousUserMessage = previousUserMessage,
+                                            providerRepository = webSearchProviderRepository
                                         )
 
                                         generationStatus = "검색 결과 정리 중..."
-                                        response.toStructuredContext()
+                                        response
                                     } else {
                                         null
                                     }
+                                    val webSearchResult = webSearchResponse?.toStructuredContext()
+                                    recordWebSearchDiagnostics(context, webSearchResponse)
 
                                     if (shouldUseWebSearch) {
                                         generationStatus = if (reasoningEnabled) "더 깊게 생각하는 중..." else "답변 생성 중..."
@@ -1764,7 +1778,7 @@ fun ChatScreen(
                                             add(ChatMessage(role = "system", content = summaryContext))
                                         }
 
-                                        addAll(messages)
+                                        addAll(messages.map { ChatMessage(role = it.role, content = stripSearchSourcesMetadata(it.content)) })
 
                                         val finalUserContent = buildFinalUserContent(
                                             body = userInstruction,
@@ -1797,7 +1811,7 @@ fun ChatScreen(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
                                                         role = "assistant",
-                                                        content = result.content,
+                                                        content = appendSearchSourcesMetadata(result.content, webSearchResponse?.sources.orEmpty()),
                                                         createdAt = System.currentTimeMillis()
                                                     )
                                                 )
@@ -2027,7 +2041,7 @@ fun ChatScreen(
                                         MessageEntity(
                                             conversationId = activeConversationId,
                                             role = "assistant",
-                                            content = appendFusionMetrics(rawReply, metricsLine),
+                                            content = appendSearchSourcesMetadata(appendFusionMetrics(rawReply, metricsLine), webSearchResponse?.sources.orEmpty()),
                                             createdAt = System.currentTimeMillis()
                                         )
                                     )
@@ -2510,6 +2524,7 @@ fun ChatScreen(
             selectedModel = selectedModel,
             reasoningEnabled = reasoningEnabled,
             webSearchEnabled = webSearchEnabled,
+            webSearchProviderRepository = webSearchProviderRepository,
             onDismiss = {
                 showAdvancedSettingsDialog = false
             },
@@ -3272,8 +3287,15 @@ private fun AssistantMessage(
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
     var moreExpanded by remember { mutableStateOf(false) }
-    val metricsSplit = remember(content) {
-        splitFusionMetrics(content)
+    var showSources by remember { mutableStateOf(false) }
+    val searchSources = remember(content) {
+        parseSearchSourcesMetadata(content)
+    }
+    val visibleContent = remember(content) {
+        stripSearchSourcesMetadata(content)
+    }
+    val metricsSplit = remember(visibleContent) {
+        splitFusionMetrics(visibleContent)
     }
     val parsed = remember(metricsSplit.content, reasoningEnabled) {
         parseAssistantOutput(metricsSplit.content, reasoningEnabled)
@@ -3293,6 +3315,14 @@ private fun AssistantMessage(
             fontSize = 18.sp,
             lineHeight = 29.sp
         )
+
+        if (searchSources.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            SearchSourceCapsules(
+                sources = searchSources,
+                onClick = { showSources = true }
+            )
+        }
 
         if (isRegenerating) {
             Spacer(modifier = Modifier.height(8.dp))
@@ -3402,7 +3432,126 @@ private fun AssistantMessage(
         }
     }
 
+    if (showSources) {
+        SearchSourcesDialog(
+            sources = searchSources,
+            onDismiss = { showSources = false }
+        )
+    }
 }
+@Composable
+private fun SearchSourceCapsules(
+    sources: List<WebSearchSource>,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier.horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        SourceCapsule("출처 ${sources.size}개", onClick)
+        sources.take(3).forEach { source ->
+            val label = source.source ?: source.providerDisplayName
+            SourceCapsule(label.take(22), onClick)
+        }
+    }
+}
+
+@Composable
+private fun SourceCapsule(
+    text: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.clickable { onClick() },
+        shape = RoundedCornerShape(999.dp),
+        color = Color(0xFF132334),
+        border = androidx.compose.foundation.BorderStroke(1.dp, AccentBlue.copy(alpha = 0.35f))
+    ) {
+        Text(
+            text = text,
+            color = AccentBlue,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+        )
+    }
+}
+
+@Composable
+private fun SearchSourcesDialog(
+    sources: List<WebSearchSource>,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("출처", color = TextPrimary) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                sources.forEach { source ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF101318),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            SourceDetailLine("검색 제공자", source.providerDisplayName)
+                            SourceDetailLine("검색어", source.queryUsed)
+                            SourceDetailLine("자료 출처", source.source.orEmpty())
+                            SourceDetailLine("제목", source.title)
+                            source.publishedAt?.takeIf { it.isNotBlank() }?.let { SourceDetailLine("게시일", it) }
+                            source.snippet?.takeIf { it.isNotBlank() }?.let { SourceDetailLine("요약", it) }
+                            source.url?.takeIf { it.isNotBlank() }?.let { url ->
+                                TextButton(
+                                    onClick = {
+                                        runCatching {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                        }.onFailure {
+                                            Toast.makeText(context, "원문을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                ) {
+                                    Text("원문 열기", color = AccentBlue)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("닫기", color = AccentBlue)
+            }
+        },
+        containerColor = PanelBg,
+        titleContentColor = TextPrimary,
+        textContentColor = TextPrimary
+    )
+}
+
+@Composable
+private fun SourceDetailLine(
+    label: String,
+    value: String
+) {
+    if (value.isBlank()) return
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(label, color = TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Text(value, color = TextPrimary, fontSize = 13.sp, lineHeight = 18.sp)
+    }
+}
+
 @Composable
 private fun ReasoningPanel(
     thinking: String
@@ -7353,6 +7502,7 @@ private fun AdvancedSettingsDialog(
     selectedModel: String,
     reasoningEnabled: Boolean,
     webSearchEnabled: Boolean,
+    webSearchProviderRepository: WebSearchProviderRepository,
     onDismiss: () -> Unit,
     onApply: (GenerationSettings, Boolean, Boolean) -> Unit
 ) {
@@ -7623,6 +7773,11 @@ private fun AdvancedSettingsDialog(
                     checked = webSearchEnabledLocal,
                     onToggle = { webSearchEnabledLocal = !webSearchEnabledLocal }
                 )
+
+                WebSearchProviderSettingsSection(
+                    repository = webSearchProviderRepository,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         },
         dismissButton = {
@@ -7861,6 +8016,7 @@ private fun parseAssistantOutput(
     raw: String,
     reasoningEnabled: Boolean
 ): ParsedAssistantOutput {
+    val cleanRaw = stripSearchSourcesMetadata(raw)
     val thinkingTagRegex = Regex("""</?fusion_thinking>""", RegexOption.IGNORE_CASE)
     val answerTagRegex = Regex("""</?fusion_answer>""", RegexOption.IGNORE_CASE)
 
@@ -7871,12 +8027,12 @@ private fun parseAssistantOutput(
         pattern = """(?is)<fusion_answer>(.*?)</fusion_answer>"""
     )
 
-    val thinkingBlocks = thinkingBlockRegex.findAll(raw)
+    val thinkingBlocks = thinkingBlockRegex.findAll(cleanRaw)
         .map { match -> stripFusionTags(match.groupValues[1]).trim() }
         .filter { it.isNotBlank() }
         .toList()
 
-    val answerBlocks = answerBlockRegex.findAll(raw)
+    val answerBlocks = answerBlockRegex.findAll(cleanRaw)
         .map { match -> stripFusionTags(match.groupValues[1]).trim() }
         .filter { it.isNotBlank() }
         .toList()
@@ -7892,7 +8048,7 @@ private fun parseAssistantOutput(
     val answer = when {
         answerBlocks.isNotEmpty() -> answerBlocks.joinToString("\n\n")
 
-        raw.contains("</fusion_thinking>", ignoreCase = true) -> raw
+        cleanRaw.contains("</fusion_thinking>", ignoreCase = true) -> cleanRaw
             .substringAfterLast("</fusion_thinking>")
             .let(::stripFusionTags)
             .trim()
@@ -7900,16 +8056,16 @@ private fun parseAssistantOutput(
                 if (thinkingBlocks.isNotEmpty()) {
                     ""
                 } else {
-                    stripFusionTags(raw).trim()
+                    stripFusionTags(cleanRaw).trim()
                 }
             }
 
-        raw.contains("<fusion_answer>", ignoreCase = true) -> raw
+        cleanRaw.contains("<fusion_answer>", ignoreCase = true) -> cleanRaw
             .substringAfterLast("<fusion_answer>")
             .let(::stripFusionTags)
             .trim()
 
-        raw.contains("<fusion_thinking>", ignoreCase = true) -> raw
+        cleanRaw.contains("<fusion_thinking>", ignoreCase = true) -> cleanRaw
             .substringBefore("<fusion_thinking>")
             .let(::stripFusionTags)
             .trim()
@@ -7917,33 +8073,33 @@ private fun parseAssistantOutput(
                 if (thinkingBlocks.isNotEmpty()) {
                     ""
                 } else {
-                    stripFusionTags(raw).trim()
+                    stripFusionTags(cleanRaw).trim()
                 }
             }
 
-        thinkingTagRegex.containsMatchIn(raw) || answerTagRegex.containsMatchIn(raw) -> {
-            val withoutCompleteThinking = thinkingBlockRegex.replace(raw, "")
+        thinkingTagRegex.containsMatchIn(cleanRaw) || answerTagRegex.containsMatchIn(cleanRaw) -> {
+            val withoutCompleteThinking = thinkingBlockRegex.replace(cleanRaw, "")
             stripFusionTags(withoutCompleteThinking)
                 .trim()
                 .ifBlank {
                     if (thinkingBlocks.isNotEmpty()) {
                         ""
                     } else {
-                        stripFusionTags(raw).trim()
+                        stripFusionTags(cleanRaw).trim()
                     }
                 }
         }
 
-        else -> raw.trim()
+        else -> cleanRaw.trim()
     }.let(::stripFusionTags).trim()
 
     return ParsedAssistantOutput(
         thinking = thinking,
         answer = answer.ifBlank {
-            if (thinkingBlocks.isNotEmpty() || thinkingTagRegex.containsMatchIn(raw)) {
+            if (thinkingBlocks.isNotEmpty() || thinkingTagRegex.containsMatchIn(cleanRaw)) {
                 "No final answer was generated."
             } else {
-                stripFusionTags(raw).trim()
+                stripFusionTags(cleanRaw).trim()
             }
         }
     )
@@ -8080,14 +8236,15 @@ private fun buildFusionSettingsMetricsLine(
 private fun splitFusionMetrics(
     content: String
 ): FusionMetricsSplit {
+    val cleanContent = stripSearchSourcesMetadata(content)
     val metricsRegex = Regex("""(?is)<fusion_metrics>(.*?)</fusion_metrics>""")
-    val metricsLine = metricsRegex.findAll(content)
+    val metricsLine = metricsRegex.findAll(cleanContent)
         .map { it.groupValues[1].trim() }
         .filter { it.isNotBlank() }
         .lastOrNull()
 
     return FusionMetricsSplit(
-        content = metricsRegex.replace(content, "").trimEnd(),
+        content = metricsRegex.replace(cleanContent, "").trimEnd(),
         metricsLine = metricsLine
     )
 }
@@ -8660,6 +8817,27 @@ private fun buildAcceleratorLabel(
 
 private fun shouldAutoUseWebSearch(userInput: String): Boolean {
     return FusionWebSearch.shouldAutoUseWebSearch(userInput)
+}
+
+private fun recordWebSearchDiagnostics(
+    context: Context,
+    response: FusionSearchResponse?
+) {
+    response ?: return
+    response.traces.forEach { trace ->
+        DeveloperLogStore.record(
+            context = context,
+            category = "web_search",
+            message = "웹검색 제공자 시도: ${trace.providerDisplayName}",
+            technicalSummary = buildString {
+                append("query=${trace.queryUsed.take(80)}, results=${trace.parsedResultCount}")
+                trace.httpStatus?.let { append(", status=$it") }
+                trace.qualityScore?.let { append(", quality=${String.format(Locale.US, "%.2f", it)}") }
+                trace.fallbackReason?.let { append(", fallback=${it.take(80)}") }
+                trace.exceptionClass?.let { append(", error=$it") }
+            }
+        )
+    }
 }
 
 private fun isGenericWebSearchRequest(userInput: String): Boolean {
