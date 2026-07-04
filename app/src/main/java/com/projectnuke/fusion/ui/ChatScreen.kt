@@ -854,6 +854,9 @@ fun ChatScreen(
             .take(previousUserIndex)
             .map { ChatMessage(role = it.role, content = it.content) }
         val shouldUseWebSearch = !isStyleRegeneration && (webSearchEnabled || shouldAutoUseWebSearch(previousUserText))
+        val externalApiAttachmentBlocked = generationMode == ChatGenerationMode.EXTERNAL_AI_API &&
+            attachmentsToSend.isNotEmpty()
+        val shouldUseWebSearchForRequest = shouldUseWebSearch && !externalApiAttachmentBlocked
 
         isGenerating = true
         regeneratingMessageId = targetMessage.id
@@ -873,7 +876,7 @@ fun ChatScreen(
                     ?.trim()
                     .orEmpty()
 
-                val webSearchResult = if (shouldUseWebSearch) {
+                val webSearchResult = if (shouldUseWebSearchForRequest) {
                     FusionWebSearch.search(
                         userInput = previousUserText,
                         previousUserMessage = previousUserMessage
@@ -891,7 +894,7 @@ fun ChatScreen(
                 )
                 val fusionSystemPrompt = buildFusionSystemPrompt(
                     reasoningEnabled = reasoningEnabled,
-                    webSearchEnabled = shouldUseWebSearch,
+                    webSearchEnabled = shouldUseWebSearchForRequest,
                     webContext = webSearchResult,
                     promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
                 )
@@ -931,7 +934,7 @@ fun ChatScreen(
                             content = buildFinalUserContent(
                                 body = userInstruction,
                                 attachments = if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend,
-                                webSearchEnabled = shouldUseWebSearch,
+                                webSearchEnabled = shouldUseWebSearchForRequest,
                                 webSearchResult = webSearchResult
                             )
                         )
@@ -1127,7 +1130,7 @@ fun ChatScreen(
                             modelPath = activeModelPath!!,
                             settings = requestSettings,
                             reasoningEnabled = reasoningEnabled,
-                            webSearchEnabled = shouldUseWebSearch,
+                            webSearchEnabled = shouldUseWebSearchForRequest,
                             mtpStatus = engine.lastMtpStatus
                         )
                     )
