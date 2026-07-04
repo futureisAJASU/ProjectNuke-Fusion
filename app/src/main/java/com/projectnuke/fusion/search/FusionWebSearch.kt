@@ -4,6 +4,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -307,7 +309,22 @@ object FusionWebSearch {
             )
         }
 
-        return connection.inputStream.bufferedReader().use { it.readText() }
+        return try {
+            val responseBytes = connection.inputStream.use { it.readBytes() }
+            val responseCharset = connection.contentType
+                ?.substringAfter("charset=", "")
+                ?.substringBefore(";")
+                ?.trim()
+                ?.trim('"', '\'')
+                ?.takeIf { it.isNotBlank() }
+                ?.let { charsetName ->
+                    runCatching { Charset.forName(charsetName) }.getOrNull()
+                }
+                ?: StandardCharsets.UTF_8
+            String(responseBytes, responseCharset)
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun XmlPullParser.nextTextClean(): String {
@@ -317,6 +334,9 @@ object FusionWebSearch {
     private fun cleanHtmlText(raw: String): String {
         return raw
             .replace(Regex("<.*?>"), " ")
+            .replace(Regex("&#(x?[0-9A-Fa-f]+);")) { match ->
+                decodeHtmlEntity(match.groupValues[1]) ?: match.value
+            }
             .replace("&amp;", "&")
             .replace("&quot;", "\"")
             .replace("&#x27;", "'")
@@ -326,6 +346,18 @@ object FusionWebSearch {
             .replace("&nbsp;", " ")
             .replace(Regex("\\s+"), " ")
             .trim()
+    }
+
+    private fun decodeHtmlEntity(value: String): String? {
+        val codePoint = runCatching {
+            if (value.startsWith("x", ignoreCase = true)) {
+                value.substring(1).toInt(16)
+            } else {
+                value.toInt(10)
+            }
+        }.getOrNull() ?: return null
+        if (!Character.isValidCodePoint(codePoint)) return null
+        return String(Character.toChars(codePoint))
     }
 
     private fun cleanDuckDuckGoUrl(raw: String): String {
