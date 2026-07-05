@@ -40,6 +40,7 @@ import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.llm.ChatGenerationRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
+import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
@@ -64,7 +65,7 @@ fun FusionBenchmarkScreen(
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("fusion_chat_settings", Context.MODE_PRIVATE) }
-    val engine = remember { LiteRtLlmEngine(context.applicationContext) }
+    val engine = remember { FusionRuntimeManager.sharedEngine(context) }
     val db = remember { AppDatabase.getInstance(context) }
     val benchmarkDao = remember { db.benchmarkDao() }
     var showHistory by remember(initialShowHistory) { mutableStateOf(initialShowHistory) }
@@ -78,8 +79,6 @@ fun FusionBenchmarkScreen(
         }
         onDispose {
             unregisterMemoryUnloader()
-            runCatching { engine.unload() }
-                .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine on dispose", it) }
         }
     }
 
@@ -110,11 +109,19 @@ fun FusionBenchmarkScreen(
     }
 
     fun leaveBenchmark() {
+        if (isRunning) {
+            Toast.makeText(context, "벤치마크 실행 중에는 화면을 나갈 수 없습니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+            return
+        }
         if (!isRunning) {
             status = null
             result = null
         }
         onBack()
+    }
+
+    BackHandler(enabled = isRunning) {
+        Toast.makeText(context, "벤치마크 실행 중에는 뒤로 갈 수 없습니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
     }
 
     Column(
@@ -127,7 +134,10 @@ fun FusionBenchmarkScreen(
                 Text("벤치마크", color = Color(0xFFF5F5F5), fontSize = 22.sp, fontWeight = FontWeight.Bold)
                 Text("선택한 모델의 응답 속도와 생성 성능을 측정합니다.", color = Color(0xFF9E9E9E), fontSize = 12.sp)
             }
-            TextButton(onClick = { showHistory = true }) {
+            TextButton(
+                enabled = !isRunning,
+                onClick = { showHistory = true }
+            ) {
                 Text("기록", color = Color(0xFFF5F5F5))
             }
         }

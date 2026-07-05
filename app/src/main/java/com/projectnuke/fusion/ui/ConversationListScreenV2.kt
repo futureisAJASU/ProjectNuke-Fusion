@@ -69,6 +69,7 @@ import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
+import com.projectnuke.fusion.data.escapeSqlLikeQuery
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.AttachmentStorageStats
 import com.projectnuke.fusion.util.collectFusionSocInfo
@@ -204,7 +205,7 @@ fun ConversationListScreenV2(
     val isSearchMode = trimmedSearchQuery.isNotEmpty()
     val matchingMessageConversationIds by remember(trimmedSearchQuery) {
         if (trimmedSearchQuery.isBlank()) flowOf(emptyList())
-        else dao.observeConversationIdsMatchingMessages(trimmedSearchQuery)
+        else dao.observeConversationIdsMatchingMessages(escapeSqlLikeQuery(trimmedSearchQuery))
     }.collectAsState(initial = emptyList())
 
     val filteredConversations = remember(conversations, trimmedSearchQuery, matchingMessageConversationIds) {

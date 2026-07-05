@@ -4,6 +4,9 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class ConversationMemoryCandidate(
     val id: String,
@@ -36,6 +39,7 @@ enum class MemoryManagerSortMode {
 private const val ConversationMemoryCandidatePrefs = "fusion_memory_candidates"
 private const val ConversationMemoryCandidateKey = "saved_candidates"
 const val PrefMemoryManagerSortMode = "memory_manager_sort_mode"
+private val ConversationMemoryCandidateWriteMutex = Mutex()
 
 fun loadConversationMemoryCandidates(
     context: Context,
@@ -85,50 +89,54 @@ fun saveConversationMemoryCandidates(
     candidates: List<String>,
     conversationTitle: String? = null
 ): Int {
-    if (conversationId <= 0L) return 0
-    val cleanCandidates = candidates
-        .map { normalizeMemoryCandidateText(it) }
-        .filter { it.isNotBlank() }
-        .distinct()
-    if (cleanCandidates.isEmpty()) return 0
+    return runBlocking {
+        ConversationMemoryCandidateWriteMutex.withLock {
+            if (conversationId <= 0L) return@withLock 0
+            val cleanCandidates = candidates
+                .map { normalizeMemoryCandidateText(it) }
+                .filter { it.isNotBlank() }
+                .distinct()
+            if (cleanCandidates.isEmpty()) return@withLock 0
 
-    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
-    val existing = runCatching {
-        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
-    }.getOrElse { JSONArray() }
+            val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+            val existing = runCatching {
+                JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+            }.getOrElse { JSONArray() }
 
-    val existingKeys = buildSet {
-        for (index in 0 until existing.length()) {
-            val obj = existing.optJSONObject(index) ?: continue
-            add("${obj.optLong("conversationId")}:${normalizeMemoryCandidateText(obj.optString("text"))}")
+            val existingKeys = buildSet {
+                for (index in 0 until existing.length()) {
+                    val obj = existing.optJSONObject(index) ?: continue
+                    add("${obj.optLong("conversationId")}:${normalizeMemoryCandidateText(obj.optString("text"))}")
+                }
+            }
+
+            val now = System.currentTimeMillis()
+            val updated = JSONArray()
+            var savedCount = 0
+            cleanCandidates.forEach { candidate ->
+                val dedupeKey = "$conversationId:$candidate"
+                if (existingKeys.contains(dedupeKey)) return@forEach
+                updated.put(
+                    JSONObject()
+                        .put("id", UUID.randomUUID().toString())
+                        .put("text", candidate)
+                        .put("conversationId", conversationId)
+                        .put("createdAt", now)
+                        .put("updatedAt", now)
+                        .put("conversationTitle", conversationTitle)
+                        .put("enabled", true)
+                        .put("scope", MemoryScope.CONVERSATION_ONLY.name)
+                        .put("savedByUser", true)
+                )
+                savedCount++
+            }
+            for (index in 0 until existing.length()) {
+                updated.put(existing.get(index))
+            }
+            prefs.edit().putString(ConversationMemoryCandidateKey, updated.toString()).apply()
+            savedCount
         }
     }
-
-    val now = System.currentTimeMillis()
-    val updated = JSONArray()
-    var savedCount = 0
-    cleanCandidates.forEach { candidate ->
-        val dedupeKey = "$conversationId:$candidate"
-        if (existingKeys.contains(dedupeKey)) return@forEach
-        updated.put(
-            JSONObject()
-                .put("id", UUID.randomUUID().toString())
-                .put("text", candidate)
-                .put("conversationId", conversationId)
-                .put("createdAt", now)
-                .put("updatedAt", now)
-                .put("conversationTitle", conversationTitle)
-                .put("enabled", true)
-                .put("scope", MemoryScope.CONVERSATION_ONLY.name)
-                .put("savedByUser", true)
-        )
-        savedCount++
-    }
-    for (index in 0 until existing.length()) {
-        updated.put(existing.get(index))
-    }
-    prefs.edit().putString(ConversationMemoryCandidateKey, updated.toString()).apply()
-    return savedCount
 }
 
 fun updateConversationMemoryCandidate(
@@ -136,24 +144,28 @@ fun updateConversationMemoryCandidate(
     candidateId: String,
     newText: String
 ): Boolean {
-    val cleanText = normalizeMemoryCandidateText(newText)
-    if (candidateId.isBlank() || cleanText.isBlank()) return false
-    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
-    val existing = runCatching {
-        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
-    }.getOrElse { JSONArray() }
-    var changed = false
-    for (index in 0 until existing.length()) {
-        val obj = existing.optJSONObject(index) ?: continue
-        if (obj.optString("id") != candidateId) continue
-        obj.put("text", cleanText)
-        obj.put("updatedAt", System.currentTimeMillis())
-        changed = true
-        break
+    return runBlocking {
+        ConversationMemoryCandidateWriteMutex.withLock {
+            val cleanText = normalizeMemoryCandidateText(newText)
+            if (candidateId.isBlank() || cleanText.isBlank()) return@withLock false
+            val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+            val existing = runCatching {
+                JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+            }.getOrElse { JSONArray() }
+            var changed = false
+            for (index in 0 until existing.length()) {
+                val obj = existing.optJSONObject(index) ?: continue
+                if (obj.optString("id") != candidateId) continue
+                obj.put("text", cleanText)
+                obj.put("updatedAt", System.currentTimeMillis())
+                changed = true
+                break
+            }
+            if (!changed) return@withLock false
+            prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
+            true
+        }
     }
-    if (!changed) return false
-    prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
-    return true
 }
 
 fun setConversationMemoryCandidateEnabled(
@@ -161,25 +173,29 @@ fun setConversationMemoryCandidateEnabled(
     candidateId: String,
     enabled: Boolean
 ): Boolean {
-    if (candidateId.isBlank()) return false
-    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
-    val existing = runCatching {
-        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
-    }.getOrElse { JSONArray() }
-    var changed = false
-    for (index in 0 until existing.length()) {
-        val obj = existing.optJSONObject(index) ?: continue
-        if (obj.optString("id") != candidateId) continue
-        obj.put("enabled", enabled)
-        obj.put("scope", if (enabled) MemoryScope.GLOBAL.name else MemoryScope.DISABLED.name)
-        if (!enabled) obj.remove("modelId")
-        obj.put("updatedAt", System.currentTimeMillis())
-        changed = true
-        break
+    return runBlocking {
+        ConversationMemoryCandidateWriteMutex.withLock {
+            if (candidateId.isBlank()) return@withLock false
+            val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+            val existing = runCatching {
+                JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+            }.getOrElse { JSONArray() }
+            var changed = false
+            for (index in 0 until existing.length()) {
+                val obj = existing.optJSONObject(index) ?: continue
+                if (obj.optString("id") != candidateId) continue
+                obj.put("enabled", enabled)
+                obj.put("scope", if (enabled) MemoryScope.GLOBAL.name else MemoryScope.DISABLED.name)
+                if (!enabled) obj.remove("modelId")
+                obj.put("updatedAt", System.currentTimeMillis())
+                changed = true
+                break
+            }
+            if (!changed) return@withLock false
+            prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
+            true
+        }
     }
-    if (!changed) return false
-    prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
-    return true
 }
 
 fun setConversationMemoryCandidateScope(
@@ -188,54 +204,62 @@ fun setConversationMemoryCandidateScope(
     scope: MemoryScope,
     modelId: String? = null
 ): Boolean {
-    if (candidateId.isBlank()) return false
-    if (scope == MemoryScope.MODEL_ONLY && modelId.isNullOrBlank()) return false
-    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
-    val existing = runCatching {
-        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
-    }.getOrElse { JSONArray() }
-    var changed = false
-    for (index in 0 until existing.length()) {
-        val obj = existing.optJSONObject(index) ?: continue
-        if (obj.optString("id") != candidateId) continue
-        obj.put("enabled", scope != MemoryScope.DISABLED)
-        obj.put("scope", scope.name)
-        if (scope == MemoryScope.MODEL_ONLY) {
-            obj.put("modelId", modelId)
-        } else {
-            obj.remove("modelId")
+    return runBlocking {
+        ConversationMemoryCandidateWriteMutex.withLock {
+            if (candidateId.isBlank()) return@withLock false
+            if (scope == MemoryScope.MODEL_ONLY && modelId.isNullOrBlank()) return@withLock false
+            val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+            val existing = runCatching {
+                JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+            }.getOrElse { JSONArray() }
+            var changed = false
+            for (index in 0 until existing.length()) {
+                val obj = existing.optJSONObject(index) ?: continue
+                if (obj.optString("id") != candidateId) continue
+                obj.put("enabled", scope != MemoryScope.DISABLED)
+                obj.put("scope", scope.name)
+                if (scope == MemoryScope.MODEL_ONLY) {
+                    obj.put("modelId", modelId)
+                } else {
+                    obj.remove("modelId")
+                }
+                obj.put("updatedAt", System.currentTimeMillis())
+                changed = true
+                break
+            }
+            if (!changed) return@withLock false
+            prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
+            true
         }
-        obj.put("updatedAt", System.currentTimeMillis())
-        changed = true
-        break
     }
-    if (!changed) return false
-    prefs.edit().putString(ConversationMemoryCandidateKey, existing.toString()).apply()
-    return true
 }
 
 fun deleteConversationMemoryCandidate(
     context: Context,
     candidateId: String
 ): Boolean {
-    if (candidateId.isBlank()) return false
-    val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
-    val existing = runCatching {
-        JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
-    }.getOrElse { JSONArray() }
-    val updated = JSONArray()
-    var removed = false
-    for (index in 0 until existing.length()) {
-        val obj = existing.optJSONObject(index) ?: continue
-        if (obj.optString("id") == candidateId) {
-            removed = true
-            continue
+    return runBlocking {
+        ConversationMemoryCandidateWriteMutex.withLock {
+            if (candidateId.isBlank()) return@withLock false
+            val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+            val existing = runCatching {
+                JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+            }.getOrElse { JSONArray() }
+            val updated = JSONArray()
+            var removed = false
+            for (index in 0 until existing.length()) {
+                val obj = existing.optJSONObject(index) ?: continue
+                if (obj.optString("id") == candidateId) {
+                    removed = true
+                    continue
+                }
+                updated.put(obj)
+            }
+            if (!removed) return@withLock false
+            prefs.edit().putString(ConversationMemoryCandidateKey, updated.toString()).apply()
+            true
         }
-        updated.put(obj)
     }
-    if (!removed) return false
-    prefs.edit().putString(ConversationMemoryCandidateKey, updated.toString()).apply()
-    return true
 }
 
 private fun normalizeMemoryCandidateText(value: String): String {

@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.llm.ChatGenerationRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
+import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
@@ -102,7 +103,7 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("fusion_chat_settings", Context.MODE_PRIVATE) }
-    val engine = remember { LiteRtLlmEngine(context.applicationContext) }
+    val engine = remember { FusionRuntimeManager.sharedEngine(context) }
     val selectedModel = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
     val selectedPath = prefs.getString("selected_model_path", null)
     val currentSettings = remember { loadAbSettings(prefs) }
@@ -135,7 +136,7 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
         }
         onDispose {
             unregister()
-            runCatching { engine.unload() }
+            FusionRuntimeManager.unloadSharedEngineIfIdle("ab_test_dispose")
         }
     }
 

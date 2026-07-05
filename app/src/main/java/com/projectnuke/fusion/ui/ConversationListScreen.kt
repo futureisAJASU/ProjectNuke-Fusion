@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.ConversationEntity
+import com.projectnuke.fusion.data.escapeSqlLikeQuery
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -86,7 +87,7 @@ fun ConversationListScreen(
         if (trimmedSearchQuery.isBlank()) {
             flowOf(emptyList())
         } else {
-            dao.observeConversationIdsMatchingMessages(trimmedSearchQuery)
+            dao.observeConversationIdsMatchingMessages(escapeSqlLikeQuery(trimmedSearchQuery))
         }
     }.collectAsState(initial = emptyList())
 

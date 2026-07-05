@@ -110,6 +110,7 @@ import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
 import com.projectnuke.fusion.llm.BenchmarkRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
+import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
@@ -731,7 +732,7 @@ fun ChatScreen(
     }
 
     val scope = rememberCoroutineScope()
-    val engine = remember { LiteRtLlmEngine(context.applicationContext) }
+    val engine = remember { FusionRuntimeManager.sharedEngine(context) }
     DisposableEffect(engine) {
         val unregister = FusionRuntimeLock.registerChatEngineUnloadCallback {
             Log.i("FusionEngine", "Unloading chat engine for exclusive benchmark mode")

@@ -38,7 +38,7 @@ interface ChatDao {
                 WHEN instr(content, '<fusion_attachment>') > 0 THEN substr(content, 1, instr(content, '<fusion_attachment>') - 1)
                 ELSE content
             END
-            LIKE '%' || :query || '%'
+            LIKE '%' || :query || '%' ESCAPE '\'
         """
     )
     fun observeConversationIdsMatchingMessages(query: String): Flow<List<Long>>
@@ -55,7 +55,7 @@ interface ChatDao {
                 WHEN instr(content, '<fusion_attachment>') > 0 THEN substr(content, 1, instr(content, '<fusion_attachment>') - 1)
                 ELSE content
             END
-            LIKE '%' || :query || '%'
+            LIKE '%' || :query || '%' ESCAPE '\'
         LIMIT :limit
         """
     )
@@ -117,4 +117,18 @@ interface ChatDao {
 
     @Query("DELETE FROM messages WHERE id = :messageId")
     suspend fun deleteMessageById(messageId: Long)
+}
+
+fun escapeSqlLikeQuery(query: String): String {
+    return buildString {
+        query.forEach { char ->
+            when (char) {
+                '\\', '%', '_' -> {
+                    append('\\')
+                    append(char)
+                }
+                else -> append(char)
+            }
+        }
+    }
 }
