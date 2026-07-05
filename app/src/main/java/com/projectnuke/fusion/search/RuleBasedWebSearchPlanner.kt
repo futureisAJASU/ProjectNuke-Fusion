@@ -235,12 +235,18 @@ object RuleBasedWebSearchPlanner {
         if (intent == SearchIntent.WEATHER) return true
         if (intent == SearchIntent.STOCK && hasStrongDomesticSignal(combined)) return true
         if (intent in setOf(SearchIntent.NEWS, SearchIntent.CURRENT_INFO) && hasStrongDomesticSignal(combined)) return true
+        if (containsDomesticYieldSignal(combined)) return true
         return DomesticTopicTerms.any { combined.contains(it, ignoreCase = true) }
     }
 
     private fun hasStrongDomesticSignal(text: String): Boolean {
         return DomesticCompanyTerms.any { text.contains(it, ignoreCase = true) } ||
             DomesticMarketTerms.any { text.contains(it, ignoreCase = true) }
+    }
+
+    private fun containsDomesticYieldSignal(text: String): Boolean {
+        if (!text.contains("수율", ignoreCase = true)) return false
+        return DomesticCompanyTerms.any { text.contains(it, ignoreCase = true) }
     }
 
     private fun detectIntent(current: String, topic: String, modifiers: List<String>): SearchIntent {
@@ -403,7 +409,7 @@ object RuleBasedWebSearchPlanner {
     private val FreshnessTerms = listOf("최신", "요즘", "최근", "오늘", "current", "latest", "update")
     private val PaperTerms = listOf("논문", "연구", "paper", "arxiv", "ieee", "acm", "ilt")
     private val DomesticCompanyTerms = listOf("삼성전자", "삼성SDI", "SK하이닉스", "LG", "LGES", "네이버", "카카오")
-    private val DomesticMarketTerms = listOf("국내", "투자", "주가", "코스피", "코스닥", "오늘 뉴스", "수율")
+    private val DomesticMarketTerms = listOf("국내", "투자", "주가", "코스피", "코스닥", "오늘 뉴스")
     private val DomesticTopicTerms = DomesticCompanyTerms + DomesticMarketTerms
     private val GlobalTopicTerms = listOf("arxiv", "paper", "research", "benchmark", "cuLitho", "STAR-KV", "TurboQuant", "RAG-Fusion", "ILT")
     private val GlobalCompanyTerms = listOf("NVIDIA", "AMD", "Intel", "TSMC", "Micron", "Qualcomm", "Toyota", "QuantumScape", "Solid Power")
