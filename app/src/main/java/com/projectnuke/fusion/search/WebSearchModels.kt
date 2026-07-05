@@ -69,10 +69,15 @@ data class WebSearchSource(
 data class WebSearchPlan(
     val intent: SearchIntent,
     val primaryQuery: String,
+    val originalInput: String = primaryQuery,
+    val resolvedTopic: String = primaryQuery,
     val alternateQueries: List<String> = emptyList(),
     val preferredProviderTypes: List<WebSearchProviderType> = emptyList(),
     val freshnessRequired: Boolean = false,
-    val languageRegion: String = "ko-KR"
+    val languageRegion: String = "ko-KR",
+    val regionHint: String? = null,
+    val reason: String = "rule_based",
+    val modifiers: List<String> = emptyList()
 )
 
 data class WebSearchQuality(

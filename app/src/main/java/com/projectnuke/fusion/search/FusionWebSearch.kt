@@ -63,6 +63,12 @@ private data class ProviderOutcome(
     val traces: List<WebSearchExecutionTrace>
 )
 
+private data class SearchSelection(
+    val results: List<FusionSearchResult>,
+    val quality: WebSearchQuality,
+    val debugMessage: String?
+)
+
 object FusionWebSearch {
     fun shouldAutoUseWebSearch(userInput: String): Boolean {
         val normalized = userInput.trim().lowercase(Locale.ROOT)
@@ -153,7 +159,12 @@ object FusionWebSearch {
         previousUserMessage: String?,
         providerRepository: WebSearchProviderRepository? = null
     ): FusionSearchResponse {
-        val plan = buildSearchPlan(userInput, previousUserMessage)
+        val plan = RuleBasedWebSearchPlanner.plan(
+            RuleBasedWebSearchPlannerInput(
+                currentUserInput = userInput,
+                previousUserMessage = previousUserMessage
+            )
+        )
         val queries = (listOf(plan.primaryQuery) + plan.alternateQueries).filter { it.isNotBlank() }.distinct()
 
         return withContext(Dispatchers.IO) {
@@ -186,6 +197,22 @@ object FusionWebSearch {
                 val manual = executeProvider(providerRepository, selectedProvider, plan.primaryQuery, plan.intent)
                 val quality = evaluateResultQuality(manual.results, plan.primaryQuery, plan.intent, manual.traces.lastOrNull())
                 traces += manual.traces.map { it.copy(qualityScore = quality.score) }
+                if (!quality.isUsable && plan.alternateQueries.isNotEmpty()) {
+                    val altQuery = plan.alternateQueries.first()
+                    val alt = executeProvider(providerRepository, selectedProvider, altQuery, plan.intent)
+                    val altQuality = evaluateResultQuality(alt.results, altQuery, plan.intent, alt.traces.lastOrNull())
+                    traces += alt.traces.map {
+                        it.copy(
+                            qualityScore = altQuality.score,
+                            fallbackReason = if (altQuality.shouldTryFallback) altQuality.reasons.joinToString("; ") else "alternate query after poor primary"
+                        )
+                    }
+                    if (altQuality.score > quality.score) {
+                        if (altQuality.isUsable || !selectedProvider.allowFallbackInManualMode) {
+                            return@withContext buildResponse(userInput, plan, alt.results, traces, "수동 제공자에서 대체 검색어를 사용했습니다.")
+                        }
+                    }
+                }
                 if (quality.isUsable || !selectedProvider.allowFallbackInManualMode) {
                     return@withContext buildResponse(userInput, plan, manual.results, traces, quality.reasons.joinToString("; ").ifBlank { null })
                 }
@@ -209,6 +236,22 @@ object FusionWebSearch {
             if (freeQuality.isUsable) {
                 return@withContext buildResponse(userInput, plan, bestResults, traces)
             }
+
+            val bounded = runBoundedAutoFallback(
+                repository = providerRepository,
+                providers = providers,
+                plan = plan,
+                traces = traces,
+                currentBestResults = bestResults,
+                currentBestQuality = bestQuality
+            )
+            return@withContext buildResponse(
+                userInput = userInput,
+                plan = plan,
+                rawResults = bounded.results,
+                traces = traces,
+                debug = bounded.debugMessage
+            )
 
             val candidates = providers
                 .filter { it.type != WebSearchProviderType.FREE_DEFAULT && it.isEnabled }
@@ -258,6 +301,88 @@ object FusionWebSearch {
     private fun typeRank(type: WebSearchProviderType, preferred: List<WebSearchProviderType>): Int {
         val index = preferred.indexOf(type)
         return if (index >= 0) index else 100
+    }
+
+    private suspend fun runBoundedAutoFallback(
+        repository: WebSearchProviderRepository,
+        providers: List<WebSearchProviderConfig>,
+        plan: WebSearchPlan,
+        traces: MutableList<WebSearchExecutionTrace>,
+        currentBestResults: List<FusionSearchResult>,
+        currentBestQuality: WebSearchQuality
+    ): SearchSelection {
+        var bestResults = currentBestResults
+        var bestQuality = currentBestQuality
+        var debug: String? = null
+
+        val firstAlternate = plan.alternateQueries.firstOrNull()
+        if (firstAlternate != null) {
+            val freeAlt = searchFreeDefault(firstAlternate, plan.intent)
+            val freeAltQuality = evaluateResultQuality(freeAlt.results, firstAlternate, plan.intent, freeAlt.traces.lastOrNull())
+            traces += freeAlt.traces.map {
+                it.copy(
+                    qualityScore = freeAltQuality.score,
+                    fallbackReason = if (freeAltQuality.shouldTryFallback) freeAltQuality.reasons.joinToString("; ") else "free alternate query"
+                )
+            }
+            if (freeAltQuality.score > bestQuality.score) {
+                bestResults = freeAlt.results
+                bestQuality = freeAltQuality
+                debug = "무료 기본 검색에서 대체 검색어를 사용했습니다."
+            }
+            if (freeAltQuality.isUsable) {
+                return SearchSelection(bestResults, bestQuality, debug)
+            }
+        }
+
+        val provider = providers
+            .filter { it.type != WebSearchProviderType.FREE_DEFAULT && it.isEnabled }
+            .sortedWith(compareBy<WebSearchProviderConfig> { typeRank(it.type, plan.preferredProviderTypes) }.thenBy { it.priority })
+            .firstOrNull { repository.missingRequirements(it).isEmpty() }
+            ?: return SearchSelection(
+                bestResults,
+                bestQuality,
+                debug ?: if (bestResults.isEmpty()) "검색 결과를 불러오지 못했습니다." else "API 제공자를 사용할 수 없어 무료 기본 검색 결과를 사용했습니다."
+            )
+
+        val apiPrimary = executeProvider(repository, provider, plan.primaryQuery, plan.intent)
+        val apiPrimaryQuality = evaluateResultQuality(apiPrimary.results, plan.primaryQuery, plan.intent, apiPrimary.traces.lastOrNull())
+        traces += apiPrimary.traces.map {
+            it.copy(
+                qualityScore = apiPrimaryQuality.score,
+                fallbackReason = if (apiPrimaryQuality.shouldTryFallback) apiPrimaryQuality.reasons.joinToString("; ") else "api primary query"
+            )
+        }
+        if (apiPrimaryQuality.score > bestQuality.score) {
+            bestResults = apiPrimary.results
+            bestQuality = apiPrimaryQuality
+            debug = "자동 모드에서 ${provider.displayName} 제공자를 사용했습니다."
+        }
+        if (apiPrimaryQuality.isUsable) {
+            return SearchSelection(bestResults, bestQuality, debug)
+        }
+
+        if (firstAlternate != null) {
+            val apiAlt = executeProvider(repository, provider, firstAlternate, plan.intent)
+            val apiAltQuality = evaluateResultQuality(apiAlt.results, firstAlternate, plan.intent, apiAlt.traces.lastOrNull())
+            traces += apiAlt.traces.map {
+                it.copy(
+                    qualityScore = apiAltQuality.score,
+                    fallbackReason = if (apiAltQuality.shouldTryFallback) apiAltQuality.reasons.joinToString("; ") else "api alternate query"
+                )
+            }
+            if (apiAltQuality.score > bestQuality.score) {
+                bestResults = apiAlt.results
+                bestQuality = apiAltQuality
+                debug = "자동 모드에서 ${provider.displayName} 제공자와 대체 검색어를 사용했습니다."
+            }
+        }
+
+        return SearchSelection(
+            bestResults,
+            bestQuality,
+            debug ?: if (bestResults.isEmpty()) "검색 결과를 불러오지 못했습니다." else "검색 결과 품질이 낮아 가장 나은 결과를 사용했습니다."
+        )
     }
 
     private fun buildResponse(

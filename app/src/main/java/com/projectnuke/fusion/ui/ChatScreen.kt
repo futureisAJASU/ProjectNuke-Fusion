@@ -8824,6 +8824,14 @@ private fun recordWebSearchDiagnostics(
     response: FusionSearchResponse?
 ) {
     response ?: return
+    response.plan?.let { plan ->
+        DeveloperLogStore.record(
+            context = context,
+            category = "web_search",
+            message = "웹검색 검색어 계획 생성",
+            technicalSummary = "primary=${plan.primaryQuery.take(90)}, alternates=${plan.alternateQueries.size}, preferred=${plan.preferredProviderTypes.joinToString { it.name }}, reason=${plan.reason.take(80)}"
+        )
+    }
     response.traces.forEach { trace ->
         DeveloperLogStore.record(
             context = context,
