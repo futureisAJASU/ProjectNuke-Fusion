@@ -18,10 +18,25 @@ object FusionRuntimeManager {
     fun unloadSharedEngineIfIdle(reason: String) {
         if (FusionRuntimeLock.isChatGenerationRunning || FusionRuntimeLock.isBenchmarkRunning) return
         synchronized(lock) {
+            if (FusionRuntimeLock.isChatGenerationRunning || FusionRuntimeLock.isBenchmarkRunning) return
             runCatching {
                 sharedEngine?.unload()
             }.onFailure {
                 Log.e("FusionEngine", "Failed to unload shared engine while idle: $reason", it)
+            }
+        }
+    }
+
+    suspend fun unloadSharedEngineWhenRuntimeIdle(reason: String) {
+        if (FusionRuntimeLock.isChatGenerationRunning || FusionRuntimeLock.isBenchmarkRunning) return
+        FusionRuntimeLock.withLock {
+            if (FusionRuntimeLock.isChatGenerationRunning || FusionRuntimeLock.isBenchmarkRunning) return@withLock
+            synchronized(lock) {
+                runCatching {
+                    sharedEngine?.unload()
+                }.onFailure {
+                    Log.e("FusionEngine", "Failed to unload shared engine while runtime idle: $reason", it)
+                }
             }
         }
     }
@@ -32,6 +47,16 @@ object FusionRuntimeManager {
                 sharedEngine?.unload()
             }.onFailure {
                 Log.e("FusionEngine", "Failed to unload shared engine after exclusive run: $reason", it)
+            }
+        }
+    }
+
+    fun unloadSharedEngineForActiveOwner(reason: String) {
+        synchronized(lock) {
+            runCatching {
+                sharedEngine?.unload()
+            }.onFailure {
+                Log.e("FusionEngine", "Failed to unload shared engine for active owner: $reason", it)
             }
         }
     }

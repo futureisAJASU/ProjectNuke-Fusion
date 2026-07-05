@@ -736,7 +736,7 @@ fun ChatScreen(
     DisposableEffect(engine) {
         val unregister = FusionRuntimeLock.registerChatEngineUnloadCallback {
             Log.i("FusionEngine", "Unloading chat engine for exclusive benchmark mode")
-            engine.unload()
+            FusionRuntimeManager.unloadSharedEngineAfterExclusive("exclusive_prepare")
         }
         onDispose {
             unregister()
@@ -8118,8 +8118,7 @@ private suspend fun generateWithLiteRtRecovery(
     }
 
     Log.e("FusionEngine", "LiteRT generation failed; unloading engine and retrying once: $firstResult")
-    runCatching { engine.unload() }
-        .onFailure { Log.e("FusionEngine", "Failed to unload chat engine before retry", it) }
+    FusionRuntimeManager.unloadSharedEngineForActiveOwner("chat_retry")
     onBeforeRetry()
 
     val retryResult = generateOnce()
@@ -8128,8 +8127,7 @@ private suspend fun generateWithLiteRtRecovery(
     }
 
     Log.e("FusionEngine", "LiteRT generation retry failed: $retryResult")
-    runCatching { engine.unload() }
-        .onFailure { Log.e("FusionEngine", "Failed to unload chat engine after retry failure", it) }
+    FusionRuntimeManager.unloadSharedEngineForActiveOwner("chat_retry_failed")
     throw IllegalStateException("모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.")
 }
 

@@ -72,10 +72,8 @@ fun FusionBenchmarkScreen(
 
     DisposableEffect(engine) {
         val unregisterMemoryUnloader = FusionMemoryManager.registerIdleEngineUnloader {
-            if (!FusionRuntimeLock.isChatGenerationRunning && !FusionRuntimeLock.isBenchmarkRunning) {
-                Log.i("FusionMemory", "Unloading idle benchmark engine under memory pressure")
-                engine.unload()
-            }
+            Log.i("FusionMemory", "Requesting idle shared engine unload under memory pressure")
+            FusionRuntimeManager.unloadSharedEngineIfIdle("benchmark_memory_pressure")
         }
         onDispose {
             unregisterMemoryUnloader()
@@ -261,8 +259,7 @@ private suspend fun runBenchmark(
                 onStatus("모델 리소스를 정리하는 중입니다.")
                 Log.i("FusionEngine", "Requesting chat engine unload before benchmark")
                 FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
-                runCatching { engine.unload() }
-                    .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine before exclusive mode", it) }
+                FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_prepare")
             }
         ) {
             try {
@@ -273,8 +270,7 @@ private suspend fun runBenchmark(
                 Log.i("FusionEngine", "Benchmark marks engine stale and reloads runtime settings")
                 onStatus("모델 설정을 다시 적용하는 중입니다.")
                 val reloadStartMs = SystemClock.elapsedRealtime()
-                runCatching { engine.unload() }
-                    .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine before run", it) }
+                FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_reload")
                 val engineReloadMs = SystemClock.elapsedRealtime() - reloadStartMs
                 onStatus("모델을 불러오는 중입니다.")
 
@@ -355,8 +351,7 @@ private suspend fun runBenchmark(
             DeveloperLogStore.record(context, "benchmark", "벤치마크 성공", "model=${snapshot.modelName}, decodeTps=${decodeTps?.toFloat()}")
                 onStatus("벤치마크가 완료되었습니다.")
             } finally {
-                runCatching { engine.unload() }
-                    .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine after run", it) }
+                FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_after_run")
                 System.gc()
             }
         }
@@ -391,8 +386,7 @@ private suspend fun runBenchmark(
             Toast.makeText(context, "벤치마크 기록을 저장할 수 없습니다.", Toast.LENGTH_SHORT).show()
         }
     } finally {
-        runCatching { engine.unload() }
-            .onFailure { Log.e("FusionEngine", "Failed to unload benchmark engine in final cleanup", it) }
+        FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("benchmark_final_cleanup")
         System.gc()
         onFinished()
     }

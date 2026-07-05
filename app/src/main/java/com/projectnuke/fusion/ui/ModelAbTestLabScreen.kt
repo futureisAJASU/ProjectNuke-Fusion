@@ -130,9 +130,7 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
 
     DisposableEffect(engine) {
         val unregister = FusionMemoryManager.registerIdleEngineUnloader {
-            if (!FusionRuntimeLock.isChatGenerationRunning && !FusionRuntimeLock.isBenchmarkRunning) {
-                engine.unload()
-            }
+            FusionRuntimeManager.unloadSharedEngineIfIdle("ab_test_memory_pressure")
         }
         onDispose {
             unregister()
@@ -141,6 +139,9 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
     }
 
     BackHandler(enabled = !isRunning) { onBack() }
+    BackHandler(enabled = isRunning) {
+        Toast.makeText(context, "테스트 실행 중에는 뒤로 갈 수 없습니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+    }
 
     if (showHistory) {
         ModelAbTestHistoryScreen(onBack = { showHistory = false })
@@ -475,14 +476,14 @@ private suspend fun runAbTests(
         onPrepareExclusiveMode = {
             onStatus("모델 리소스를 정리하는 중입니다.")
             FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
-            runCatching { engine.unload() }
+            FusionRuntimeManager.unloadSharedEngineAfterExclusive("ab_test_prepare")
         }
     ) {
         targets.forEachIndexed { index, target ->
             val label = targetLabel(index)
             onStatus("$label 실행 중...")
             runCatching {
-                runCatching { engine.unload() }
+                FusionRuntimeManager.unloadSharedEngineAfterExclusive("ab_test_target_prepare")
                 System.gc()
                 delay(250L)
                 runSingleAbTarget(context, engine, prefs, prompt, label, target)
@@ -519,7 +520,7 @@ private suspend fun runAbTests(
             }
         }
     }
-    runCatching { engine.unload() }
+    FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("ab_test_complete")
     DeveloperLogStore.record(context, "ab_test", "A/B 테스트 완료", "targets=${targets.size}")
     return completedResults
 }
