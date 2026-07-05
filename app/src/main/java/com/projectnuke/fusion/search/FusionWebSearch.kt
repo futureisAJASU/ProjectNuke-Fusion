@@ -70,26 +70,8 @@ private data class SearchSelection(
 )
 
 object FusionWebSearch {
-    fun shouldAutoUseWebSearch(userInput: String): Boolean {
-        val normalized = userInput.trim().lowercase(Locale.ROOT)
-        if (normalized.isBlank()) return false
-
-        return detectIntent(userInput) != SearchIntent.GENERAL ||
-            listOf(
-                "current info",
-                "stock price",
-                "news",
-                "검색",
-                "검색해줘",
-                "찾아줘",
-                "웹검색",
-                "최신",
-                "최근",
-                "오늘",
-                "뉴스"
-            ).any { normalized.contains(it) }
-    }
-
+    fun shouldAutoUseWebSearch(userInput: String): Boolean =
+        RuleBasedWebSearchPlanner.shouldUseWebSearch(userInput)
     fun detectIntent(query: String): SearchIntent {
         val normalized = query.trim().lowercase(Locale.ROOT)
         val newsKeywords = listOf("오늘 주요 뉴스", "오늘 뉴스", "최신 뉴스", "뉴스 정리", "뭐가 중요", "뉴스", "속보")
@@ -109,51 +91,21 @@ object FusionWebSearch {
     fun rewriteQuery(
         userInput: String,
         previousUserMessage: String?
-    ): String = buildSearchPlan(userInput, previousUserMessage).primaryQuery
-
+    ): String = RuleBasedWebSearchPlanner.plan(
+        RuleBasedWebSearchPlannerInput(
+            currentUserInput = userInput,
+            previousUserMessage = previousUserMessage
+        )
+    ).primaryQuery
     fun buildSearchPlan(
         userInput: String,
         previousUserMessage: String?
-    ): WebSearchPlan {
-        val intent = detectIntent(userInput)
-        val trimmed = userInput.trim()
-        val previousTopic = previousUserMessage?.trim().orEmpty()
-        val primary = when {
-            isGenericFollowUp(trimmed) && previousTopic.isNotBlank() -> "$previousTopic $trimmed"
-            isBroadNewsQuery(trimmed) -> "대한민국 주요 뉴스 오늘"
-            trimmed.contains("삼성전자") && trimmed.contains("주가") -> "삼성전자 005930 주가 오늘 네이버 금융"
-            else -> trimmed
-        }.trim()
-
-        val alternate = buildList {
-            if (asksForMoreSources(trimmed) && previousTopic.isNotBlank()) {
-                val freshness = when (intent) {
-                    SearchIntent.NEWS, SearchIntent.CURRENT_INFO, SearchIntent.STOCK -> "최신 뉴스 분석"
-                    else -> "추가 자료 분석"
-                }
-                add("$previousTopic $trimmed $freshness".trim())
-            }
-        }
-
-        val preferred = when {
-            looksKoreanDomestic(primary, intent) -> listOf(WebSearchProviderType.NAVER, WebSearchProviderType.KAKAO_DAUM)
-            intent == SearchIntent.NEWS -> listOf(WebSearchProviderType.NAVER, WebSearchProviderType.BRAVE, WebSearchProviderType.KAKAO_DAUM)
-            else -> listOf(WebSearchProviderType.BRAVE, WebSearchProviderType.EXA, WebSearchProviderType.CUSTOM_COMPATIBLE)
-        }
-
-        // TODO: Add small local query planner model. Output contract:
-        // intent, primary query, alternate queries, provider category, freshness, language/region.
-        // External AI planner can be added later only after prompt/history stripping is verified.
-        return WebSearchPlan(
-            intent = intent,
-            primaryQuery = primary,
-            alternateQueries = alternate,
-            preferredProviderTypes = preferred,
-            freshnessRequired = intent == SearchIntent.NEWS || intent == SearchIntent.CURRENT_INFO || intent == SearchIntent.STOCK,
-            languageRegion = if (primary.any { it in '가'..'힣' }) "ko-KR" else "en-US"
+    ): WebSearchPlan = RuleBasedWebSearchPlanner.plan(
+        RuleBasedWebSearchPlannerInput(
+            currentUserInput = userInput,
+            previousUserMessage = previousUserMessage
         )
-    }
-
+    )
     suspend fun search(
         userInput: String,
         previousUserMessage: String?,
@@ -165,7 +117,6 @@ object FusionWebSearch {
                 previousUserMessage = previousUserMessage
             )
         )
-        val queries = (listOf(plan.primaryQuery) + plan.alternateQueries).filter { it.isNotBlank() }.distinct()
 
         return withContext(Dispatchers.IO) {
             if (providerRepository == null) {
@@ -181,7 +132,7 @@ object FusionWebSearch {
             if (mode == WebSearchMode.MANUAL) {
                 val missing = providerRepository.missingRequirements(selectedProvider)
                 if (missing.isNotEmpty()) {
-                    val reason = "수동 제공자 필수 설정 누락: ${missing.joinToString(",")}"
+                    val reason = "?섎룞 ?쒓났???꾩닔 ?ㅼ젙 ?꾨씫: "
                     traces += WebSearchExecutionTrace(
                         providerType = selectedProvider.type,
                         providerDisplayName = selectedProvider.displayName,
@@ -209,7 +160,7 @@ object FusionWebSearch {
                     }
                     if (altQuality.score > quality.score) {
                         if (altQuality.isUsable || !selectedProvider.allowFallbackInManualMode) {
-                            return@withContext buildResponse(userInput, plan, alt.results, traces, "수동 제공자에서 대체 검색어를 사용했습니다.")
+                            return@withContext buildResponse(userInput, plan, alt.results, traces, "?섎룞 ?쒓났?먯뿉???泥?寃?됱뼱瑜??ъ슜?덉뒿?덈떎.")
                         }
                     }
                 }
@@ -222,7 +173,7 @@ object FusionWebSearch {
                     plan,
                     if (free.results.isNotEmpty()) free.results else manual.results,
                     traces + free.traces,
-                    "수동 제공자 결과 품질 부족으로 무료 기본 검색을 시도했습니다."
+                    "?섎룞 ?쒓났??寃곌낵 ?덉쭏????븘 臾대즺 湲곕낯 寃?됱쓣 ?쒕룄?덉뒿?덈떎."
                 )
             }
 
@@ -252,52 +203,8 @@ object FusionWebSearch {
                 traces = traces,
                 debug = bounded.debugMessage
             )
-
-            val candidates = providers
-                .filter { it.type != WebSearchProviderType.FREE_DEFAULT && it.isEnabled }
-                .sortedWith(compareBy<WebSearchProviderConfig> { typeRank(it.type, plan.preferredProviderTypes) }.thenBy { it.priority })
-
-            for (provider in candidates) {
-                val missing = providerRepository.missingRequirements(provider)
-                if (missing.isNotEmpty()) {
-                    traces += WebSearchExecutionTrace(
-                        providerType = provider.type,
-                        providerDisplayName = provider.displayName,
-                        queryUsed = plan.primaryQuery,
-                        fallbackReason = "필수 설정 누락: ${missing.joinToString(",")}"
-                    )
-                    continue
-                }
-                for (query in queries) {
-                    val outcome = executeProvider(providerRepository, provider, query, plan.intent)
-                    val quality = evaluateResultQuality(outcome.results, query, plan.intent, outcome.traces.lastOrNull())
-                    traces += outcome.traces.map { it.copy(qualityScore = quality.score, fallbackReason = if (quality.shouldTryFallback) quality.reasons.joinToString("; ") else null) }
-                    if (quality.score > bestQuality.score) {
-                        bestQuality = quality
-                        bestResults = outcome.results
-                    }
-                    if (quality.isUsable) {
-                        return@withContext buildResponse(
-                            userInput,
-                            plan,
-                            outcome.results,
-                            traces,
-                            "자동 모드에서 무료 기본 검색 품질이 낮아 ${provider.displayName} 제공자를 사용했습니다."
-                        )
-                    }
-                }
-            }
-
-            buildResponse(
-                userInput,
-                plan,
-                bestResults,
-                traces,
-                if (bestResults.isEmpty()) "검색 결과를 불러오지 못했습니다." else "API 제공자를 사용할 수 없어 무료 기본 검색 결과를 사용했습니다."
-            )
         }
     }
-
     private fun typeRank(type: WebSearchProviderType, preferred: List<WebSearchProviderType>): Int {
         val index = preferred.indexOf(type)
         return if (index >= 0) index else 100
