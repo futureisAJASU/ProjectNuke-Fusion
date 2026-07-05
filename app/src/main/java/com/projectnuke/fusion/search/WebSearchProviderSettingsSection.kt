@@ -84,15 +84,15 @@ fun WebSearchProviderSettingsSection(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(10.dp)
         ) {
-            Text("웹검색 제공자", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("웹 검색 제공자", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "무료 기본 검색은 별도의 API 키 없이 사용할 수 있지만, 검색 결과가 제한적이거나 일시적으로 실패할 수 있습니다.",
+                "무료 기본 검색은 별도 API 없이 사용할 수 있지만 검색 결과가 제한적이거나 일시적으로 실패할 수 있습니다.",
                 color = Color(0xFFB8C0CC),
                 fontSize = 12.sp,
                 lineHeight = 16.sp
             )
             Text(
-                "자동 모드에서는 검색 결과 품질을 확인한 뒤 필요한 경우 다른 제공자를 시도합니다. 수동 모드에서는 선택한 검색 제공자를 우선 사용합니다.",
+                "자동 모드에서는 검색 결과 품질이 낮을 때 다른 제공자를 시도합니다. 수동 모드에서는 선택한 검색 제공자를 우선 사용합니다.",
                 color = Color(0xFFB8C0CC),
                 fontSize = 12.sp,
                 lineHeight = 16.sp
@@ -137,23 +137,27 @@ fun WebSearchProviderSettingsSection(
                             Text(provider.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                             Text(provider.type.name, color = Color(0xFF9EA7B3), fontSize = 11.sp)
                         }
-                        Switch(
-                            checked = provider.isEnabled,
-                            onCheckedChange = { enabled ->
-                                scope.launch {
-                                    repository.saveProvider(provider.copy(isEnabled = enabled))
-                                    refresh()
+                        if (provider.type == WebSearchProviderType.FREE_DEFAULT) {
+                            Text("항상 사용", color = Color(0xFF9EA7B3), fontSize = 11.sp)
+                        } else {
+                            Switch(
+                                checked = provider.isEnabled,
+                                onCheckedChange = { enabled ->
+                                    scope.launch {
+                                        repository.saveProvider(provider.copy(isEnabled = enabled))
+                                        refresh()
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
                 }
             }
 
             selectedProvider?.let { provider ->
-                Text("선택한 제공자: ${provider.displayName}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text("선택된 제공자: ${provider.displayName}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 if (provider.type == WebSearchProviderType.FREE_DEFAULT) {
-                    Text("FREE_DEFAULT는 항상 사용할 수 있으며 API 키가 필요하지 않습니다.", color = Color(0xFFB8C0CC), fontSize = 12.sp)
+                    Text("무료 기본 검색은 기본 대체 검색으로 항상 사용할 수 있습니다.", color = Color(0xFFB8C0CC), fontSize = 12.sp)
                 } else {
                     if (provider.type == WebSearchProviderType.CUSTOM_COMPATIBLE) {
                         OutlinedTextField(
@@ -207,7 +211,7 @@ fun WebSearchProviderSettingsSection(
                                 saveSelectedProvider(provider.copy(allowFallbackInManualMode = checked), "설정을 저장했습니다.")
                             }
                         )
-                        Text("수동 모드에서 무료 기본 검색으로 대체 허용", color = Color(0xFFB8C0CC), fontSize = 12.sp)
+                        Text("수동 모드에서 무료 기본 검색으로 대체를 허용", color = Color(0xFFB8C0CC), fontSize = 12.sp)
                     }
                     TextButton(onClick = { saveSelectedProvider(provider.copy(isEnabled = true, baseUrl = baseUrl.ifBlank { provider.baseUrl }), "검색 제공자 설정을 저장했습니다.") }) {
                         Text("제공자 저장", color = Color(0xFF79B8FF))
@@ -216,7 +220,7 @@ fun WebSearchProviderSettingsSection(
             }
 
             Text(
-                "외부 검색 API는 각 제공자의 약관, 할당량, 데이터 정책을 따릅니다.",
+                "외부 검색 API는 각 제공자의 요금, 사용량, 호출 정책에 따라 제한될 수 있습니다.",
                 color = Color(0xFFFFC774),
                 fontSize = 12.sp,
                 lineHeight = 16.sp

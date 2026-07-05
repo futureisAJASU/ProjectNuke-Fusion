@@ -132,7 +132,7 @@ object FusionWebSearch {
             if (mode == WebSearchMode.MANUAL) {
                 val missing = providerRepository.missingRequirements(selectedProvider)
                 if (missing.isNotEmpty()) {
-                    val reason = "?섎룞 ?쒓났???꾩닔 ?ㅼ젙 ?꾨씫: "
+                    val reason = "수동 제공자 필수 설정 누락: ${missing.joinToString(",")}"
                     traces += WebSearchExecutionTrace(
                         providerType = selectedProvider.type,
                         providerDisplayName = selectedProvider.displayName,
@@ -160,7 +160,7 @@ object FusionWebSearch {
                     }
                     if (altQuality.score > quality.score) {
                         if (altQuality.isUsable || !selectedProvider.allowFallbackInManualMode) {
-                            return@withContext buildResponse(userInput, plan, alt.results, traces, "?섎룞 ?쒓났?먯뿉???泥?寃?됱뼱瑜??ъ슜?덉뒿?덈떎.")
+                            return@withContext buildResponse(userInput, plan, alt.results, traces, "수동 제공자에서 대체 검색어를 사용했습니다.")
                         }
                     }
                 }
@@ -173,7 +173,7 @@ object FusionWebSearch {
                     plan,
                     if (free.results.isNotEmpty()) free.results else manual.results,
                     traces + free.traces,
-                    "?섎룞 ?쒓났??寃곌낵 ?덉쭏????븘 臾대즺 湲곕낯 寃?됱쓣 ?쒕룄?덉뒿?덈떎."
+                    "수동 제공자 결과 품질이 낮아 무료 기본 검색을 시도했습니다."
                 )
             }
 
@@ -618,11 +618,21 @@ object FusionWebSearch {
         query: String,
         block: () -> Pair<List<FusionSearchResult>, HttpFetchResult>
     ): ProviderOutcome {
+        var lastResponse: HttpFetchResult? = null
         return runCatching {
-            val (results, response) = block()
+            val (results, response) = block().also { lastResponse = it.second }
             ProviderOutcome(
                 results,
-                listOf(WebSearchExecutionTrace(provider.type, provider.displayName, query, httpStatus = response.statusCode, parsedResultCount = results.size, debugLabel = response.debugLabel))
+                listOf(
+                    WebSearchExecutionTrace(
+                        providerType = provider.type,
+                        providerDisplayName = provider.displayName,
+                        queryUsed = query,
+                        httpStatus = response.statusCode,
+                        parsedResultCount = results.size,
+                        debugLabel = response.debugLabel
+                    )
+                )
             )
         }.getOrElse { error ->
             ProviderOutcome(
@@ -632,9 +642,11 @@ object FusionWebSearch {
                         providerType = provider.type,
                         providerDisplayName = provider.displayName,
                         queryUsed = query,
+                        httpStatus = lastResponse?.statusCode,
                         exceptionClass = error::class.java.simpleName,
                         exceptionMessage = error.message?.take(120),
-                        fallbackReason = "제공자 요청 또는 파싱 실패"
+                        fallbackReason = "제공자 요청 또는 파싱 실패",
+                        debugLabel = lastResponse?.debugLabel
                     )
                 )
             )
@@ -761,7 +773,7 @@ object FusionWebSearch {
 
     private fun isGenericFollowUp(query: String): Boolean {
         val normalized = query.lowercase(Locale.ROOT).trim()
-        return listOf("검색", "검색해줘", "검색해서 알려줘", "찾아줘", "찾아서 알려줘", "웹검색", "더 검색", "알아봐").any { normalized == it }
+        return listOf("검색", "검색해줘", "찾아줘", "찾아봐", "알아봐", "더 찾아줘").any { normalized == it }
     }
 
     private fun isBroadNewsQuery(query: String): Boolean {
@@ -830,15 +842,15 @@ fun appendSearchSourcesMetadata(visibleAnswer: String, sources: List<WebSearchSo
     sources.take(12).forEach { source ->
         array.put(
             JSONObject()
-                .put("title", source.title)
-                .put("source", source.source)
-                .put("url", source.url)
-                .put("snippet", source.snippet)
-                .put("publishedAt", source.publishedAt)
+                .put("title", source.title.take(180))
+                .put("source", source.source?.take(120))
+                .put("url", source.url?.take(1000))
+                .put("snippet", source.snippet?.take(500))
+                .put("publishedAt", source.publishedAt?.take(120))
                 .put("providerType", source.providerType.name)
                 .put("providerDisplayName", source.providerDisplayName)
                 .put("searchCategory", source.searchCategory)
-                .put("queryUsed", source.queryUsed)
+                .put("queryUsed", source.queryUsed.take(240))
                 .put("rank", source.rank)
                 .put("score", source.score)
                 .put("qualityHints", JSONArray(source.qualityHints))

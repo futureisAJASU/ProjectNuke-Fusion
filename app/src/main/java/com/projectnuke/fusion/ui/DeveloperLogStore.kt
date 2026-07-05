@@ -15,6 +15,7 @@ object DeveloperLogStore {
     private const val PrefsName = "fusion_developer_log"
     private const val KeyEvents = "events"
     private const val MaxEvents = 50
+    private val lock = Any()
 
     fun record(
         context: Context,
@@ -22,17 +23,19 @@ object DeveloperLogStore {
         message: String,
         technicalSummary: String? = null
     ) {
-        val cleanMessage = message.take(180)
-        val cleanTechnical = technicalSummary?.take(240)
-        val updated = listOf(
-            DeveloperLogEvent(
-                timestamp = System.currentTimeMillis(),
-                category = category.take(40),
-                message = cleanMessage,
-                technicalSummary = cleanTechnical
-            )
-        ) + load(context)
-        save(context, updated.take(MaxEvents))
+        synchronized(lock) {
+            val cleanMessage = message.take(180)
+            val cleanTechnical = technicalSummary?.take(240)
+            val updated = listOf(
+                DeveloperLogEvent(
+                    timestamp = System.currentTimeMillis(),
+                    category = category.take(40),
+                    message = cleanMessage,
+                    technicalSummary = cleanTechnical
+                )
+            ) + load(context)
+            save(context, updated.take(MaxEvents))
+        }
     }
 
     fun load(context: Context): List<DeveloperLogEvent> {
@@ -50,7 +53,9 @@ object DeveloperLogStore {
     }
 
     fun clear(context: Context) {
-        context.getSharedPreferences(PrefsName, Context.MODE_PRIVATE).edit().remove(KeyEvents).apply()
+        synchronized(lock) {
+            context.getSharedPreferences(PrefsName, Context.MODE_PRIVATE).edit().remove(KeyEvents).apply()
+        }
     }
 
     private fun save(context: Context, events: List<DeveloperLogEvent>) {

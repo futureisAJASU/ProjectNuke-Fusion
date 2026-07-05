@@ -16,7 +16,7 @@ object RuleBasedWebSearchPlanner {
         val current = input.currentUserInput.trim()
         val previousTopic = extractTopic(input.previousUserMessage.orEmpty())
         val modifiers = detectModifiers(current)
-        val contextDependent = isGenericFollowUp(current) || isContextDependentFollowUp(current)
+        val contextDependent = isGenericFollowUp(current) || isSearchContextFollowUp(current)
         val currentKeywords = extractKeywords(current)
         val resolvedTopic = when {
             contextDependent && previousTopic.isNotBlank() -> resolveContextualTopic(previousTopic, current, modifiers)
@@ -41,7 +41,7 @@ object RuleBasedWebSearchPlanner {
                 SearchIntent.STOCK
             ),
             languageRegion = if (containsKorean(primaryQuery)) "ko-KR" else "en-US",
-            regionHint = if (shouldPreferDomestic(primaryQuery, resolvedTopic, current, intent, modifiers)) "KR" else null,
+            regionHint = if (shouldPreferDomestic(primaryQuery, resolvedTopic, current, intent)) "KR" else null,
             reason = buildReason(contextDependent, modifiers, preferred),
             modifiers = modifiers
         )
@@ -55,7 +55,7 @@ object RuleBasedWebSearchPlanner {
         return detectIntentForText(text) != SearchIntent.GENERAL ||
             TriggerWords.any { normalized.contains(it) } ||
             isGenericFollowUp(text) ||
-            isContextDependentFollowUp(text)
+            isSearchContextFollowUp(text)
     }
 
     fun extractKeywords(text: String): List<String> {
@@ -95,7 +95,7 @@ object RuleBasedWebSearchPlanner {
             modifiers.contains(ModifierPaper) -> "paper arxiv research"
             modifiers.contains(ModifierOpposing) -> "반대 의견 리스크 비판"
             modifiers.contains(ModifierMoreSources) && intent == SearchIntent.NEWS -> "최신 뉴스 출처"
-            modifiers.contains(ModifierMoreSources) && isTechnicalTopic(topic) -> "latest report analysis"
+            modifiers.contains(ModifierMoreSources) && shouldPreferTechnicalGlobal(topic, topic, current, intent, modifiers) -> "latest report analysis"
             modifiers.contains(ModifierMoreSources) -> "추가 자료"
             modifiers.contains(ModifierFreshness) || intent in setOf(SearchIntent.NEWS, SearchIntent.CURRENT_INFO, SearchIntent.STOCK) -> "최신"
             else -> ""
@@ -119,7 +119,7 @@ object RuleBasedWebSearchPlanner {
 
         if (modifiers.contains(ModifierMoreSources)) {
             alternates += if (intent == SearchIntent.NEWS) "$topic 추가 뉴스 출처" else "$topic 추가 자료"
-            alternates += if (isTechnicalTopic(topic)) "$topic latest report" else "$topic 분석"
+            alternates += if (shouldPreferTechnicalGlobal(topic, topic, current, intent, modifiers)) "$topic latest report" else "$topic 분석"
             buildEnglishTechnicalQuery(topic, intent)?.let { alternates += it }
         }
         if (modifiers.contains(ModifierOpposing)) {
@@ -130,9 +130,7 @@ object RuleBasedWebSearchPlanner {
         if (modifiers.contains(ModifierFreshness)) {
             alternates += "$topic 최신 뉴스"
             alternates += "$topic latest update"
-            if (!topic.contains(currentYear().toString())) {
-                alternates += "$topic ${currentYear()}"
-            }
+            if (!topic.contains(currentYear().toString())) alternates += "$topic ${currentYear()}"
         }
         if (modifiers.contains(ModifierPaper)) {
             alternates += "$topic paper arxiv"
@@ -180,38 +178,26 @@ object RuleBasedWebSearchPlanner {
         intent: SearchIntent,
         modifiers: List<String>
     ): List<WebSearchProviderType> {
-        val technicalGlobal = shouldPreferTechnicalGlobal(primaryQuery, resolvedTopic, current, modifiers)
-        val domestic = shouldPreferDomestic(primaryQuery, resolvedTopic, current, intent, modifiers)
+        val domestic = shouldPreferDomestic(primaryQuery, resolvedTopic, current, intent)
+        val technicalGlobal = shouldPreferTechnicalGlobal(primaryQuery, resolvedTopic, current, intent, modifiers)
         return when {
-            modifiers.contains(ModifierPaper) -> listOf(
-                WebSearchProviderType.FREE_DEFAULT,
-                WebSearchProviderType.BRAVE,
-                WebSearchProviderType.EXA,
-                WebSearchProviderType.CUSTOM_COMPATIBLE
-            )
-            technicalGlobal -> listOf(
-                WebSearchProviderType.FREE_DEFAULT,
-                WebSearchProviderType.BRAVE,
-                WebSearchProviderType.EXA,
-                WebSearchProviderType.CUSTOM_COMPATIBLE
-            )
             domestic -> listOf(
                 WebSearchProviderType.FREE_DEFAULT,
                 WebSearchProviderType.NAVER,
                 WebSearchProviderType.KAKAO_DAUM,
                 WebSearchProviderType.BRAVE
             )
+            modifiers.contains(ModifierPaper) || technicalGlobal -> listOf(
+                WebSearchProviderType.FREE_DEFAULT,
+                WebSearchProviderType.BRAVE,
+                WebSearchProviderType.EXA,
+                WebSearchProviderType.CUSTOM_COMPATIBLE
+            )
             isProductOrConsumerTopic(primaryQuery) -> listOf(
                 WebSearchProviderType.FREE_DEFAULT,
                 WebSearchProviderType.NAVER,
                 WebSearchProviderType.KAKAO_DAUM,
                 WebSearchProviderType.BRAVE
-            )
-            intent == SearchIntent.GENERAL -> listOf(
-                WebSearchProviderType.FREE_DEFAULT,
-                WebSearchProviderType.BRAVE,
-                WebSearchProviderType.EXA,
-                WebSearchProviderType.CUSTOM_COMPATIBLE
             )
             else -> listOf(
                 WebSearchProviderType.FREE_DEFAULT,
@@ -226,32 +212,35 @@ object RuleBasedWebSearchPlanner {
         primaryQuery: String,
         resolvedTopic: String,
         current: String,
+        intent: SearchIntent,
         modifiers: List<String>
     ): Boolean {
         val combined = "$primaryQuery $resolvedTopic $current"
+        if (shouldPreferDomestic(primaryQuery, resolvedTopic, current, intent)) return false
         if (modifiers.contains(ModifierPaper)) return true
-        if (isTechnicalTopic(combined)) return true
+        if (GlobalTopicTerms.any { combined.contains(it, ignoreCase = true) }) return true
         if (GlobalCompanyTerms.any { combined.contains(it, ignoreCase = true) }) return true
-        if (listOf("논문", "자료", "성능", "구현", "arxiv", "research", "benchmark").any { combined.contains(it, ignoreCase = true) }) {
-            return !isDomesticTopic(combined)
-        }
-        return false
+        if (isTechnicalTopic(combined) && !hasStrongDomesticSignal(combined)) return true
+        return listOf("논문", "자료", "성능", "구현", "arxiv", "research", "benchmark")
+            .any { combined.contains(it, ignoreCase = true) } && !hasStrongDomesticSignal(combined)
     }
 
     private fun shouldPreferDomestic(
         primaryQuery: String,
         resolvedTopic: String,
         current: String,
-        intent: SearchIntent,
-        modifiers: List<String>
+        intent: SearchIntent
     ): Boolean {
         val combined = "$primaryQuery $resolvedTopic $current"
-        if (shouldPreferTechnicalGlobal(primaryQuery, resolvedTopic, current, modifiers)) return false
         if (intent == SearchIntent.WEATHER) return true
-        if (DomesticTopicTerms.any { combined.contains(it, ignoreCase = true) }) return true
-        if (intent == SearchIntent.STOCK && containsKorean(combined)) return true
-        if (intent == SearchIntent.NEWS && containsKorean(combined) && !GlobalTopicTerms.any { combined.contains(it, ignoreCase = true) }) return true
-        return false
+        if (intent == SearchIntent.STOCK && hasStrongDomesticSignal(combined)) return true
+        if (intent in setOf(SearchIntent.NEWS, SearchIntent.CURRENT_INFO) && hasStrongDomesticSignal(combined)) return true
+        return DomesticTopicTerms.any { combined.contains(it, ignoreCase = true) }
+    }
+
+    private fun hasStrongDomesticSignal(text: String): Boolean {
+        return DomesticCompanyTerms.any { text.contains(it, ignoreCase = true) } ||
+            DomesticMarketTerms.any { text.contains(it, ignoreCase = true) }
     }
 
     private fun detectIntent(current: String, topic: String, modifiers: List<String>): SearchIntent {
@@ -280,12 +269,11 @@ object RuleBasedWebSearchPlanner {
         return GenericFollowUps.any { normalized == it }
     }
 
-    private fun isContextDependentFollowUp(input: String): Boolean {
+    private fun isSearchContextFollowUp(input: String): Boolean {
         val normalized = input.trim().lowercase(Locale.ROOT)
-        val keywords = extractKeywords(input)
-        return normalized.length <= 24 &&
-            keywords.size <= 4 &&
-            ContextFollowUpTerms.any { normalized.contains(it) }
+        if (normalized.length > 32) return false
+        if (!SearchContextIntentTerms.any { normalized.contains(it) }) return false
+        return ContextWords.any { normalized.contains(it) } || extractKeywords(input).size <= 4
     }
 
     private fun buildEnglishTechnicalQuery(topic: String, intent: SearchIntent): String? {
@@ -315,10 +303,6 @@ object RuleBasedWebSearchPlanner {
 
     private fun containsKorean(text: String): Boolean = text.any { it in '\uAC00'..'\uD7A3' }
 
-    private fun isDomesticTopic(text: String): Boolean {
-        return DomesticTopicTerms.any { text.contains(it, ignoreCase = true) }
-    }
-
     private fun isTechnicalTopic(text: String): Boolean {
         return ImportantTerms.any { text.contains(it, ignoreCase = true) } ||
             Regex("""(?i)\b\d+\s*nm\b|\b\d+c\b|\b\d+tb\b|\bilt\b|\brag\b|\bkv\b""").containsMatchIn(text)
@@ -346,7 +330,7 @@ object RuleBasedWebSearchPlanner {
     private const val ModifierPaper = "paper"
 
     private val TokenRegex = Regex("""(?i)[A-Za-z][A-Za-z0-9+\-]*|[\uAC00-\uD7A3A-Za-z0-9]+|\d+(?:nm|tb|gb)?""")
-    private val TriggerWords = listOf("검색", "찾아", "뉴스", "최신", "최근", "오늘", "current", "latest", "news", "search")
+    private val TriggerWords = listOf("검색", "찾아", "웹검색", "뉴스", "최신 자료", "최신", "최근", "오늘", "news", "latest", "search")
     private val GenericFollowUps = setOf(
         "검색",
         "검색해줘",
@@ -361,6 +345,8 @@ object RuleBasedWebSearchPlanner {
         "해외 기업은?"
     )
     private val GenericSearchWords = setOf("검색", "검색해줘", "찾아줘", "찾아봐", "보여줘", "정리해줘")
+    private val SearchContextIntentTerms = listOf("출처", "자료", "검색", "찾아", "뉴스", "최신", "해외 기업", "반대 의견")
+    private val ContextWords = listOf("다른", "더", "추가", "반대", "해외")
     private val FillerWords = listOf("그런데", "이거", "요즘", "좀", "찾아봐", "검색해줘", "보여줘", "정리해줘", "현재", "관련", "어떰", "어때", "같음", "같아", "봐줘")
     private val ImportantTerms = listOf(
         "HBM",
@@ -416,21 +402,9 @@ object RuleBasedWebSearchPlanner {
     private val OpposingTerms = listOf("반대 의견", "비판", "문제점", "한계", "리스크", "risk", "criticism")
     private val FreshnessTerms = listOf("최신", "요즘", "최근", "오늘", "current", "latest", "update")
     private val PaperTerms = listOf("논문", "연구", "paper", "arxiv", "ieee", "acm", "ilt")
-    private val ContextFollowUpTerms = listOf("더", "또", "다른", "해외", "반대", "추가")
-    private val DomesticTopicTerms = listOf(
-        "삼성전자",
-        "삼성sdi",
-        "sk하이닉스",
-        "네이버",
-        "카카오",
-        "코스피",
-        "코스닥",
-        "국내",
-        "원화",
-        "수율",
-        "투자",
-        "오늘 뉴스"
-    )
+    private val DomesticCompanyTerms = listOf("삼성전자", "삼성SDI", "SK하이닉스", "LG", "LGES", "네이버", "카카오")
+    private val DomesticMarketTerms = listOf("국내", "투자", "주가", "코스피", "코스닥", "오늘 뉴스", "수율")
+    private val DomesticTopicTerms = DomesticCompanyTerms + DomesticMarketTerms
     private val GlobalTopicTerms = listOf("arxiv", "paper", "research", "benchmark", "cuLitho", "STAR-KV", "TurboQuant", "RAG-Fusion", "ILT")
     private val GlobalCompanyTerms = listOf("NVIDIA", "AMD", "Intel", "TSMC", "Micron", "Qualcomm", "Toyota", "QuantumScape", "Solid Power")
 }

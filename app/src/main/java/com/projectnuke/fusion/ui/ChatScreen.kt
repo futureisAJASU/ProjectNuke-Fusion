@@ -861,7 +861,7 @@ fun ChatScreen(
         }
         val historyBeforeUser = snapshot
             .take(previousUserIndex)
-            .map { ChatMessage(role = it.role, content = stripSearchSourcesMetadata(it.content)) }
+            .map { message -> ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content) }
         val shouldUseWebSearch = !isStyleRegeneration && (webSearchEnabled || shouldAutoUseWebSearch(previousUserText))
         val externalApiAttachmentBlocked = generationMode == ChatGenerationMode.EXTERNAL_AI_API &&
             attachmentsToSend.isNotEmpty()
@@ -1779,7 +1779,7 @@ fun ChatScreen(
                                             add(ChatMessage(role = "system", content = summaryContext))
                                         }
 
-                                        addAll(messages.map { ChatMessage(role = it.role, content = stripSearchSourcesMetadata(it.content)) })
+                                        addAll(messages.map { message -> ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content) })
 
                                         val finalUserContent = buildFinalUserContent(
                                             body = userInstruction,
@@ -8230,6 +8230,15 @@ private fun buildFusionSettingsMetricsLine(
     settings: GenerationSettings
 ): String {
     return "설정 · max ${settings.maxTokens} · temp ${settings.temperature} · topK ${settings.topK} · topP ${settings.topP} · ${settings.accelerator.name}"
+}
+
+private fun visibleAssistantHistoryText(content: String): String {
+    val withoutSources = stripSearchSourcesMetadata(content)
+    val withoutMetrics = Regex("""(?is)<fusion_metrics>.*?</fusion_metrics>""").replace(withoutSources, "")
+    val withoutFusionBlocks = Regex("""(?is)<fusion_(?:thinking|answer|metrics)>.*?</fusion_(?:thinking|answer|metrics)>""").replace(withoutMetrics, "")
+    return withoutFusionBlocks
+        .replace(Regex("""</?fusion_(?:thinking|answer|metrics)>""", RegexOption.IGNORE_CASE), "")
+        .trim()
 }
 
 private fun splitFusionMetrics(
