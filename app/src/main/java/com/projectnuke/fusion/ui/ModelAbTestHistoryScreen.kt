@@ -22,9 +22,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -35,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 private val AbHistoryBg = Color(0xFF000000)
 private val AbHistoryCard = Color(0xFF111111)
@@ -48,7 +51,8 @@ private val AbHistoryFail = Color(0xFFFF7A7A)
 fun ModelAbTestHistoryScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    var sessions by remember { mutableStateOf(ModelAbTestHistoryStore.load(context)) }
+    val scope = rememberCoroutineScope()
+    var sessions by remember { mutableStateOf<List<StoredAbTestSession>>(emptyList()) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedSession by remember { mutableStateOf<StoredAbTestSession?>(null) }
     var pendingDeleteSession by remember { mutableStateOf<StoredAbTestSession?>(null) }
@@ -70,6 +74,10 @@ fun ModelAbTestHistoryScreen(onBack: () -> Unit) {
         if (selectedSession != null) selectedSession = null else onBack()
     }
 
+    LaunchedEffect(context) {
+        sessions = ModelAbTestHistoryStore.loadAsync(context)
+    }
+
     if (selectedSession != null) {
         AbHistoryDetail(
             session = selectedSession!!,
@@ -80,15 +88,17 @@ fun ModelAbTestHistoryScreen(onBack: () -> Unit) {
             },
             onRating = { targetLabel, rating ->
                 val session = selectedSession ?: return@AbHistoryDetail
-                ModelAbTestHistoryStore.updateRating(context, session.id, targetLabel, rating)
-                sessions = ModelAbTestHistoryStore.load(context)
-                selectedSession = sessions.firstOrNull { it.id == session.id }
-                val toast = when (rating) {
-                    AbResultRating.NONE -> "평가를 취소했습니다."
-                    AbResultRating.PREFERRED -> "선호 결과로 표시했습니다."
-                    AbResultRating.DISLIKED -> "평가를 저장했습니다."
+                scope.launch {
+                    ModelAbTestHistoryStore.updateRating(context, session.id, targetLabel, rating)
+                    sessions = ModelAbTestHistoryStore.loadAsync(context)
+                    selectedSession = sessions.firstOrNull { it.id == session.id }
+                    val toast = when (rating) {
+                        AbResultRating.NONE -> "\uD3C9\uAC00\uB97C \uCDE8\uC18C\uD588\uC2B5\uB2C8\uB2E4."
+                        AbResultRating.PREFERRED -> "\uC120\uD638 \uACB0\uACFC\uB85C \uD45C\uC2DC\uD588\uC2B5\uB2C8\uB2E4."
+                        AbResultRating.DISLIKED -> "\uD3C9\uAC00\uB97C \uC800\uC7A5\uD588\uC2B5\uB2C8\uB2E4."
+                    }
+                    Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
                 }
-                Toast.makeText(context, toast, Toast.LENGTH_SHORT).show()
             }
         )
         return
@@ -162,13 +172,16 @@ fun ModelAbTestHistoryScreen(onBack: () -> Unit) {
             text = { Text("저장된 A/B 테스트 결과만 삭제됩니다. 채팅 기록과 모델 파일은 삭제되지 않습니다.") },
             confirmButton = {
                 TextButton(onClick = {
-                    pendingDeleteSession?.let { ModelAbTestHistoryStore.delete(context, it.id) }
-                        ?: ModelAbTestHistoryStore.clear(context)
-                    sessions = ModelAbTestHistoryStore.load(context)
-                    pendingDeleteSession = null
-                    showClearConfirm = false
-                    Toast.makeText(context, "A/B 테스트 기록을 삭제했습니다.", Toast.LENGTH_SHORT).show()
-                }) { Text("삭제", color = AbHistoryFail) }
+                    scope.launch {
+                        pendingDeleteSession?.let { ModelAbTestHistoryStore.delete(context, it.id) }
+                            ?: ModelAbTestHistoryStore.clear(context)
+                        sessions = ModelAbTestHistoryStore.loadAsync(context)
+                        selectedSession = null
+                        pendingDeleteSession = null
+                        showClearConfirm = false
+                        Toast.makeText(context, "A/B \uD14C\uC2A4\uD2B8 \uAE30\uB85D\uC744 \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("\uC0AD\uC81C", color = AbHistoryFail) }
             },
             dismissButton = {
                 TextButton(onClick = {

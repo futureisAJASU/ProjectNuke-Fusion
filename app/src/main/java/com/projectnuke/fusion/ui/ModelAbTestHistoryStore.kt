@@ -2,7 +2,8 @@ package com.projectnuke.fusion.ui
 
 import android.content.Context
 import java.io.File
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
@@ -64,56 +65,58 @@ object ModelAbTestHistoryStore {
         }.getOrDefault(emptyList())
     }
 
-    fun save(context: Context, session: StoredAbTestSession) {
-        runBlocking {
-            writeMutex.withLock {
-                val next = (listOf(session) + load(context).filterNot { it.id == session.id })
-                    .sortedByDescending { it.createdAt }
-                    .take(MaxSessions)
-                write(context, next)
-            }
+    suspend fun loadAsync(context: Context): List<StoredAbTestSession> {
+        return withContext(Dispatchers.IO) {
+            load(context)
         }
     }
 
-    fun delete(context: Context, sessionId: String) {
-        runBlocking {
-            writeMutex.withLock {
-                write(context, load(context).filterNot { it.id == sessionId })
-            }
+    suspend fun save(context: Context, session: StoredAbTestSession) {
+        writeMutex.withLock {
+            val next = (listOf(session) + loadAsync(context).filterNot { it.id == session.id })
+                .sortedByDescending { it.createdAt }
+                .take(MaxSessions)
+            write(context, next)
         }
     }
 
-    fun clear(context: Context) {
-        runBlocking {
-            writeMutex.withLock {
+    suspend fun delete(context: Context, sessionId: String) {
+        writeMutex.withLock {
+            write(context, loadAsync(context).filterNot { it.id == sessionId })
+        }
+    }
+
+    suspend fun clear(context: Context) {
+        writeMutex.withLock {
+            withContext(Dispatchers.IO) {
                 historyFile(context).delete()
             }
         }
     }
 
-    fun updateRating(context: Context, sessionId: String, targetLabel: String, rating: AbResultRating) {
-        runBlocking {
-            writeMutex.withLock {
-                val updated = load(context).map { session ->
-                    if (session.id != sessionId) {
-                        session
-                    } else {
-                        session.copy(
-                            results = session.results.map { result ->
-                                if (result.targetLabel == targetLabel) result.copy(rating = rating) else result
-                            }
-                        )
-                    }
+    suspend fun updateRating(context: Context, sessionId: String, targetLabel: String, rating: AbResultRating) {
+        writeMutex.withLock {
+            val updated = loadAsync(context).map { session ->
+                if (session.id != sessionId) {
+                    session
+                } else {
+                    session.copy(
+                        results = session.results.map { result ->
+                            if (result.targetLabel == targetLabel) result.copy(rating = rating) else result
+                        }
+                    )
                 }
-                write(context, updated)
             }
+            write(context, updated)
         }
     }
 
-    private fun write(context: Context, sessions: List<StoredAbTestSession>) {
-        val array = JSONArray()
-        sessions.forEach { array.put(it.toJson()) }
-        historyFile(context).writeText(array.toString(2), Charsets.UTF_8)
+    private suspend fun write(context: Context, sessions: List<StoredAbTestSession>) {
+        withContext(Dispatchers.IO) {
+            val array = JSONArray()
+            sessions.forEach { array.put(it.toJson()) }
+            historyFile(context).writeText(array.toString(2), Charsets.UTF_8)
+        }
     }
 
     private fun historyFile(context: Context): File = File(context.filesDir, FileName)

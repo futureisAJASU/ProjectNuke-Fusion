@@ -70,15 +70,17 @@ fun FusionBenchmarkScreen(
     val benchmarkDao = remember { db.benchmarkDao() }
     var showHistory by remember(initialShowHistory) { mutableStateOf(initialShowHistory) }
 
-    DisposableEffect(engine) {
-        val unregisterMemoryUnloader = FusionMemoryManager.registerIdleEngineUnloader {
-            Log.i("FusionMemory", "Requesting idle shared engine unload under memory pressure")
-            FusionRuntimeManager.unloadSharedEngineIfIdle("benchmark_memory_pressure")
+        DisposableEffect(engine) {
+            val unregisterMemoryUnloader = FusionMemoryManager.registerIdleEngineUnloader {
+                Log.i("FusionMemory", "Requesting idle shared engine unload under memory pressure")
+                scope.launch {
+                    FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("benchmark_memory_pressure")
+                }
+            }
+            onDispose {
+                unregisterMemoryUnloader()
+            }
         }
-        onDispose {
-            unregisterMemoryUnloader()
-        }
-    }
 
     if (showHistory) {
         BackHandler { showHistory = false }

@@ -128,15 +128,19 @@ fun ModelAbTestLabScreen(onBack: () -> Unit) {
     var modelPickerTargetId by remember { mutableStateOf<Long?>(null) }
     var showHistory by remember { mutableStateOf(false) }
 
-    DisposableEffect(engine) {
-        val unregister = FusionMemoryManager.registerIdleEngineUnloader {
-            FusionRuntimeManager.unloadSharedEngineIfIdle("ab_test_memory_pressure")
+        DisposableEffect(engine) {
+            val unregister = FusionMemoryManager.registerIdleEngineUnloader {
+                scope.launch {
+                    FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("ab_test_memory_pressure")
+                }
+            }
+            onDispose {
+                unregister()
+                scope.launch {
+                    FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("ab_test_dispose")
+                }
+            }
         }
-        onDispose {
-            unregister()
-            FusionRuntimeManager.unloadSharedEngineIfIdle("ab_test_dispose")
-        }
-    }
 
     BackHandler(enabled = !isRunning) { onBack() }
     BackHandler(enabled = isRunning) {
