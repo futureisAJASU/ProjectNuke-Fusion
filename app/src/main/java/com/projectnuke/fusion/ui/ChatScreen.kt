@@ -146,6 +146,7 @@ import com.projectnuke.fusion.util.fusionNpuNoteText
 import com.projectnuke.fusion.util.fusionNpuNoteTitle
 import java.io.File
 import java.net.URL
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -165,6 +166,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.core.content.FileProvider
+import java.net.HttpURLConnection
 private val BlackBg = Color(0xFF000000)
 private val PanelBg = Color(0xFF171717)
 private val MenuBg = Color(0xFF202020)
@@ -227,11 +229,11 @@ private enum class ResponseRegenerationAction(
     val menuLabel: String,
     val instruction: String?
 ) {
-    Retry("?듬? ?ㅼ떆 ?앹꽦", null),
-    Shorter("??吏㏐쾶", "?댁쟾 ?듬????듭떖 ?댁슜???좎??섎㈃????吏㏐퀬 媛꾧껐?섍쾶 ?ㅼ떆 ?묒꽦??二쇱꽭??"),
-    MoreDetailed("???먯꽭??, "?댁쟾 ?듬????듭떖 ?댁슜???좎??섎㈃?????먯꽭????댁꽌 ?ㅻ챸??二쇱꽭??"),
-    Table("?쒕줈 ?뺣━", "?댁쟾 ?듬????듭떖 ?댁슜???쒕줈 ?뺣━??二쇱꽭?? ?꾩슂??寃쎌슦 吏㏃? ?붿빟???④퍡 ?ы븿??二쇱꽭??"),
-    ExpertTone("?꾨Ц媛 ??, "?댁쟾 ?듬????듭떖 ?댁슜???좎??섎㈃?????꾨Ц?곸씠怨??뺥솗???ㅼ쑝濡??ㅼ떆 ?묒꽦??二쇱꽭??")
+    Retry("답변 다시 생성", null),
+    Shorter("더 짧게", "이전 답변의 핵심 내용을 유지하면서 더 짧고 간결하게 다시 작성해 주세요."),
+    MoreDetailed("더 자세히", "이전 답변의 핵심 내용을 유지하면서 더 자세히 풀어서 설명해 주세요."),
+    Table("표로 정리", "이전 답변의 핵심 내용을 표로 정리해 주세요. 필요한 경우 짧은 요약도 함께 포함해 주세요."),
+    ExpertTone("전문가 톤", "이전 답변의 핵심 내용을 유지하면서 더 전문적이고 정확한 톤으로 다시 작성해 주세요.")
 }
 
 @Composable
@@ -469,8 +471,8 @@ private fun FusionPulseAmbientLight(
     }
 }
 
-private const val ChatOptionConversationSummary = "????붿빟"
-private const val ChatOptionMemoryCandidateExtraction = "硫붾え由??꾨낫 異붿텧"
+private const val ChatOptionConversationSummary = "대화 요약"
+private const val ChatOptionMemoryCandidateExtraction = "메모리 후보 추출"
 private const val FusionPrefsName = "fusion_chat_settings"
 private const val PrefMaxTokens = "max_tokens"
 private const val PrefTopK = "top_k"
@@ -494,12 +496,12 @@ private const val SettingsBackupSchemaVersion = 1
 private const val MaxRecentModels = 10
 
 private enum class ModelLibrarySortMode(val key: String, val label: String) {
-    RECOMMENDATION("recommendation", "異붿쿇??),
-    NAME("name", "?대쫫??),
-    LIGHTWEIGHT("lightweight", "紐⑤뜽 ?ш린 ?묒? ??),
-    MEMORY_LOW("memory_low", "沅뚯옣 ?ъ뼇 ??? ??),
-    LOCAL_EXECUTION("local_execution", "濡쒖뺄 ?ㅽ뻾 媛???곗꽑"),
-    FAVORITES_FIRST("favorites_first", "利먭꺼李얘린 ?곗꽑");
+    RECOMMENDATION("recommendation", "추천순"),
+    NAME("name", "이름순"),
+    LIGHTWEIGHT("lightweight", "모델 크기 작은 순"),
+    MEMORY_LOW("memory_low", "권장 사양 낮은 순"),
+    LOCAL_EXECUTION("local_execution", "로컬 실행 가능 우선"),
+    FAVORITES_FIRST("favorites_first", "즐겨찾기 우선");
 
     companion object {
         fun fromKey(value: String?): ModelLibrarySortMode {
@@ -534,11 +536,11 @@ private data class ModelBenchmarkSummary(
     val mtpRecommendation: String
 )
 private val QuickPromptPresets = listOf(
-    "?먯꽭???ㅻ챸??二쇱꽭??",
-    "?듭떖留??붿빟??二쇱꽭??",
-    "臾몄젣?먯쓣 遺꾩꽍??二쇱꽭??",
-    "?쒕줈 ?뺣━??二쇱꽭??",
-    "諛섎컯??二쇱꽭??"
+    "자세히 설명해 주세요.",
+    "핵심만 요약해 주세요.",
+    "문제점을 분석해 주세요.",
+    "표로 정리해 주세요.",
+    "반박해 주세요."
 )
 @Composable
 fun ChatScreen(
@@ -760,10 +762,10 @@ fun ChatScreen(
         activeTimelineMessages(messageEntities, responseVersionState)
     }
     val fusionPulseState = when {
-        generationStatus?.contains("紐⑤뜽 濡쒕뵫") == true ||
-            generationStatus?.contains("?대?吏 遺꾩꽍 以鍮?) == true -> FusionPulseState.ModelLoading
-        generationStatus?.contains("?명꽣??寃??) == true ||
-            generationStatus?.contains("寃??寃곌낵") == true -> FusionPulseState.WebSearching
+        generationStatus?.contains("모델 로딩") == true ||
+            generationStatus?.contains("이미지 분석 준비") == true -> FusionPulseState.ModelLoading
+        generationStatus?.contains("인터넷 검색") == true ||
+            generationStatus?.contains("검색 결과") == true -> FusionPulseState.WebSearching
         extractingMemoryCandidates -> FusionPulseState.MemoryExtracting
         isGenerating -> FusionPulseState.Responding
         else -> FusionPulseState.Idle
@@ -807,18 +809,18 @@ fun ChatScreen(
         action: ResponseRegenerationAction
     ) {
         if (isGenerating || regeneratingMessageId != null || extractingMemoryCandidates || FusionRuntimeLock.isChatGenerationRunning) {
-            Toast.makeText(context, "?꾩옱 ?묐떟???앹꽦?섎뒗 以묒엯?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
             return
         }
         if (FusionRuntimeLock.isBenchmarkRunning) {
-            Toast.makeText(context, "?꾩옱 ?묐떟???앹꽦?섎뒗 以묒엯?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
         val snapshot = messageEntities.toList()
         val targetIndex = snapshot.indexOfFirst { it.id == targetMessage.id }
         if (targetIndex <= 0 || targetMessage.role == "user") {
-            Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -828,7 +830,7 @@ fun ChatScreen(
             ?.takeIf { it >= 0 }
             ?: (targetIndex - 1 downTo 0).firstOrNull { snapshot[it].role == "user" }
         if (previousUserIndex == null) {
-            Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -844,13 +846,13 @@ fun ChatScreen(
             """
             ${action.instruction}
 
-            ?댁쟾 ?ъ슜???붿껌:
+            이전 사용자 요청:
             $previousUserText
 
-            ?댁쟾 ?듬?:
+            이전 답변:
             $originalAssistantText
 
-            ???듬?留??묒꽦??二쇱꽭??
+            새 답변만 작성해 주세요.
             """.trimIndent()
         } else if (imageAttachments.isNotEmpty()) {
             buildImageUserInstruction(previousUserText)
@@ -869,8 +871,8 @@ fun ChatScreen(
         regeneratingMessageId = targetMessage.id
         streamingAssistantText = null
         streamingMetricsLine = null
-        generationStatus = "?듬????ㅼ떆 ?앹꽦?섎뒗 以묒엯?덈떎."
-        DeveloperLogStore.record(context, "regeneration", "?듬? ?ㅼ떆 ?앹꽦 ?쒖옉", action.menuLabel)
+        generationStatus = "답변을 다시 생성하는 중입니다."
+        DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 시작", action.menuLabel)
 
         scope.launch {
             val activeConversationId = targetMessage.conversationId
@@ -960,7 +962,7 @@ fun ChatScreen(
                     ) {
                         is ExternalAiChatResult.Success -> {
                             refreshExternalProviderState()
-                            generationStatus = "?듬? ???以?.."
+                            generationStatus = "답변 저장 중..."
                             val newMessageId = dao.insertMessage(
                                 MessageEntity(
                                     conversationId = activeConversationId,
@@ -994,12 +996,12 @@ fun ChatScreen(
                                 ?.versions
                                 ?.size
                                 ?: 1
-                            DeveloperLogStore.record(context, "regeneration", "?듬? ?ㅼ떆 ?앹꽦 ?깃났", "versions=$versionCount")
-                            Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 성공", "versions=$versionCount")
+                            Toast.makeText(context, "답변을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
                         }
 
                         is ExternalAiChatResult.BlockedAttachment -> {
-                            generationStatus = "?듬? ???以?.."
+                            generationStatus = "답변 저장 중..."
                             Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
                             val newMessageId = dao.insertMessage(
                                 MessageEntity(
@@ -1024,7 +1026,7 @@ fun ChatScreen(
 
                         is ExternalAiChatResult.NoProvider -> {
                             refreshExternalProviderState()
-                            generationStatus = "?듬? ???以?.."
+                            generationStatus = "답변 저장 중..."
                             val newMessageId = dao.insertMessage(
                                 MessageEntity(
                                     conversationId = activeConversationId,
@@ -1047,7 +1049,7 @@ fun ChatScreen(
                         }
 
                         is ExternalAiChatResult.Error -> {
-                            generationStatus = "?듬? ???以?.."
+                            generationStatus = "답변 저장 중..."
                             Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
                             val newMessageId = dao.insertMessage(
                                 MessageEntity(
@@ -1079,22 +1081,22 @@ fun ChatScreen(
                         ?.let { getModelFile(context, it).absolutePath }
 
                 if (activeModelPath == null) {
-                    DeveloperLogStore.record(context, "regeneration", "?듬? ?ㅼ떆 ?앹꽦 ?ㅽ뙣", "model file missing")
-                    Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", "model file missing")
+                    Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
                 val missingImage = imageAttachments.firstOrNull { !File(it.localPath).exists() }
                 if (missingImage != null) {
-                    DeveloperLogStore.record(context, "regeneration", "?듬? ?ㅼ떆 ?앹꽦 ?ㅽ뙣", "image file missing")
-                    Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", "image file missing")
+                    Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
                 val useMultimodalImages = imageAttachments.isNotEmpty()
                 if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath!!)) {
-                    DeveloperLogStore.record(context, "regeneration", "?듬? ?ㅼ떆 ?앹꽦 ?ㅽ뙣", "multimodal unsupported")
-                    Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", "multimodal unsupported")
+                    Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
@@ -1103,7 +1105,7 @@ fun ChatScreen(
                     generateWithLiteRtRecovery(
                         engine = engine,
                         onBeforeRetry = {
-                            generationStatus = "?듬????ㅼ떆 ?앹꽦?섎뒗 以묒엯?덈떎."
+                            generationStatus = "답변을 다시 생성하는 중입니다."
                         },
                         generateOnce = {
                             if (useMultimodalImages) {
@@ -1179,12 +1181,12 @@ fun ChatScreen(
                     ?.versions
                     ?.size
                     ?: 1
-                DeveloperLogStore.record(context, "regeneration", "?듬? ?ㅼ떆 ?앹꽦 ?깃났", "versions=$versionCount")
-                Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 성공", "versions=$versionCount")
+                Toast.makeText(context, "답변을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Log.e("FusionEngine", "Response regeneration failed", e)
-                DeveloperLogStore.record(context, "regeneration", "?듬? ?ㅼ떆 ?앹꽦 ?ㅽ뙣", e::class.java.simpleName)
-                Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", e::class.java.simpleName)
+                Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
             } finally {
                 generationStatus = null
                 isGenerating = false
@@ -1197,17 +1199,17 @@ fun ChatScreen(
 
     fun startMemoryCandidateExtraction() {
         if (isGenerating || regeneratingMessageId != null || extractingMemoryCandidates || FusionRuntimeLock.isChatGenerationRunning) {
-            Toast.makeText(context, "?꾩옱 ?묐떟???앹꽦?섎뒗 以묒엯?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
             return
         }
         if (FusionRuntimeLock.isBenchmarkRunning) {
-            Toast.makeText(context, "?꾩옱 ?묐떟???앹꽦?섎뒗 以묒엯?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "현재 응답을 생성하는 중입니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
         val snapshot = messageEntities.toList()
         if (conversationId == 0L || snapshot.isEmpty()) {
-            Toast.makeText(context, "硫붾え由??꾨낫瑜?異붿텧?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -1224,7 +1226,7 @@ fun ChatScreen(
                 }
             }
         if (recentVisibleMessages.isEmpty()) {
-            Toast.makeText(context, "硫붾え由??꾨낫瑜?異붿텧?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -1235,7 +1237,7 @@ fun ChatScreen(
         val requestSettings = generationSettings.copy(
             speculativeDecodingEnabled = mtpEnabledForRequest
         )
-        val extractionPrompt = "?꾩옱 ??붿뿉???섏쨷??李멸퀬??留뚰븳 硫붾え由??꾨낫瑜?異붿텧??二쇱꽭?? ?ъ슜?먯쓽 ?κ린?곸씤 ?좏샇, 吏꾪뻾 以묒씤 ?꾨줈?앺듃, 諛섎났?곸쑝濡?李멸퀬???ㅼ젙, 以묒슂??寃곗젙 ?ы빆留?吏㏃? bullet濡??뺣━??二쇱꽭?? ?쇱떆?곸씤 媛먯젙, ?ъ냼???〓떞, 誘쇨컧??媛쒖씤?뺣낫, 異붿륫???댁슜? ?쒖쇅??二쇱꽭??"
+        val extractionPrompt = "현재 대화에서 나중에 참고할 만한 메모리 후보를 추출해 주세요. 사용자의 장기적인 선호, 진행 중인 프로젝트, 반복적으로 참고할 설정, 중요한 결정 사항만 짧은 bullet로 정리해 주세요. 일시적인 감정, 사소한 잡담, 민감한 개인정보, 추측성 내용은 제외해 주세요."
         val currentMessages = buildList {
             add(
                 ChatMessage(
@@ -1279,8 +1281,8 @@ fun ChatScreen(
         if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
             isGenerating = true
             extractingMemoryCandidates = true
-            generationStatus = "硫붾え由??꾨낫瑜?異붿텧?섎뒗 以묒엯?덈떎."
-            DeveloperLogStore.record(context, "memory", "硫붾え由??꾨낫 異붿텧 ?쒖옉", "conversationId=$conversationId")
+            generationStatus = "메모리 후보를 추출하는 중입니다."
+            DeveloperLogStore.record(context, "memory", "메모리 후보 추출 시작", "conversationId=$conversationId")
 
             scope.launch {
                 try {
@@ -1295,7 +1297,7 @@ fun ChatScreen(
                             DeveloperLogStore.record(
                                 context,
                                 "memory",
-                                "硫붾え由??꾨낫 異붿텧 ?깃났",
+                                "메모리 후보 추출 성공",
                                 "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
                             )
                         }
@@ -1315,8 +1317,8 @@ fun ChatScreen(
                     }
                 } catch (e: Exception) {
                     Log.e("FusionMemory", "Memory candidate extraction failed", e)
-                    DeveloperLogStore.record(context, "memory", "硫붾え由??꾨낫 異붿텧 ?ㅽ뙣", e::class.java.simpleName)
-                    Toast.makeText(context, "硫붾え由??꾨낫瑜?異붿텧?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", e::class.java.simpleName)
+                    Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
                 } finally {
                     generationStatus = null
                     extractingMemoryCandidates = false
@@ -1334,15 +1336,15 @@ fun ChatScreen(
                 ?.let { getModelFile(context, it).absolutePath }
 
         if (activeModelPath == null) {
-            DeveloperLogStore.record(context, "memory", "硫붾え由??꾨낫 異붿텧 ?ㅽ뙣", "model file missing")
-            Toast.makeText(context, "硫붾え由??꾨낫瑜?異붿텧?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", "model file missing")
+            Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
 
         isGenerating = true
         extractingMemoryCandidates = true
-        generationStatus = "硫붾え由??꾨낫瑜?異붿텧?섎뒗 以묒엯?덈떎."
-        DeveloperLogStore.record(context, "memory", "硫붾え由??꾨낫 異붿텧 ?쒖옉", "conversationId=$conversationId")
+        generationStatus = "메모리 후보를 추출하는 중입니다."
+        DeveloperLogStore.record(context, "memory", "메모리 후보 추출 시작", "conversationId=$conversationId")
 
         scope.launch {
             try {
@@ -1350,7 +1352,7 @@ fun ChatScreen(
                     generateWithLiteRtRecovery(
                         engine = engine,
                         onBeforeRetry = {
-                            generationStatus = "硫붾え由??꾨낫瑜?異붿텧?섎뒗 以묒엯?덈떎."
+                            generationStatus = "메모리 후보를 추출하는 중입니다."
                         },
                         generateOnce = {
                             engine.generate(
@@ -1365,13 +1367,13 @@ fun ChatScreen(
                 DeveloperLogStore.record(
                     context,
                     "memory",
-                    "硫붾え由??꾨낫 異붿텧 ?깃났",
+                    "메모리 후보 추출 성공",
                     "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
                 )
             } catch (e: Exception) {
                 Log.e("FusionMemory", "Memory candidate extraction failed", e)
-                DeveloperLogStore.record(context, "memory", "硫붾え由??꾨낫 異붿텧 ?ㅽ뙣", e::class.java.simpleName)
-                Toast.makeText(context, "硫붾え由??꾨낫瑜?異붿텧?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", e::class.java.simpleName)
+                Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
             } finally {
                 generationStatus = null
                 extractingMemoryCandidates = false
@@ -1385,7 +1387,7 @@ fun ChatScreen(
     fun startRegenerateLatestResponse() {
         val safeLatestAssistant = messageEntities.lastOrNull { it.role != "user" }
         if (safeLatestAssistant == null) {
-            Toast.makeText(context, "?듬????ㅼ떆 ?앹꽦?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
         startRegenerateResponse(safeLatestAssistant, ResponseRegenerationAction.Retry)
@@ -1423,7 +1425,7 @@ fun ChatScreen(
         if (uri == null) return@rememberLauncherForActivityResult
         val displayName = getDisplayNameFromUri(context, uri)
         if (!isModelLikeFileName(displayName)) {
-            Toast.makeText(context, "???뚯씪? ?꾩옱 吏곸젒 ?ㅽ뻾?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "이 파일은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return@rememberLauncherForActivityResult
         }
 
@@ -1435,7 +1437,7 @@ fun ChatScreen(
             )
         } catch (_: SecurityException) {
             permissionPersisted = false
-            Toast.makeText(context, "紐⑤뜽 ?뚯씪 沅뚰븳???좎??????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "모델 파일 권한을 유지할 수 없습니다.", Toast.LENGTH_SHORT).show()
         }
 
         pendingModelImport = PendingModelImport(
@@ -1453,7 +1455,7 @@ fun ChatScreen(
     ) { uris: List<Uri> ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
 
-        Toast.makeText(context, "泥⑤? ?뚯씪 蹂듭궗 以?..", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
 
         scope.launch {
             uris.take(5).forEach { uri ->
@@ -1486,7 +1488,7 @@ fun ChatScreen(
                 }
             }
 
-            Toast.makeText(context, "泥⑤? ?꾨즺", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1527,10 +1529,10 @@ fun ChatScreen(
                             showMemoryCandidateDialog = true
                             return@ChatTopBar
                         }
-                        if (option == "?????寃??) {
+                        if (option == "대화 내 검색") {
                             inChatSearchMode = true
                         } else {
-                            Toast.makeText(context, "$option 湲곕뒫? ?ㅼ쓬 ?④퀎?먯꽌 ?곌껐?섍쿋?듬땲??", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "$option 기능은 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                         }
                     }
                 )
@@ -1596,10 +1598,10 @@ fun ChatScreen(
                         )
                     },
                     onMicClick = {
-                        Toast.makeText(context, "?뚯꽦 ?낅젰? ?ㅼ쓬 ?④퀎?먯꽌 ?곌껐?섍쿋?듬땲??", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "음성 입력은 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                     },
                     onVoiceModeClick = {
-                        Toast.makeText(context, "蹂댁씠??紐⑤뱶???ㅼ쓬 ?④퀎?먯꽌 ?곌껐?섍쿋?듬땲??", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "보이스 모드는 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                     },
                     onSendClick = sendClick@ {
                         val userInput = input.trim()
@@ -1615,7 +1617,7 @@ fun ChatScreen(
 
                         if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
                             if (FusionRuntimeLock.isBenchmarkRunning) {
-                                Toast.makeText(context, "踰ㅼ튂留덊겕媛 吏꾪뻾 以묒엯?덈떎. ?꾨즺 ???ㅼ떆 ?쒕룄??二쇱꽭??", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                 return@sendClick
                             }
 
@@ -1625,7 +1627,7 @@ fun ChatScreen(
                             isGenerating = true
                             streamingAssistantText = null
                             streamingMetricsLine = null
-                            generationStatus = if (shouldUseWebSearch) "?명꽣??寃??以?.." else "紐⑤뜽 濡쒕뵫 以?.."
+                            generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
 
                             val userMessageContent = buildMessageContentWithAttachments(
                                 body = userInput,
@@ -1639,7 +1641,7 @@ fun ChatScreen(
                                     val now = System.currentTimeMillis()
 
                                     if (activeConversationId == 0L) {
-                                        val title = userInput.take(24).ifBlank { "????? }
+                                        val title = userInput.take(24).ifBlank { "새 대화" }
 
                                         activeConversationId = dao.insertConversation(
                                             ConversationEntity(
@@ -1664,7 +1666,7 @@ fun ChatScreen(
                                     dao.updateConversationTime(activeConversationId, now)
 
                                     if (generationMode == ChatGenerationMode.EXTERNAL_AI_API && attachmentsToSend.isNotEmpty()) {
-                                        val message = "?꾩옱 ?몃? AI API 紐⑤뱶?먯꽌??泥⑤? ?뚯씪???꾩넚?????놁뒿?덈떎."
+                                        val message = "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다."
                                         Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                                         dao.insertMessage(
                                             MessageEntity(
@@ -1687,11 +1689,11 @@ fun ChatScreen(
                                         .orEmpty()
 
                                     val webSearchResponse = if (shouldUseWebSearch) {
-                                        generationStatus = "?명꽣??寃??以?.."
+                                        generationStatus = "인터넷 검색 중..."
                                         val searchIntent = FusionWebSearch.detectIntent(userInput)
                                         generationStatus = when (searchIntent) {
-                                            SearchIntent.NEWS -> "?댁뒪 寃??以?.."
-                                            else -> "?명꽣??寃??以?.."
+                                            SearchIntent.NEWS -> "뉴스 검색 중..."
+                                            else -> "인터넷 검색 중..."
                                         }
 
                                         val response = FusionWebSearch.search(
@@ -1700,7 +1702,7 @@ fun ChatScreen(
                                             providerRepository = webSearchProviderRepository
                                         )
 
-                                        generationStatus = "寃??寃곌낵 ?뺣━ 以?.."
+                                        generationStatus = "검색 결과 정리 중..."
                                         response
                                     } else {
                                         null
@@ -1709,7 +1711,7 @@ fun ChatScreen(
                                     recordWebSearchDiagnostics(context, webSearchResponse)
 
                                     if (shouldUseWebSearch) {
-                                        generationStatus = if (reasoningEnabled) "??源딄쾶 ?앷컖?섎뒗 以?.." else "?듬? ?앹꽦 以?.."
+                                        generationStatus = if (reasoningEnabled) "더 깊게 생각하는 중..." else "답변 생성 중..."
                                     }
 
                                     val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
@@ -1795,7 +1797,7 @@ fun ChatScreen(
                                     }
 
                                     if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
-                                        generationStatus = "?몃? AI API ?묐떟??湲곕떎由щ뒗 以?.."
+                                        generationStatus = "외부 AI API 응답을 기다리는 중..."
 
                                         when (
                                             val result = runExternalAiRequest(
@@ -1805,7 +1807,7 @@ fun ChatScreen(
                                         ) {
                                             is ExternalAiChatResult.Success -> {
                                                 refreshExternalProviderState()
-                                                generationStatus = "?듬? ???以?.."
+                                                generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -1819,7 +1821,7 @@ fun ChatScreen(
 
                                             is ExternalAiChatResult.BlockedAttachment -> {
                                                 Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                                                generationStatus = "?듬? ???以?.."
+                                                generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -1833,7 +1835,7 @@ fun ChatScreen(
 
                                             is ExternalAiChatResult.NoProvider -> {
                                                 refreshExternalProviderState()
-                                                generationStatus = "?듬? ???以?.."
+                                                generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -1847,7 +1849,7 @@ fun ChatScreen(
 
                                             is ExternalAiChatResult.Error -> {
                                                 Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                                                generationStatus = "?듬? ???以?.."
+                                                generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -1881,9 +1883,9 @@ fun ChatScreen(
                                                 conversationId = activeConversationId,
                                                 role = "assistant",
                                                 content = if (!selectedModelPath.isNullOrBlank()) {
-                                                    "?좏깮??紐⑤뜽 ?뚯씪??李얠쓣 ???놁뒿?덈떎. 紐⑤뜽???ㅼ떆 ?좏깮??二쇱꽭??"
+                                                    "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
                                                 } else {
-                                                    "?꾩쭅 ?ъ슜??紐⑤뜽???놁뒿?덈떎. ?꾩そ 紐⑤뜽 移⑹뿉??Gemma 紐⑤뜽???ㅼ슫濡쒕뱶?섍굅??而ㅼ뒪? 紐⑤뜽???낅줈?쒗빐 二쇱꽭??"
+                                                    "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요."
                                                 },
                                                 createdAt = System.currentTimeMillis()
                                             )
@@ -1901,14 +1903,14 @@ fun ChatScreen(
                                     if (missingImage != null) {
                                         Toast.makeText(
                                             context,
-                                            "?대?吏 ?뚯씪??李얠쓣 ???놁뒿?덈떎: ${missingImage.localPath}",
+                                            "이미지 파일을 찾을 수 없습니다: ${missingImage.localPath}",
                                             Toast.LENGTH_LONG
                                         ).show()
                                         dao.insertMessage(
                                             MessageEntity(
                                                 conversationId = activeConversationId,
                                                 role = "assistant",
-                                                content = "?대?吏 ?낅젰 泥섎━ ?ㅽ뙣: ?대?吏 ?뚯씪??李얠쓣 ???놁뒿?덈떎.\n${missingImage.localPath}",
+                                                content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n${missingImage.localPath}",
                                                 createdAt = System.currentTimeMillis()
                                             )
                                         )
@@ -1925,7 +1927,7 @@ fun ChatScreen(
                                             MessageEntity(
                                                 conversationId = activeConversationId,
                                                 role = "assistant",
-                                                content = "??紐⑤뜽? ?대?吏 ?낅젰??吏?먰븯吏 ?딅뒗 寃?媛숈븘.",
+                                                content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.",
                                                 createdAt = System.currentTimeMillis()
                                             )
                                         )
@@ -1936,7 +1938,7 @@ fun ChatScreen(
                                         return@launch
                                     }
 
-                                    generationStatus = "紐⑤뜽 濡쒕뵫 以?.."
+                                    generationStatus = "모델 로딩 중..."
 
                                     val generationStartMs = SystemClock.elapsedRealtime()
                                     var firstTokenLatencyMs: Long? = null
@@ -1945,17 +1947,17 @@ fun ChatScreen(
                                         generateWithLiteRtRecovery(
                                             engine = engine,
                                             onBeforeRetry = {
-                                                generationStatus = "紐⑤뜽 濡쒕뵫 以?.."
+                                                generationStatus = "모델 로딩 중..."
                                                 streamingAssistantText = null
                                             },
                                             generateOnce = {
                                                 if (useMultimodalImages) {
-                                        generationStatus = "?대?吏 遺꾩꽍 以鍮?以?.."
+                                        generationStatus = "이미지 분석 준비 중..."
                                         val streamedOutput = StringBuilder()
                                         if (!reasoningEnabled) {
                                             streamingAssistantText = ""
                                         }
-                                        generationStatus = "?대?吏 遺꾩꽍 以?.."
+                                        generationStatus = "이미지 분석 중..."
 
                                         engine.generateMultimodalStreaming(
                                             messages = currentMessages,
@@ -1978,7 +1980,7 @@ fun ChatScreen(
                                             }
                                         )
                                     } else if (reasoningEnabled) {
-                                        generationStatus = "??源딄쾶 ?앷컖?섎뒗 以?.."
+                                        generationStatus = "더 깊게 생각하는 중..."
                                         engine.generate(
                                             messages = currentMessages,
                                             modelPath = activeModelPath!!,
@@ -1987,7 +1989,7 @@ fun ChatScreen(
                                     } else {
                                         val streamedOutput = StringBuilder()
                                         streamingAssistantText = ""
-                                        generationStatus = "?듬? ?앹꽦 以?.."
+                                        generationStatus = "답변 생성 중..."
 
                                         engine.generateStreaming(
                                             messages = currentMessages,
@@ -2034,7 +2036,7 @@ fun ChatScreen(
                                     )
                                     streamingMetricsLine = metricsLine
 
-                                    generationStatus = "?듬? ???以?.."
+                                    generationStatus = "답변 저장 중..."
 
                                     dao.insertMessage(
                                         MessageEntity(
@@ -2053,7 +2055,7 @@ fun ChatScreen(
                                 } catch (e: Exception) {
                                     Log.e("FusionEngine", "Chat generation failed", e)
                                     if (e is BenchmarkRunningException) {
-                                        Toast.makeText(context, "踰ㅼ튂留덊겕媛 吏꾪뻾 以묒엯?덈떎. ?꾨즺 ???ㅼ떆 ?쒕룄??二쇱꽭??", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                         return@launch
                                     }
                                     if (activeConversationId != 0L) {
@@ -2062,9 +2064,9 @@ fun ChatScreen(
                                                 conversationId = activeConversationId,
                                                 role = "assistant",
                                                 content = if (isLiteRtModelLoadException(e)) {
-                                                    "紐⑤뜽??遺덈윭?????놁뒿?덈떎. 紐⑤뜽 ?ㅼ젙???뺤씤?????ㅼ떆 ?쒕룄??二쇱꽭??"
+                                                    "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
                                                 } else {
-                                                    "?ㅻ쪟媛 諛쒖깮?덉뒿?덈떎. ?좎떆 ???ㅼ떆 ?쒕룄??二쇱꽭??"
+                                                    "오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
                                                 },
                                                 createdAt = System.currentTimeMillis()
                                             )
@@ -2107,7 +2109,7 @@ fun ChatScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "寃??寃곌낵",
+                        text = "검색 결과",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold
@@ -2133,7 +2135,7 @@ fun ChatScreen(
                                 key = { it.id }
                             ) { result ->
                                 InChatSearchResultRow(
-                                    role = if (result.role == "user") "?ъ슜?? else "Fusion",
+                                    role = if (result.role == "user") "사용자" else "Fusion",
                                     preview = visibleSearchText(result.content),
                                     onClick = {
                                         scope.launch {
@@ -2199,7 +2201,7 @@ fun ChatScreen(
                                 onBranch = {
                                     Toast.makeText(
                                         context,
-                                        "??梨꾪똿?쇰줈 媛吏移섍린 湲곕뒫? ?ㅼ쓬 ?④퀎?먯꽌 ?곌껐?섍쿋?듬땲??",
+                                        "새 채팅으로 가지치기 기능은 다음 단계에서 연결하겠습니다.",
                                         Toast.LENGTH_SHORT
                                     ).show()
                                 },
@@ -2239,7 +2241,7 @@ fun ChatScreen(
                                 )
                             } else {
                                 ModelLoadingBubble(
-                                    status = generationStatus ?: "紐⑤뜽 濡쒕뵫 以?.."
+                                    status = generationStatus ?: "모델 로딩 중..."
                                 )
                             }
                         }
@@ -2380,12 +2382,12 @@ fun ChatScreen(
                 FusionModelCatalog.saveImported(context, spec)
                 storageRefreshKey += 1
                 pendingModelImport = null
-                Toast.makeText(context, "?몃? 紐⑤뜽 ?뚯씪???곌껐?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "외부 모델 파일을 연결했습니다.", Toast.LENGTH_SHORT).show()
                 when {
-                    !pending.permissionPersisted -> Toast.makeText(context, "紐⑤뜽 ?뚯씪 沅뚰븳???좎??????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
-                    spec.availability == ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "??紐⑤뜽? ?ㅽ뻾 ?꾩뿉 Fusion ?대? ??μ냼濡?蹂듭궗?댁빞 ?????덉뒿?덈떎.", Toast.LENGTH_LONG).show()
-                    spec.availability == ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
-                    else -> Toast.makeText(context, "???뺤떇? ?꾩옱 吏곸젒 ?ㅽ뻾?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    !pending.permissionPersisted -> Toast.makeText(context, "모델 파일 권한을 유지할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    spec.availability == ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", Toast.LENGTH_LONG).show()
+                    spec.availability == ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                    else -> Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
                 }
             },
             onCopyForRun = { family ->
@@ -2396,7 +2398,7 @@ fun ChatScreen(
                         displayName = pending.displayName
                     )
                     if (copiedFile == null) {
-                        Toast.makeText(context, "紐⑤뜽 ?뚯씪??媛?몄삱 ???놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "모델 파일을 가져올 수 없습니다.", Toast.LENGTH_SHORT).show()
                         return@launch
                     }
                     val spec = FusionModelCatalog.importedSpec(pending.displayName, copiedFile.absolutePath, family)
@@ -2415,9 +2417,9 @@ fun ChatScreen(
                     storageRefreshKey += 1
                     pendingModelImport = null
                     when (spec.availability) {
-                        ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "紐⑤뜽 ?뚯씪??媛?몄솕?듬땲??", Toast.LENGTH_SHORT).show()
-                        ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
-                        else -> Toast.makeText(context, "???뺤떇? ?꾩옱 吏곸젒 ?ㅽ뻾?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                        ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "모델 파일을 가져왔습니다.", Toast.LENGTH_SHORT).show()
+                        ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                        else -> Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -2433,16 +2435,16 @@ fun ChatScreen(
                 val localPath = spec.localPath
                 when {
                     spec.availability == ModelAvailability.NEEDS_CONVERSION -> {
-                        Toast.makeText(context, "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
                     }
                     spec.availability != ModelAvailability.CUSTOM_IMPORTED && !spec.externallyReferenced -> {
-                        Toast.makeText(context, "???뺤떇? ?꾩옱 吏곸젒 ?ㅽ뻾?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
                     }
                     spec.externallyReferenced && localPath.isNullOrBlank() -> {
                         if (spec.availability == ModelAvailability.CUSTOM_IMPORTED) {
-                            Toast.makeText(context, "??紐⑤뜽? ?ㅽ뻾 ?꾩뿉 Fusion ?대? ??μ냼濡?蹂듭궗?댁빞 ?⑸땲??", Toast.LENGTH_LONG).show()
+                            Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 합니다.", Toast.LENGTH_LONG).show()
                         } else {
-                            Toast.makeText(context, "???뚯씪? ?꾩옱 吏곸젒 ?ㅽ뻾?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "이 파일은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
                         }
                     }
                     localPath != null && File(localPath).exists() && spec.availability == ModelAvailability.CUSTOM_IMPORTED -> {
@@ -2457,7 +2459,7 @@ fun ChatScreen(
                             selectedModelPath = selectedModelPath
                         )
                     }
-                    else -> Toast.makeText(context, "紐⑤뜽 ?뚯씪???묎렐?????놁뒿?덈떎. ?뚯씪???ㅼ떆 ?곌껐??二쇱꽭??", Toast.LENGTH_SHORT).show()
+                    else -> Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
                 }
             },
             onChanged = { storageRefreshKey += 1 }
@@ -2474,7 +2476,7 @@ fun ChatScreen(
                 if (model.downloadUrl == null) {
                     Toast.makeText(
                         context,
-                        "?꾩쭅 ?ㅼ슫濡쒕뱶 URL???깅줉?섏? ?딆? 紐⑤뜽?댁빞",
+                        "아직 다운로드 URL이 등록되지 않은 모델이야",
                         Toast.LENGTH_SHORT
                     ).show()
                     pendingDownloadModel = null
@@ -2508,9 +2510,9 @@ fun ChatScreen(
                             selectedModel = selectedModel,
                             selectedModelPath = selectedModelPath
                         )
-                        Toast.makeText(context, "${model.name} ?ㅼ슫濡쒕뱶 ?꾨즺", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "${model.name} 다운로드 완료", Toast.LENGTH_SHORT).show()
                     } else {
-                        Toast.makeText(context, "${model.name} ?ㅼ슫濡쒕뱶 ?ㅽ뙣", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "${model.name} 다운로드 실패", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -2543,7 +2545,7 @@ fun ChatScreen(
 
                 Toast.makeText(
                     context,
-                    "怨좉툒 ?ㅼ젙 ?곸슜?? ${newSettings.accelerator.name}",
+                    "고급 설정 적용됨: ${newSettings.accelerator.name}",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -2554,14 +2556,14 @@ fun ChatScreen(
         AlertDialog(
             onDismissRequest = { showDeleteChatDialog = false },
             title = {
-                Text("梨꾪똿 ??젣")
+                Text("채팅 삭제")
             },
             text = {
-                Text("??梨꾪똿????젣?좉퉴??")
+                Text("이 채팅을 삭제할까요?")
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteChatDialog = false }) {
-                    Text("痍⑥냼")
+                    Text("취소")
                 }
             },
             confirmButton = {
@@ -2581,7 +2583,7 @@ fun ChatScreen(
                         }
                     }
                 ) {
-                    Text("??젣", color = DangerRed)
+                    Text("삭제", color = DangerRed)
                 }
             },
             containerColor = PanelBg,
@@ -2594,10 +2596,10 @@ fun ChatScreen(
         ConversationSummaryDialog(
             summaryMemory = conversationSummary,
             onGenerate = {
-                input = "?꾩옱 ??붿쓽 ?듭떖 ?댁슜???섏쨷??李멸퀬?????덈룄濡?媛꾧껐?섍쾶 ?붿빟??二쇱꽭?? ?ъ슜?먯쓽 ?좏샇, 吏꾪뻾 以묒씤 ?묒뾽, 以묒슂??寃곗젙 ?ы빆??以묒떖?쇰줈 ?뺣━??二쇱꽭?? 遺덊븘?뷀븳 ?〓떞? ?쒖쇅??二쇱꽭??"
+                input = "현재 대화의 핵심 내용을 나중에 참고할 수 있도록 간결하게 요약해 주세요. 사용자의 선호, 진행 중인 작업, 중요한 결정 사항을 중심으로 정리해 주세요. 불필요한 잡담은 제외해 주세요."
                 showConversationSummaryDialog = false
-                Toast.makeText(context, "?붿빟 ?붿껌???낅젰李쎌뿉 異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
-                DeveloperLogStore.record(context, "summary", "?붿빟 ?앹꽦 ?붿껌", "conversationId=$conversationId")
+                Toast.makeText(context, "요약 요청을 입력창에 추가했습니다.", Toast.LENGTH_SHORT).show()
+                DeveloperLogStore.record(context, "summary", "요약 생성 요청", "conversationId=$conversationId")
             },
             onEdit = {
                 conversationSummaryDraft = conversationSummary?.summary.orEmpty()
@@ -2606,10 +2608,10 @@ fun ChatScreen(
             onCopy = {
                 val text = conversationSummary?.summary.orEmpty()
                 if (text.isBlank()) {
-                    Toast.makeText(context, "??λ맂 ?붿빟???놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "저장된 요약이 없습니다.", Toast.LENGTH_SHORT).show()
                 } else {
                     clipboardManager.setText(AnnotatedString(text))
-                    Toast.makeText(context, "?붿빟??蹂듭궗?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "요약을 복사했습니다.", Toast.LENGTH_SHORT).show()
                 }
             },
             onDelete = {
@@ -2630,28 +2632,28 @@ fun ChatScreen(
             onCopy = {
                 val text = memoryCandidateText.trim()
                 if (text.isBlank()) {
-                    Toast.makeText(context, "蹂듭궗??硫붾え由??꾨낫媛 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "복사할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
                 } else {
                     clipboardManager.setText(AnnotatedString(text))
-                    Toast.makeText(context, "硫붾え由??꾨낫瑜?蹂듭궗?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "메모리 후보를 복사했습니다.", Toast.LENGTH_SHORT).show()
                 }
             },
             onSaveSelected = { selectedItems ->
                 val savedCount = saveConversationMemoryCandidates(context, conversationId, selectedItems)
                 if (savedCount <= 0) {
-                    Toast.makeText(context, "??ν븷 硫붾え由??꾨낫媛 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(context, "硫붾え由??꾨낫瑜???ν뻽?듬땲??", Toast.LENGTH_SHORT).show()
-                    DeveloperLogStore.record(context, "memory", "硫붾え由??꾨낫 ???, "conversationId=$conversationId, count=$savedCount")
+                    Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
                 }
             },
             onSaveAll = {
                 val savedCount = saveConversationMemoryCandidates(context, conversationId, parseMemoryCandidateLines(memoryCandidateText))
                 if (savedCount <= 0) {
-                    Toast.makeText(context, "??ν븷 硫붾え由??꾨낫媛 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(context, "硫붾え由??꾨낫瑜???ν뻽?듬땲??", Toast.LENGTH_SHORT).show()
-                    DeveloperLogStore.record(context, "memory", "硫붾え由??꾨낫 ???, "conversationId=$conversationId, count=$savedCount")
+                    Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
                 }
             },
             onDismiss = { showMemoryCandidateDialog = false }
@@ -2665,12 +2667,12 @@ fun ChatScreen(
             onSave = {
                 val saved = saveConversationSummary(context, conversationId, conversationSummaryDraft)
                 if (saved == null) {
-                    Toast.makeText(context, "??붽? ??λ맂 ???ъ슜?????덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "대화가 저장된 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
                 } else {
                     conversationSummaryRefreshKey++
                     showConversationSummaryEditor = false
-                    Toast.makeText(context, "????붿빟????ν뻽?듬땲??", Toast.LENGTH_SHORT).show()
-                    DeveloperLogStore.record(context, "summary", "????붿빟 ???, "conversationId=$conversationId, length=${saved.summary.length}")
+                    Toast.makeText(context, "대화 요약을 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "summary", "대화 요약 저장", "conversationId=$conversationId, length=${saved.summary.length}")
                 }
             },
             onDismiss = {
@@ -2682,22 +2684,22 @@ fun ChatScreen(
     if (showConversationSummaryDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showConversationSummaryDeleteConfirm = false },
-            title = { Text("????붿빟????젣?섏떆寃좎뒿?덇퉴?") },
-            text = { Text("??λ맂 ?붿빟留???젣?섎ŉ 梨꾪똿 湲곕줉? ??젣?섏? ?딆뒿?덈떎.") },
+            title = { Text("대화 요약을 삭제하시겠습니까?") },
+            text = { Text("저장된 요약만 삭제되며 채팅 기록은 삭제되지 않습니다.") },
             confirmButton = {
                 TextButton(onClick = {
                     deleteConversationSummary(context, conversationId)
                     conversationSummaryRefreshKey++
                     showConversationSummaryDeleteConfirm = false
-                    Toast.makeText(context, "????붿빟????젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
-                    DeveloperLogStore.record(context, "summary", "????붿빟 ??젣", "conversationId=$conversationId")
+                    Toast.makeText(context, "대화 요약을 삭제했습니다.", Toast.LENGTH_SHORT).show()
+                    DeveloperLogStore.record(context, "summary", "대화 요약 삭제", "conversationId=$conversationId")
                 }) {
-                    Text("??젣", color = DangerRed)
+                    Text("삭제", color = DangerRed)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showConversationSummaryDeleteConfirm = false }) {
-                    Text("痍⑥냼")
+                    Text("취소")
                 }
             },
             containerColor = PanelBg,
@@ -2724,7 +2726,7 @@ private fun ConversationSummaryDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("????붿빟") },
+        title = { Text("대화 요약") },
         text = {
             Column(
                 modifier = Modifier
@@ -2733,7 +2735,7 @@ private fun ConversationSummaryDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "?꾩옱 ??붿쓽 ?듭떖 ?댁슜????ν빐 湲???붿뿉?쒕룄 留λ씫???좎??⑸땲??",
+                    text = "현재 대화의 핵심 내용을 저장해 긴 대화에서도 맥락을 유지합니다.",
                     color = TextSecondary,
                     fontSize = 13.sp,
                     lineHeight = 18.sp
@@ -2748,10 +2750,10 @@ private fun ConversationSummaryDialog(
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         if (summaryMemory == null) {
-                            Text("??λ맂 ?붿빟???놁뒿?덈떎.", color = TextSecondary, fontSize = 14.sp)
+                            Text("저장된 요약이 없습니다.", color = TextSecondary, fontSize = 14.sp)
                         } else {
                             updatedAtText?.let {
-                                Text("?낅뜲?댄듃: $it", color = TextSecondary, fontSize = 12.sp)
+                                Text("업데이트: $it", color = TextSecondary, fontSize = 12.sp)
                             }
                             Text(
                                 text = summaryMemory.summary,
@@ -2768,15 +2770,15 @@ private fun ConversationSummaryDialog(
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onGenerate) { Text("?붿빟 ?앹꽦", color = AccentBlue) }
-                TextButton(onClick = onEdit) { Text("吏곸젒 ?몄쭛", color = AccentBlue) }
+                TextButton(onClick = onGenerate) { Text("요약 생성", color = AccentBlue) }
+                TextButton(onClick = onEdit) { Text("직접 편집", color = AccentBlue) }
             }
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onCopy, enabled = summaryMemory != null) { Text("?붿빟 蹂듭궗", color = AccentBlue) }
-                TextButton(onClick = onDelete, enabled = summaryMemory != null) { Text("?붿빟 ??젣", color = DangerRed) }
-                TextButton(onClick = onDismiss) { Text("?リ린", color = TextSecondary) }
+                TextButton(onClick = onCopy, enabled = summaryMemory != null) { Text("요약 복사", color = AccentBlue) }
+                TextButton(onClick = onDelete, enabled = summaryMemory != null) { Text("요약 삭제", color = DangerRed) }
+                TextButton(onClick = onDismiss) { Text("닫기", color = TextSecondary) }
             }
         },
         containerColor = PanelBg,
@@ -2794,7 +2796,7 @@ private fun ConversationSummaryEditorDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("????붿빟 ?몄쭛") },
+        title = { Text("대화 요약 편집") },
         text = {
             OutlinedTextField(
                 value = value,
@@ -2802,7 +2804,7 @@ private fun ConversationSummaryEditorDialog(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(220.dp),
-                placeholder = { Text("????붿뿉??怨꾩냽 李멸퀬???듭떖 ?댁슜???낅젰??二쇱꽭??") },
+                placeholder = { Text("이 대화에서 계속 참고할 핵심 내용을 입력해 주세요.") },
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedTextColor = TextPrimary,
                     unfocusedTextColor = TextPrimary,
@@ -2817,12 +2819,12 @@ private fun ConversationSummaryEditorDialog(
         },
         confirmButton = {
             TextButton(onClick = onSave) {
-                Text("???, color = AccentBlue)
+                Text("저장", color = AccentBlue)
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("痍⑥냼", color = TextSecondary)
+                Text("취소", color = TextSecondary)
             }
         },
         containerColor = PanelBg,
@@ -2847,7 +2849,7 @@ private fun MemoryCandidateDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("硫붾え由??꾨낫 異붿텧") },
+        title = { Text("메모리 후보 추출") },
         text = {
             Column(
                 modifier = Modifier
@@ -2856,20 +2858,20 @@ private fun MemoryCandidateDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "????붿뿉???섏쨷??李멸퀬??留뚰븳 ?뺣낫瑜??뺣━?⑸땲??",
+                    text = "이 대화에서 나중에 참고할 만한 정보를 정리합니다.",
                     color = TextSecondary,
                     fontSize = 13.sp,
                     lineHeight = 18.sp
                 )
                 Text(
-                    text = "?먮룞 ??ν븯吏 ?딆뒿?덈떎. ?꾩슂????ぉ留??뺤씤??二쇱꽭??",
+                    text = "자동 저장하지 않습니다. 필요한 항목만 확인해 주세요.",
                     color = AccentBlue,
                     fontSize = 12.sp,
                     lineHeight = 17.sp
                 )
                 if (savedCount > 0) {
                     Text(
-                        text = "??λ맂 ?꾨낫 ${savedCount}媛?,
+                        text = "저장된 후보 ${savedCount}개",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -2893,10 +2895,10 @@ private fun MemoryCandidateDialog(
                                     color = AccentBlue,
                                     strokeWidth = 2.dp
                                 )
-                                Text("硫붾え由??꾨낫瑜?異붿텧?섎뒗 以묒엯?덈떎.", color = TextPrimary, fontSize = 13.sp)
+                                Text("메모리 후보를 추출하는 중입니다.", color = TextPrimary, fontSize = 13.sp)
                             }
                         } else if (candidateText.isBlank()) {
-                            Text("異붿텧??硫붾え由??꾨낫媛 ?놁뒿?덈떎.", color = TextSecondary, fontSize = 14.sp)
+                            Text("추출된 메모리 후보가 없습니다.", color = TextSecondary, fontSize = 14.sp)
                         } else if (parsedCandidates.isEmpty()) {
                             Text(
                                 text = candidateText,
@@ -2937,21 +2939,21 @@ private fun MemoryCandidateDialog(
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = onExtract, enabled = !isExtracting) { Text("?꾨낫 異붿텧", color = AccentBlue) }
+                TextButton(onClick = onExtract, enabled = !isExtracting) { Text("후보 추출", color = AccentBlue) }
                 TextButton(onClick = { onSaveSelected(selectedCandidates.toList()) }, enabled = parsedCandidates.isNotEmpty() && !isExtracting) {
-                    Text("?좏깮 ??ぉ ???, color = AccentBlue, maxLines = 1)
+                    Text("선택 항목 저장", color = AccentBlue, maxLines = 1)
                 }
             }
         },
         dismissButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = onSaveAll, enabled = parsedCandidates.isNotEmpty() && !isExtracting) {
-                    Text("?꾩껜 ???, color = AccentBlue)
+                    Text("전체 저장", color = AccentBlue)
                 }
                 TextButton(onClick = onCopy, enabled = candidateText.isNotBlank() && !isExtracting) {
-                    Text("?꾨낫 蹂듭궗", color = AccentBlue)
+                    Text("후보 복사", color = AccentBlue)
                 }
-                TextButton(onClick = onDismiss) { Text("?リ린", color = TextSecondary) }
+                TextButton(onClick = onDismiss) { Text("닫기", color = TextSecondary) }
             }
         },
         containerColor = PanelBg,
@@ -2984,7 +2986,7 @@ private fun ChatTopBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             CircleTextButton(
-                text = "??,
+                text = "☰",
                 onClick = onOpenList
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -3001,7 +3003,7 @@ private fun ChatTopBar(
 
             CircleIconButton(
                 icon = Icons.Rounded.AddComment,
-                contentDescription = "??梨꾪똿",
+                contentDescription = "새 채팅",
                 onClick = onComposeClick
             )
 
@@ -3009,7 +3011,7 @@ private fun ChatTopBar(
 
             Box {
                 CircleTextButton(
-                    text = "??,
+                    text = "⋮",
                     onClick = onChatMenuClick
                 )
 
@@ -3019,39 +3021,39 @@ private fun ChatTopBar(
                     containerColor = MenuBg
                 ) {
                     DropdownMenuItem(
-                        text = { Text("梨꾪똿 怨좎젙", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("梨꾪똿 怨좎젙") }
+                        text = { Text("채팅 고정", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = { onChatOption("채팅 고정") }
                     )
                     DropdownMenuItem(
-                        text = { Text("???꾨줈?앺듃", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("???꾨줈?앺듃") }
+                        text = { Text("새 프로젝트", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = { onChatOption("새 프로젝트") }
                     )
                     DropdownMenuItem(
-                        text = { Text("?꾨줈?앺듃??異붽?", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("?꾨줈?앺듃??異붽?") }
+                        text = { Text("프로젝트에 추가", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = { onChatOption("프로젝트에 추가") }
                     )
                     DropdownMenuItem(
-                        text = { Text("?낅줈?쒗븳 ?뚯씪", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("?낅줈?쒗븳 ?뚯씪") }
+                        text = { Text("업로드한 파일", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = { onChatOption("업로드한 파일") }
                     )
                     DropdownMenuItem(
-                        text = { Text("???붾㈃??異붽?", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("???붾㈃??異붽?") }
+                        text = { Text("홈 화면에 추가", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = { onChatOption("홈 화면에 추가") }
                     )
                     DropdownMenuItem(
-                        text = { Text("?꾩뭅?대툕??蹂닿?", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        onClick = { onChatOption("?꾩뭅?대툕??蹂닿?") }
+                        text = { Text("아카이브에 보관", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        onClick = { onChatOption("아카이브에 보관") }
                     )
                     DropdownMenuItem(
-                        text = { Text("????붿빟", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        text = { Text("대화 요약", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption(ChatOptionConversationSummary) }
                     )
                     DropdownMenuItem(
-                        text = { Text("硫붾え由??꾨낫 異붿텧", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        text = { Text("메모리 후보 추출", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = { onChatOption(ChatOptionMemoryCandidateExtraction) }
                     )
                     DropdownMenuItem(
-                        text = { Text("??젣", color = DangerRed, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        text = { Text("삭제", color = DangerRed, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         onClick = onDeleteChat
                     )
                 }
@@ -3072,7 +3074,7 @@ private fun ModelPill(
         add(shortModelName(modelName))
         if (reasoningEnabled) add("Reasoning")
         if (webSearchEnabled) add("Searching")
-    }.joinToString(" 쨌 ")
+    }.joinToString(" · ")
     Surface(
         modifier = modifier.clickable { onClick() },
         shape = RoundedCornerShape(24.dp),
@@ -3095,7 +3097,7 @@ private fun ModelPill(
             Spacer(modifier = Modifier.width(6.dp))
 
             Text(
-                text = "??,
+                text = "▾",
                 color = TextSecondary,
                 fontSize = 14.sp
             )
@@ -3121,7 +3123,7 @@ private fun EmptyChatBody(bottomPadding: androidx.compose.ui.unit.Dp) {
         Spacer(modifier = Modifier.height(12.dp))
 
         Text(
-            text = "??梨꾪똿???쒖옉?대낫?몄슂.",
+            text = "새 채팅을 시작해보세요.",
             color = TextPrimary,
             fontSize = 20.sp,
             fontWeight = FontWeight.Medium
@@ -3130,7 +3132,7 @@ private fun EmptyChatBody(bottomPadding: androidx.compose.ui.unit.Dp) {
         Spacer(modifier = Modifier.height(6.dp))
 
         Text(
-            text = "紐⑤뜽怨?紐⑤뱶???꾩そ 移⑹뿉??諛붽? ???덉뒿?덈떎.",
+            text = "모델과 모드는 위쪽 칩에서 바꿀 수 있습니다.",
             color = TextSecondary,
             fontSize = 15.sp
         )
@@ -3156,7 +3158,7 @@ private fun InChatSearchBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "?????寃??,
+                text = "대화 내 검색",
                 color = TextPrimary,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold
@@ -3170,14 +3172,14 @@ private fun InChatSearchBar(
                 textStyle = TextStyle(color = TextPrimary, fontSize = 14.sp),
                 decorationBox = { inner ->
                     if (query.isBlank()) {
-                        Text("硫붿떆吏瑜?寃?됲빀?덈떎.", color = TextSecondary, fontSize = 14.sp)
+                        Text("메시지를 검색합니다.", color = TextSecondary, fontSize = 14.sp)
                     }
                     inner()
                 }
             )
             Spacer(modifier = Modifier.width(10.dp))
             Text(
-                text = "?リ린",
+                text = "닫기",
                 color = AccentBlue,
                 fontSize = 13.sp,
                 modifier = Modifier.clickable { onClose() }
@@ -3203,7 +3205,7 @@ private fun InChatSearchResultRow(
             Text(text = role, color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = preview.ifBlank { "(?댁슜 ?놁쓬)" },
+                text = preview.ifBlank { "(내용 없음)" },
                 color = TextPrimary,
                 fontSize = 14.sp,
                 maxLines = 3,
@@ -3222,7 +3224,7 @@ private fun EmptyInChatSearchResults() {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = "寃??寃곌낵媛 ?놁뒿?덈떎.",
+            text = "검색 결과가 없습니다.",
             color = TextPrimary,
             fontSize = 15.sp,
             fontWeight = FontWeight.Medium
@@ -3326,7 +3328,7 @@ private fun AssistantMessage(
         if (isRegenerating) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "?듬????ㅼ떆 ?앹꽦?섎뒗 以묒엯?덈떎.",
+                text = "답변을 다시 생성하는 중입니다.",
                 color = AccentBlue,
                 fontSize = 13.sp,
                 lineHeight = 18.sp
@@ -3341,7 +3343,7 @@ private fun AssistantMessage(
             ) {
                 ActionIcon(
                     icon = Icons.Rounded.ChevronLeft,
-                    contentDescription = "?댁쟾 ?듬?",
+                    contentDescription = "이전 답변",
                     enabled = versionIndex > 0,
                     onClick = onPreviousVersion
                 )
@@ -3353,7 +3355,7 @@ private fun AssistantMessage(
                 )
                 ActionIcon(
                     icon = Icons.Rounded.ChevronRight,
-                    contentDescription = "?ㅼ쓬 ?듬?",
+                    contentDescription = "다음 답변",
                     enabled = versionIndex < versionCount - 1,
                     onClick = onNextVersion
                 )
@@ -3378,25 +3380,25 @@ private fun AssistantMessage(
         ) {
             ActionIcon(
                 icon = Icons.Rounded.ContentCopy,
-                contentDescription = "蹂듭궗",
+                contentDescription = "복사",
                 onClick = {
                     clipboardManager.setText(AnnotatedString(parsed.answer))
-                    Toast.makeText(context, "蹂듭궗?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "복사했습니다.", Toast.LENGTH_SHORT).show()
                 }
             )
 
             ActionIcon(
                 icon = Icons.Rounded.VolumeUp,
-                contentDescription = "?뚯꽦?쇰줈 ?쎄린",
+                contentDescription = "음성으로 읽기",
                 onClick = {
-                    Toast.makeText(context, "?뚯꽦 ?쎄린???ㅼ쓬 ?④퀎?먯꽌 ?곌껐?섍쿋?듬땲??", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "음성 읽기는 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
                 }
             )
 
             Box {
                 ActionIcon(
                     icon = Icons.Rounded.MoreVert,
-                    contentDescription = "?붾낫湲?,
+                    contentDescription = "더보기",
                     onClick = {
                         moreExpanded = true
                     }
@@ -3447,7 +3449,7 @@ private fun SearchSourceCapsules(
         modifier = Modifier.horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        SourceCapsule("異쒖쿂 ${sources.size}媛?, onClick)
+        SourceCapsule("출처 ${sources.size}개", onClick)
         sources.take(3).forEach { source ->
             val label = source.source ?: source.providerDisplayName
             SourceCapsule(label.take(22), onClick)
@@ -3485,7 +3487,7 @@ private fun SearchSourcesDialog(
     val context = LocalContext.current
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("異쒖쿂", color = TextPrimary) },
+        title = { Text("출처", color = TextPrimary) },
         text = {
             Column(
                 modifier = Modifier
@@ -3504,23 +3506,23 @@ private fun SearchSourcesDialog(
                             modifier = Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(5.dp)
                         ) {
-                            SourceDetailLine("寃???쒓났??, source.providerDisplayName)
-                            SourceDetailLine("寃?됱뼱", source.queryUsed)
-                            SourceDetailLine("?먮즺 異쒖쿂", source.source.orEmpty())
-                            SourceDetailLine("?쒕ぉ", source.title)
-                            source.publishedAt?.takeIf { it.isNotBlank() }?.let { SourceDetailLine("寃뚯떆??, it) }
-                            source.snippet?.takeIf { it.isNotBlank() }?.let { SourceDetailLine("?붿빟", it) }
+                            SourceDetailLine("검색 제공자", source.providerDisplayName)
+                            SourceDetailLine("검색어", source.queryUsed)
+                            SourceDetailLine("자료 출처", source.source.orEmpty())
+                            SourceDetailLine("제목", source.title)
+                            source.publishedAt?.takeIf { it.isNotBlank() }?.let { SourceDetailLine("게시일", it) }
+                            source.snippet?.takeIf { it.isNotBlank() }?.let { SourceDetailLine("요약", it) }
                             source.url?.takeIf { it.isNotBlank() }?.let { url ->
                                 TextButton(
                                     onClick = {
                                         runCatching {
                                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                                         }.onFailure {
-                                            Toast.makeText(context, "?먮Ц???????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "원문을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                                 ) {
-                                    Text("?먮Ц ?닿린", color = AccentBlue)
+                                    Text("원문 열기", color = AccentBlue)
                                 }
                             }
                         }
@@ -3530,7 +3532,7 @@ private fun SearchSourcesDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("?リ린", color = AccentBlue)
+                Text("닫기", color = AccentBlue)
             }
         },
         containerColor = PanelBg,
@@ -3571,7 +3573,7 @@ private fun ReasoningPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (expanded) "?앷컖 怨쇱젙 ?묎린" else "?앷컖 怨쇱젙 蹂닿린",
+                    text = if (expanded) "생각 과정 접기" else "생각 과정 보기",
                     color = TextSecondary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
@@ -3579,7 +3581,7 @@ private fun ReasoningPanel(
                 )
 
                 Text(
-                    text = if (expanded) "?? else "??,
+                    text = if (expanded) "⌃" else "⌄",
                     color = TextSecondary,
                     fontSize = 18.sp
                 )
@@ -3622,7 +3624,7 @@ private fun AssistantMoreMenu(
     onToggleWebSearch: () -> Unit
 ) {
     val timeText = remember(createdAt) {
-        SimpleDateFormat("?ㅻ뒛, a h:mm", Locale.KOREAN)
+        SimpleDateFormat("오늘, a h:mm", Locale.KOREAN)
             .format(Date(createdAt))
     }
     DropdownMenu(
@@ -3652,42 +3654,42 @@ private fun AssistantMoreMenu(
         )
 
         DropdownMenuItem(
-            text = { Text("?? ??梨꾪똿?쇰줈 媛吏移섍린", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text("↗  새 채팅으로 가지치기", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = onBranch
         )
 
         DropdownMenuItem(
-            text = { Text("$selectedModel ?ъ슜??, color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text("$selectedModel 사용함", color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = {},
             enabled = false
         )
 
         DropdownMenuItem(
-            text = { Text("?듬? ?ㅼ떆 ?앹꽦", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text("답변 다시 생성", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = onRetry,
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("??吏㏐쾶", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text("더 짧게", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.Shorter) },
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("???먯꽭??, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text("더 자세히", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.MoreDetailed) },
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("?쒕줈 ?뺣━", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text("표로 정리", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.Table) },
             enabled = !isRegenerating
         )
 
         DropdownMenuItem(
-            text = { Text("?꾨Ц媛 ??, color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            text = { Text("전문가 톤", color = TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onClick = { onRegenerate(ResponseRegenerationAction.ExpertTone) },
             enabled = !isRegenerating
         )
@@ -3695,7 +3697,7 @@ private fun AssistantMoreMenu(
         DropdownMenuItem(
             text = {
                 Text(
-                    text = if (webSearchEnabled) "?뙋  ??寃???꾧린" else "?뙋  ??寃??,
+                    text = if (webSearchEnabled) "🌐  웹 검색 끄기" else "🌐  웹 검색",
                     color = TextPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -3812,7 +3814,7 @@ private fun ChatInputBar(
                     modifier = Modifier.clickable { quickPromptExpanded = !quickPromptExpanded }
                 ) {
                     Text(
-                        text = if (quickPromptExpanded) "鍮좊Ⅸ ?낅젰 ?リ린" else "鍮좊Ⅸ ?낅젰",
+                        text = if (quickPromptExpanded) "빠른 입력 닫기" else "빠른 입력",
                         color = TextSecondary,
                         fontSize = 12.sp,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
@@ -3866,7 +3868,7 @@ private fun ChatInputBar(
                             decorationBox = { innerTextField ->
                                 if (value.isBlank()) {
                                     Text(
-                                        text = "?낅젰?섏뿬 梨꾪똿",
+                                        text = "입력하여 채팅",
                                         color = TextSecondary,
                                         fontSize = 18.sp
                                     )
@@ -3883,7 +3885,7 @@ private fun ChatInputBar(
                             ) {
                                 CircleMiniIconButton(
                                     icon = Icons.Rounded.Mic,
-                                    contentDescription = "?뚯꽦 ?낅젰",
+                                    contentDescription = "음성 입력",
                                     onClick = onMicClick
                                 )
 
@@ -3901,7 +3903,7 @@ private fun ChatInputBar(
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = "??,
+                                            text = "◉",
                                             color = Color.Black,
                                             fontSize = 18.sp,
                                             fontWeight = FontWeight.Bold
@@ -3924,7 +3926,7 @@ private fun ChatInputBar(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = if (isGenerating) "?? else "??,
+                                        text = if (isGenerating) "…" else "↑",
                                         color = Color.Black,
                                         fontSize = 20.sp,
                                         fontWeight = FontWeight.Bold
@@ -4063,7 +4065,7 @@ private fun AttachmentCard(
             if (onRemove != null) {
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "횞",
+                    text = "×",
                     color = TextSecondary,
                     fontSize = 22.sp,
                     modifier = Modifier
@@ -4078,10 +4080,10 @@ private fun AttachmentCard(
 
 private fun attachmentIcon(mimeType: String): String {
     return when {
-        mimeType.startsWith("image/") -> "?뼹"
-        mimeType == "application/pdf" -> "?뱞"
-        mimeType.startsWith("text/") -> "?뱷"
-        else -> "?뱨"
+        mimeType.startsWith("image/") -> "🖼"
+        mimeType == "application/pdf" -> "📄"
+        mimeType.startsWith("text/") -> "📝"
+        else -> "📎"
     }
 }
 
@@ -4102,7 +4104,7 @@ private fun buildImageUserInstruction(
     userInput: String
 ): String {
     return userInput.trim().ifBlank {
-        "???대?吏瑜??먯꽭???ㅻ챸??二쇱꽭??"
+        "이 이미지를 자세히 설명해 주세요."
     }
 }
 @Composable
@@ -4236,9 +4238,9 @@ private fun ModelSelectDialog(
     var showHiddenModels by remember { mutableStateOf(prefs.getBoolean(PrefShowHiddenModels, false)) }
     var sortMode by remember { mutableStateOf(ModelLibrarySortMode.fromKey(prefs.getString(PrefModelLibrarySortMode, null))) }
     var searchQuery by remember { mutableStateOf("") }
-    var activeStatusFilter by remember { mutableStateOf("?꾩껜") }
-    var activeFamilyFilter by remember { mutableStateOf("?꾩껜") }
-    var modelViewMode by remember { mutableStateOf("?꾩껜 紐⑤뜽") }
+    var activeStatusFilter by remember { mutableStateOf("전체") }
+    var activeFamilyFilter by remember { mutableStateOf("전체") }
+    var modelViewMode by remember { mutableStateOf("전체 모델") }
     var sortMenuExpanded by remember { mutableStateOf(false) }
     var showClearRecentConfirm by remember { mutableStateOf(false) }
     var recentHistory by remember { mutableStateOf(loadRecentModels(prefs)) }
@@ -4256,24 +4258,24 @@ private fun ModelSelectDialog(
     }
     val baseModels = remember(catalogModels, visibleCatalogModels, activeStatusFilter, hiddenModelIds) {
         when (activeStatusFilter) {
-            "?④릿 紐⑤뜽" -> catalogModels.filter { it.id in hiddenModelIds }
+            "숨긴 모델" -> catalogModels.filter { it.id in hiddenModelIds }
             else -> visibleCatalogModels
         }
     }
     val statusFilteredModels = remember(baseModels, activeStatusFilter, context, favoriteModelIds) {
         when (activeStatusFilter) {
-            "?꾩껜" -> baseModels
-            "利먭꺼李얘린" -> baseModels.filter { it.id in favoriteModelIds }
-            "濡쒖뺄 媛?? -> baseModels.filter { isCatalogModelAvailable(context, it) || it.availability == ModelAvailability.CUSTOM_IMPORTED }
-            "蹂???꾩슂" -> baseModels.filter { it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE }
-            "?먭꺽 ?꾩슜" -> baseModels.filter { it.availability == ModelAvailability.REMOTE_ONLY }
-            "8GB 沅뚯옣" -> baseModels.filter { (it.recommendedRamGb ?: 0) <= 8 && (it.recommendedRamGb ?: 0) > 0 }
-            "?④릿 紐⑤뜽" -> baseModels
+            "전체" -> baseModels
+            "즐겨찾기" -> baseModels.filter { it.id in favoriteModelIds }
+            "로컬 가능" -> baseModels.filter { isCatalogModelAvailable(context, it) || it.availability == ModelAvailability.CUSTOM_IMPORTED }
+            "변환 필요" -> baseModels.filter { it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE }
+            "원격 전용" -> baseModels.filter { it.availability == ModelAvailability.REMOTE_ONLY }
+            "8GB 권장" -> baseModels.filter { (it.recommendedRamGb ?: 0) <= 8 && (it.recommendedRamGb ?: 0) > 0 }
+            "숨긴 모델" -> baseModels
             else -> baseModels
         }
     }
     val familyFilteredModels = remember(statusFilteredModels, activeFamilyFilter) {
-        if (activeFamilyFilter == "?꾩껜") statusFilteredModels
+        if (activeFamilyFilter == "전체") statusFilteredModels
         else statusFilteredModels.filter { it.family.name.equals(activeFamilyFilter, ignoreCase = true) }
     }
     val normalizedSearch = remember(searchQuery) { searchQuery.trim().lowercase(Locale.getDefault()) }
@@ -4331,11 +4333,11 @@ private fun ModelSelectDialog(
                 "current=${spec.displayName == currentModel}, tier=${evaluation.tier}, ramClass=${evaluation.deviceRamClass}, included=${evaluation.includedInRecommendedLocal}, includeReason=${evaluation.includeReason}, reason=${evaluation.reason}"
         )
     }
-    val recommendedBest = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "沅뚯옣" } }
-    val recommendedExperimental = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "?ㅽ뿕 媛?? } }
+    val recommendedBest = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "권장" } }
+    val recommendedExperimental = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "실험 가능" } }
     val recommendedTop = remember(recommendedBest, recommendedExperimental) { recommendedBest + recommendedExperimental }
-    val recommendedCaution = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "二쇱쓽 ?꾩슂" } }
-    val recommendedNot = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.tier == "沅뚯옣?섏? ?딆쓬" || it.tier == "?먭꺽 ?꾩슜" } }
+    val recommendedCaution = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.includedInRecommendedLocal && it.tier == "주의 필요" } }
+    val recommendedNot = remember(recommendedEvaluations) { recommendedEvaluations.filter { it.tier == "권장하지 않음" || it.tier == "원격 전용" } }
     val favoriteVisibleSpecs = remember(visibleCatalogModels, favoriteModelIds) {
         visibleCatalogModels.filter { it.id in favoriteModelIds }
     }
@@ -4360,7 +4362,7 @@ private fun ModelSelectDialog(
         }
     }
     val showRecentSection = remember(searchQuery, activeStatusFilter, activeFamilyFilter, modelViewMode, recentModels) {
-        searchQuery.isBlank() && activeStatusFilter == "?꾩껜" && activeFamilyFilter == "?꾩껜" && modelViewMode == "?꾩껜 紐⑤뜽" && recentModels.isNotEmpty()
+        searchQuery.isBlank() && activeStatusFilter == "전체" && activeFamilyFilter == "전체" && modelViewMode == "전체 모델" && recentModels.isNotEmpty()
     }
     fun persistFavorite(ids: Set<String>) {
         favoriteModelIds = ids
@@ -4388,7 +4390,7 @@ private fun ModelSelectDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text("紐⑤뜽 ?쇱씠釉뚮윭由?)
+            Text("모델 라이브러리")
         },
         text = {
             Column(
@@ -4402,14 +4404,14 @@ private fun ModelSelectDialog(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "?ъ슜??紐⑤뜽???좏깮?섍굅????紐⑤뜽??媛?몄샃?덈떎.",
+                        text = "사용할 모델을 선택하거나 새 모델을 가져옵니다.",
                         color = TextSecondary,
                         fontSize = 13.sp
                     )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FusionTextButton(onClick = onLinkExternalModel) { Text("?몃? 紐⑤뜽 ?뚯씪 ?곌껐", fontSize = 13.sp) }
-                        FusionTextButton(onClick = onOpenStorageManager) { Text("紐⑤뜽 ??κ났媛?, fontSize = 13.sp) }
+                        FusionTextButton(onClick = onLinkExternalModel) { Text("외부 모델 파일 연결", fontSize = 13.sp) }
+                        FusionTextButton(onClick = onOpenStorageManager) { Text("모델 저장공간", fontSize = 13.sp) }
                     }
                     Row(
                         modifier = Modifier
@@ -4417,7 +4419,7 @@ private fun ModelSelectDialog(
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        listOf("?꾩껜 紐⑤뜽", "??湲곌린??異붿쿇").forEach { label ->
+                        listOf("전체 모델", "내 기기에 추천").forEach { label ->
                             CompactFilterChip(
                                 label = label,
                                 selected = modelViewMode == label,
@@ -4437,7 +4439,7 @@ private fun ModelSelectDialog(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                Text("?뺣젹: ${sortMode.label}", color = TextPrimary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("정렬: ${sortMode.label}", color = TextPrimary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Icon(Icons.Rounded.ArrowDropDown, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
                             }
                         }
@@ -4469,7 +4471,7 @@ private fun ModelSelectDialog(
                     OutlinedTextField(
                         value = searchQuery,
                         onValueChange = { searchQuery = it },
-                        placeholder = { Text("紐⑤뜽??寃?됲빀?덈떎.", color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        placeholder = { Text("모델을 검색합니다.", color = TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                         singleLine = true,
                         textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -4487,13 +4489,13 @@ private fun ModelSelectDialog(
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        listOf("?꾩껜", "利먭꺼李얘린", "濡쒖뺄 媛??, "蹂???꾩슂", "?먭꺽 ?꾩슜", "8GB 沅뚯옣", "?④릿 紐⑤뜽").forEach { label ->
+                        listOf("전체", "즐겨찾기", "로컬 가능", "변환 필요", "원격 전용", "8GB 권장", "숨긴 모델").forEach { label ->
                             CompactFilterChip(
                                 label = label,
                                 selected = activeStatusFilter == label,
                                 onClick = {
                                     activeStatusFilter = label
-                                    if (label == "?꾩껜") activeFamilyFilter = "?꾩껜"
+                                    if (label == "전체") activeFamilyFilter = "전체"
                                 }
                             )
                         }
@@ -4505,7 +4507,7 @@ private fun ModelSelectDialog(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         listOf(
-                            "?꾩껜" to "?꾩껜",
+                            "전체" to "전체",
                             "GEMMA" to "Gemma",
                             "QWEN" to "Qwen",
                             "LLAMA" to "Llama",
@@ -4533,15 +4535,15 @@ private fun ModelSelectDialog(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("?④릿 紐⑤뜽 ?쒖떆", color = TextPrimary, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(if (showHiddenModels) "耳쒖쭚" else "爰쇱쭚", color = AccentBlue, fontSize = 12.sp, maxLines = 1)
+                            Text("숨긴 모델 표시", color = TextPrimary, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (showHiddenModels) "켜짐" else "꺼짐", color = AccentBlue, fontSize = 12.sp, maxLines = 1)
                         }
                     }
 
                     selectedHiddenSpec?.let { selectedSpec ->
                         if (!showHiddenModels) {
                             ModelZooSection(
-                                title = "?꾩옱 ?ъ슜 以?,
+                                title = "현재 사용 중",
                                 specs = listOf(selectedSpec),
                                 currentModel = currentModel,
                                 onSelect = { spec ->
@@ -4551,7 +4553,7 @@ private fun ModelSelectDialog(
                                 onUploadCustomModel = onUploadCustomModel,
                                 onApplyRecommendedSettings = { spec ->
                                     applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
-                                    Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
                                 },
                                 favoriteModelIds = favoriteModelIds,
                                 hiddenModelIds = hiddenModelIds,
@@ -4559,15 +4561,15 @@ private fun ModelSelectDialog(
                                 onToggleFavorite = { spec ->
                                     val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
                                     persistFavorite(next)
-                                    Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
                                 },
                                 onHideModel = { spec ->
                                     persistHidden(hiddenModelIds + spec.id)
-                                    Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
                                 },
                                 onUnhideModel = { spec ->
                                     persistHidden(hiddenModelIds - spec.id)
-                                    Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                                 },
                                 modelNotes = modelNotes,
                                 onSaveModelNote = ::persistModelNote,
@@ -4586,18 +4588,18 @@ private fun ModelSelectDialog(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "理쒓렐 ?ъ슜 紐⑤뜽",
+                                text = "최근 사용 모델",
                                 color = TextPrimary,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier.weight(1f)
                             )
                             FusionTextButton(onClick = { showClearRecentConfirm = true }) {
-                                Text("理쒓렐 ?ъ슜 湲곕줉 吏?곌린", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("최근 사용 기록 지우기", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                         ModelZooSection(
-                            title = "理쒓렐 ?ъ슜 紐⑤뜽",
+                            title = "최근 사용 모델",
                             specs = sortModelSpecs(recentSpecs, sortMode, currentModel, favoriteModelIds),
                             currentModel = currentModel,
                             onSelect = { spec ->
@@ -4607,7 +4609,7 @@ private fun ModelSelectDialog(
                             onUploadCustomModel = onUploadCustomModel,
                             onApplyRecommendedSettings = { spec ->
                                 applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
-                                Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
                             },
                             favoriteModelIds = favoriteModelIds,
                             hiddenModelIds = hiddenModelIds,
@@ -4615,15 +4617,15 @@ private fun ModelSelectDialog(
                             onToggleFavorite = { spec ->
                                 val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
                                 persistFavorite(next)
-                                Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
                             },
                             onHideModel = { spec ->
                                 persistHidden(hiddenModelIds + spec.id)
-                                Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
                             },
                             onUnhideModel = { spec ->
                                 persistHidden(hiddenModelIds - spec.id)
-                                Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                             }
                         )
                         val latestRecent = recentModels.firstOrNull()?.second
@@ -4631,51 +4633,51 @@ private fun ModelSelectDialog(
                             Text(formatRecentUsedLabel(it.lastUsedAt), color = TextSecondary, fontSize = 12.sp)
                         }
                     }
-                    if (modelViewMode == "??湲곌린??異붿쿇") {
+                    if (modelViewMode == "내 기기에 추천") {
                         Surface(shape = RoundedCornerShape(10.dp), color = PanelBg, modifier = Modifier.fillMaxWidth()) {
                             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text("湲곌린 硫붾え由? ??${formatGb(deviceSummary.first)}GB", color = TextSecondary, fontSize = 12.sp)
-                                Text("?꾩옱 ?ъ슜 媛?? ??${formatGb(deviceSummary.second)}GB", color = TextSecondary, fontSize = 12.sp)
-                                if (deviceSummary.third) Text("?硫붾え由?紐⑤뱶瑜?沅뚯옣?⑸땲??", color = DangerRed, fontSize = 12.sp)
+                                Text("기기 메모리: 약 ${formatGb(deviceSummary.first)}GB", color = TextSecondary, fontSize = 12.sp)
+                                Text("현재 사용 가능: 약 ${formatGb(deviceSummary.second)}GB", color = TextSecondary, fontSize = 12.sp)
+                                if (deviceSummary.third) Text("저메모리 모드를 권장합니다.", color = DangerRed, fontSize = 12.sp)
                             }
                         }
-                        val selectedEval = recommendedEvaluations.firstOrNull { it.spec.displayName == currentModel && it.tier !in listOf("沅뚯옣", "?ㅽ뿕 媛??) }
+                        val selectedEval = recommendedEvaluations.firstOrNull { it.spec.displayName == currentModel && it.tier !in listOf("권장", "실험 가능") }
                         selectedEval?.let {
                             ModelZooSection(
-                                title = "?꾩옱 ?ъ슜 以?,
+                                title = "현재 사용 중",
                                 specs = listOf(it.spec),
                                 currentModel = currentModel,
                                 onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
                                 onUploadCustomModel = onUploadCustomModel,
-                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
                                 favoriteModelIds = favoriteModelIds,
                                 hiddenModelIds = hiddenModelIds,
                                 showHiddenBadge = showHiddenModels,
-                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
-                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show() },
-                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluations.associate { ev -> ev.spec.id to ev },
                                 modelNotes = modelNotes,
                                 onSaveModelNote = ::persistModelNote,
                                 benchmarkSummaryByModelId = benchmarkSummaryByModelId,
                                 onOpenBenchmark = onOpenBenchmark
                             )
-                            Text("?꾩옱 ?좏깮??紐⑤뜽? ??湲곌린?먯꽌 ?덉젙?곸쑝濡??ㅽ뻾?섏? ?딆쓣 ???덉뒿?덈떎.", color = DangerRed, fontSize = 12.sp)
+                            Text("현재 선택된 모델은 이 기기에서 안정적으로 실행되지 않을 수 있습니다.", color = DangerRed, fontSize = 12.sp)
                         }
                         if (recommendedBest.isNotEmpty()) {
                             ModelZooSection(
-                                title = "沅뚯옣 紐⑤뜽",
+                                title = "권장 모델",
                                 specs = sortedRecommendedBestSpecs,
                                 currentModel = currentModel,
                                 onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
                                 onUploadCustomModel = onUploadCustomModel,
-                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
                                 favoriteModelIds = favoriteModelIds,
                                 hiddenModelIds = hiddenModelIds,
                                 showHiddenBadge = showHiddenModels,
-                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
-                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show() },
-                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluationMap,
                                 modelNotes = modelNotes,
                                 onSaveModelNote = ::persistModelNote,
@@ -4685,18 +4687,18 @@ private fun ModelSelectDialog(
                         }
                         if (recommendedExperimental.isNotEmpty()) {
                             ModelZooSection(
-                                title = "?ㅽ뿕 媛?ν븳 紐⑤뜽",
+                                title = "실험 가능한 모델",
                                 specs = sortedRecommendedExperimentalSpecs,
                                 currentModel = currentModel,
                                 onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
                                 onUploadCustomModel = onUploadCustomModel,
-                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
                                 favoriteModelIds = favoriteModelIds,
                                 hiddenModelIds = hiddenModelIds,
                                 showHiddenBadge = showHiddenModels,
-                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
-                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show() },
-                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluationMap,
                                 modelNotes = modelNotes,
                                 onSaveModelNote = ::persistModelNote,
@@ -4706,18 +4708,18 @@ private fun ModelSelectDialog(
                         }
                         if (recommendedCaution.isNotEmpty()) {
                             ModelZooSection(
-                                title = "二쇱쓽媛 ?꾩슂??紐⑤뜽",
+                                title = "주의가 필요한 모델",
                                 specs = sortedRecommendedCautionSpecs,
                                 currentModel = currentModel,
                                 onSelect = { spec -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath, downloadUrl = spec.downloadUrl)) },
                                 onUploadCustomModel = onUploadCustomModel,
-                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onApplyRecommendedSettings = { spec -> applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec); Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show() },
                                 favoriteModelIds = favoriteModelIds,
                                 hiddenModelIds = hiddenModelIds,
                                 showHiddenBadge = showHiddenModels,
-                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
-                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show() },
-                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show() },
+                                onToggleFavorite = { spec -> val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id; persistFavorite(next); Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show() },
+                                onHideModel = { spec -> persistHidden(hiddenModelIds + spec.id); Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show() },
+                                onUnhideModel = { spec -> persistHidden(hiddenModelIds - spec.id); Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show() },
                                 recommendationMap = recommendedEvaluationMap,
                                 modelNotes = modelNotes,
                                 onSaveModelNote = ::persistModelNote,
@@ -4726,15 +4728,15 @@ private fun ModelSelectDialog(
                             )
                         }
                         if (recommendedTop.isEmpty() && recommendedCaution.isEmpty()) {
-                            Text("?꾩옱 湲곌린??異붿쿇?????덈뒗 濡쒖뺄 紐⑤뜽???놁뒿?덈떎.", color = TextSecondary, fontSize = 13.sp)
-                            Text("?꾩껜 紐⑤뜽?먯꽌 蹂???꾩슂 ?먮뒗 ?먭꺽 紐⑤뜽???뺤씤??二쇱꽭??", color = TextSecondary, fontSize = 12.sp)
+                            Text("현재 기기에 추천할 수 있는 로컬 모델이 없습니다.", color = TextSecondary, fontSize = 13.sp)
+                            Text("전체 모델에서 변환 필요 또는 원격 모델을 확인해 주세요.", color = TextSecondary, fontSize = 12.sp)
                         }
-                        FusionTextButton(onClick = { activeStatusFilter = "?꾩껜"; activeFamilyFilter = "?꾩껜"; modelViewMode = "?꾩껜 紐⑤뜽" }) {
-                            Text("?꾩껜 紐⑤뜽濡?蹂닿린", fontSize = 12.sp)
+                        FusionTextButton(onClick = { activeStatusFilter = "전체"; activeFamilyFilter = "전체"; modelViewMode = "전체 모델" }) {
+                            Text("전체 모델로 보기", fontSize = 12.sp)
                         }
-                    } else if (favoriteVisibleSpecs.isNotEmpty() && activeStatusFilter == "?꾩껜") {
+                    } else if (favoriteVisibleSpecs.isNotEmpty() && activeStatusFilter == "전체") {
                         ModelZooSection(
-                            title = "利먭꺼李얘린",
+                            title = "즐겨찾기",
                             specs = sortedFavoriteVisibleSpecs.filterNot { it.id in recentSpecIds },
                             currentModel = currentModel,
                             onSelect = { spec ->
@@ -4744,7 +4746,7 @@ private fun ModelSelectDialog(
                             onUploadCustomModel = onUploadCustomModel,
                             onApplyRecommendedSettings = { spec ->
                                 applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
-                                Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
                             },
                             favoriteModelIds = favoriteModelIds,
                             hiddenModelIds = hiddenModelIds,
@@ -4752,15 +4754,15 @@ private fun ModelSelectDialog(
                             onToggleFavorite = { spec ->
                                 val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
                                 persistFavorite(next)
-                                Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
                             },
                             onHideModel = { spec ->
                                 persistHidden(hiddenModelIds + spec.id)
-                                Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
                             },
                             onUnhideModel = { spec ->
                                 persistHidden(hiddenModelIds - spec.id)
-                                Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                             },
                             modelNotes = modelNotes,
                             onSaveModelNote = ::persistModelNote,
@@ -4769,10 +4771,10 @@ private fun ModelSelectDialog(
                         )
                     }
 
-                    if (modelViewMode != "??湲곌린??異붿쿇") {
+                    if (modelViewMode != "내 기기에 추천") {
                     ModelZooSection(
-                        title = "?ъ슜 媛?ν븳 紐⑤뜽",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { isCatalogModelAvailable(context, it) && (activeStatusFilter != "?꾩껜" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
+                        title = "사용 가능한 모델",
+                        specs = sortModelSpecs(filteredCatalogModels.filter { isCatalogModelAvailable(context, it) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = { spec ->
                             val model = LocalModel(
@@ -4786,7 +4788,7 @@ private fun ModelSelectDialog(
                         onUploadCustomModel = onUploadCustomModel,
                         onApplyRecommendedSettings = { spec ->
                             applyDeviceAwareRecommendedSettings(context, prefs.edit(), spec)
-                            Toast.makeText(context, "沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         favoriteModelIds = favoriteModelIds,
                         hiddenModelIds = hiddenModelIds,
@@ -4794,15 +4796,15 @@ private fun ModelSelectDialog(
                         onToggleFavorite = { spec ->
                             val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
                             persistFavorite(next)
-                            Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onHideModel = { spec ->
                             persistHidden(hiddenModelIds + spec.id)
-                            Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
-                            Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         recommendationMap = emptyMap(),
                         modelNotes = modelNotes,
@@ -4811,8 +4813,8 @@ private fun ModelSelectDialog(
                         onOpenBenchmark = onOpenBenchmark
                     )
                     ModelZooSection(
-                        title = "蹂?섏씠 ?꾩슂??紐⑤뜽",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && (activeStatusFilter != "?꾩껜" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
+                        title = "변환이 필요한 모델",
+                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.availability == ModelAvailability.NEEDS_CONVERSION || it.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -4823,15 +4825,15 @@ private fun ModelSelectDialog(
                         onToggleFavorite = { spec ->
                             val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
                             persistFavorite(next)
-                            Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onHideModel = { spec ->
                             persistHidden(hiddenModelIds + spec.id)
-                            Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
-                            Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         modelNotes = modelNotes,
                         onSaveModelNote = ::persistModelNote,
@@ -4839,8 +4841,8 @@ private fun ModelSelectDialog(
                         onOpenBenchmark = onOpenBenchmark
                     )
                     ModelZooSection(
-                        title = "?먭꺽 紐⑤뜽",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && (activeStatusFilter != "?꾩껜" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
+                        title = "원격 모델",
+                        specs = sortModelSpecs(filteredCatalogModels.filter { it.availability == ModelAvailability.REMOTE_ONLY && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = {},
                         onUploadCustomModel = onUploadCustomModel,
@@ -4851,15 +4853,15 @@ private fun ModelSelectDialog(
                         onToggleFavorite = { spec ->
                             val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
                             persistFavorite(next)
-                            Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onHideModel = { spec ->
                             persistHidden(hiddenModelIds + spec.id)
-                            Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
-                            Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         modelNotes = modelNotes,
                         onSaveModelNote = ::persistModelNote,
@@ -4867,19 +4869,19 @@ private fun ModelSelectDialog(
                         onOpenBenchmark = onOpenBenchmark
                     )
                     ModelZooSection(
-                        title = "媛?몄삩 紐⑤뜽",
-                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.id.startsWith("custom-") || it.id.startsWith("external-")) && (activeStatusFilter != "?꾩껜" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
+                        title = "가져온 모델",
+                        specs = sortModelSpecs(filteredCatalogModels.filter { (it.id.startsWith("custom-") || it.id.startsWith("external-")) && (activeStatusFilter != "전체" || it.id !in favoriteModelIds) && (it.id !in recentSpecIds || !showRecentSection) }, sortMode, currentModel, favoriteModelIds),
                         currentModel = currentModel,
                         onSelect = { spec ->
                             when {
                                 spec.availability == ModelAvailability.NEEDS_CONVERSION -> {
-                                    Toast.makeText(context, "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
                                 }
                                 spec.availability != ModelAvailability.CUSTOM_IMPORTED -> {
-                                    Toast.makeText(context, "???뺤떇? ?꾩옱 吏곸젒 ?ㅽ뻾?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
                                 }
                                 spec.localPath.isNullOrBlank() -> {
-                                    Toast.makeText(context, "??紐⑤뜽? ?ㅽ뻾 ?꾩뿉 Fusion ?대? ??μ냼濡?蹂듭궗?댁빞 ?????덉뒿?덈떎.", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", Toast.LENGTH_LONG).show()
                                 }
                                 else -> onSelect(LocalModel(spec.displayName, spec.fileName ?: spec.displayName, customPath = spec.localPath))
                             }
@@ -4892,15 +4894,15 @@ private fun ModelSelectDialog(
                         onToggleFavorite = { spec ->
                             val next = if (spec.id in favoriteModelIds) favoriteModelIds - spec.id else favoriteModelIds + spec.id
                             persistFavorite(next)
-                            Toast.makeText(context, if (spec.id in favoriteModelIds) "利먭꺼李얘린?먯꽌 ?쒓굅?덉뒿?덈떎." else "利먭꺼李얘린??異붽??덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, if (spec.id in favoriteModelIds) "즐겨찾기에서 제거했습니다." else "즐겨찾기에 추가했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onHideModel = { spec ->
                             persistHidden(hiddenModelIds + spec.id)
-                            Toast.makeText(context, "紐⑤뜽???④꼈?듬땲??", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델을 숨겼습니다.", Toast.LENGTH_SHORT).show()
                         },
                         onUnhideModel = { spec ->
                             persistHidden(hiddenModelIds - spec.id)
-                            Toast.makeText(context, "紐⑤뜽 ?④????댁젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델 숨김을 해제했습니다.", Toast.LENGTH_SHORT).show()
                         },
                         modelNotes = modelNotes,
                         onSaveModelNote = ::persistModelNote,
@@ -4909,12 +4911,12 @@ private fun ModelSelectDialog(
                     )
                     if (searchQuery.isNotBlank() && filteredCatalogModels.isEmpty()) {
                         Text(
-                            text = "寃??寃곌낵媛 ?놁뒿?덈떎.",
+                            text = "검색 결과가 없습니다.",
                             color = TextSecondary,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.SemiBold
                         )
-                        Text("?ㅻⅨ ?ㅼ썙?쒕줈 寃?됲빐 蹂댁꽭??", color = TextSecondary, fontSize = 12.sp)
+                        Text("다른 키워드로 검색해 보세요.", color = TextSecondary, fontSize = 12.sp)
                         Spacer(modifier = Modifier.height(4.dp))
                         Box(
                             modifier = Modifier
@@ -4925,7 +4927,7 @@ private fun ModelSelectDialog(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "?꾩껜 紐⑤뜽",
+                            text = "전체 모델",
                             color = TextSecondary,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold
@@ -4934,7 +4936,7 @@ private fun ModelSelectDialog(
                     }
 
                     Text(
-                        text = "湲곗〈 Gemma ?ㅼ슫濡쒕뱶",
+                        text = "기존 Gemma 다운로드",
                         color = TextSecondary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold
@@ -4971,11 +4973,11 @@ private fun ModelSelectDialog(
 
                                     Text(
                                         text = when {
-                                            model.customPath != null -> "而ㅼ뒪? 紐⑤뜽"
-                                            downloading -> "?ㅼ슫濡쒕뱶 以?${downloadProgressPercent ?: 0}%"
-                                            downloaded -> "?ㅼ슫濡쒕뱶??
-                                            model.downloadUrl != null -> "??빐???ㅼ슫濡쒕뱶"
-                                            else -> "?ㅼ슫濡쒕뱶 URL 誘몃벑濡?
+                                            model.customPath != null -> "커스텀 모델"
+                                            downloading -> "다운로드 중 ${downloadProgressPercent ?: 0}%"
+                                            downloaded -> "다운로드됨"
+                                            model.downloadUrl != null -> "탭해서 다운로드"
+                                            else -> "다운로드 URL 미등록"
                                         },
                                         color = TextSecondary,
                                         fontSize = 12.sp
@@ -4995,7 +4997,7 @@ private fun ModelSelectDialog(
 
                                 if (model.name == currentModel) {
                                     Text(
-                                        text = "?ъ슜 以?,
+                                        text = "사용 중",
                                         color = AccentBlue,
                                         fontSize = 12.sp
                                     )
@@ -5015,7 +5017,7 @@ private fun ModelSelectDialog(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
                         ) {
                             Text(
-                                text = "+ 而ㅼ뒪? 紐⑤뜽 ?낅줈??,
+                                text = "+ 커스텀 모델 업로드",
                                 color = TextPrimary,
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold
@@ -5024,7 +5026,7 @@ private fun ModelSelectDialog(
                             Spacer(modifier = Modifier.height(2.dp))
 
                             Text(
-                                text = "?ㅼ슫濡쒕뱶??.litertlm / .task / 紐⑤뜽 ?뚯씪 ?좏깮",
+                                text = "다운로드한 .litertlm / .task / 모델 파일 선택",
                                 color = TextSecondary,
                                 fontSize = 12.sp
                             )
@@ -5052,21 +5054,21 @@ private fun ModelSelectDialog(
     if (showClearRecentConfirm) {
         AlertDialog(
             onDismissRequest = { showClearRecentConfirm = false },
-            title = { Text("理쒓렐 ?ъ슜 湲곕줉??吏?곗떆寃좎뒿?덇퉴?") },
-            text = { Text("紐⑤뜽 ?뚯씪?대굹 ?ㅼ젙? ??젣?섏? ?딆뒿?덈떎.") },
+            title = { Text("최근 사용 기록을 지우시겠습니까?") },
+            text = { Text("모델 파일이나 설정은 삭제되지 않습니다.") },
             confirmButton = {
                 FusionTextButton(
                     onClick = {
                         showClearRecentConfirm = false
                         saveRecentModels(prefs, emptyList())
                         recentHistory = emptyList()
-                        Toast.makeText(context, "理쒓렐 ?ъ슜 湲곕줉??吏?좎뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "최근 사용 기록을 지웠습니다.", Toast.LENGTH_SHORT).show()
                     }
-                ) { Text("吏?곌린", maxLines = 1) }
+                ) { Text("지우기", maxLines = 1) }
             },
             dismissButton = {
                 FusionTextButton(onClick = { showClearRecentConfirm = false }) {
-                    Text("痍⑥냼", maxLines = 1)
+                    Text("취소", maxLines = 1)
                 }
             },
             containerColor = PanelBg,
@@ -5121,9 +5123,9 @@ private fun ModelLibrarySettingsDock(
                         .clickable { onOpenAdvancedSettings() }
                 ) {
                     Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-                        Text("怨좉툒 ?ㅼ젙", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("고급 설정", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "maxTokens ${generationSettings.maxTokens} 쨌 TopK ${generationSettings.topK}",
+                            "maxTokens ${generationSettings.maxTokens} · TopK ${generationSettings.topK}",
                             color = TextSecondary,
                             fontSize = 11.sp,
                             maxLines = 1,
@@ -5132,7 +5134,7 @@ private fun ModelLibrarySettingsDock(
                     }
                 }
                 FusionTextButton(onClick = onDismiss) {
-                    Text("?リ린", fontSize = 13.sp)
+                    Text("닫기", fontSize = 13.sp)
                 }
             }
         }
@@ -5168,7 +5170,7 @@ private fun CompactToggleChip(
                     .background(if (checked) AccentBlue else TextSecondary.copy(alpha = 0.5f))
             )
             Text(
-                text = "$title ${if (checked) "耳쒖쭚" else "爰쇱쭚"}",
+                text = "$title ${if (checked) "켜짐" else "꺼짐"}",
                 color = if (checked) AccentBlue else TextSecondary,
                 fontSize = 12.sp,
                 maxLines = 1,
@@ -5254,19 +5256,19 @@ private fun ModelZooSection(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(spec.displayName, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.height(2.dp))
-                    Text("${spec.sourceLabel ?: spec.family.name} 쨌 ${spec.parameterLabel} 쨌 ${modelFootprintLabel(spec)}", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("${spec.sourceLabel ?: spec.family.name} · ${spec.parameterLabel} · ${modelFootprintLabel(spec)}", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.height(2.dp))
                     val rec = recommendationMap[spec.id]
                     Text(
                         rec?.reason ?: (localSelectionMessage ?: compactCompatibilityLine(memoryInfo, tokenRecommendation)),
-                        color = if (rec?.tier == "二쇱쓽 ?꾩슂" || memoryInfo.warning != null) DangerRed else TextSecondary,
+                        color = if (rec?.tier == "주의 필요" || memoryInfo.warning != null) DangerRed else TextSecondary,
                         fontSize = 12.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     rec?.let {
                         Spacer(modifier = Modifier.height(2.dp))
-                        Text("沅뚯옣 ?ㅼ젙: maxTokens ${it.recommendedTokens} 쨌 ${it.hint}", color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("권장 설정: maxTokens ${it.recommendedTokens} · ${it.hint}", color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     benchmarkSummary?.let {
                         Spacer(modifier = Modifier.height(2.dp))
@@ -5274,19 +5276,19 @@ private fun ModelZooSection(
                     }
                 }
                 if (spec.id in favoriteModelIds) {
-                    Text("??, color = AccentBlue, fontSize = 12.sp, maxLines = 1)
+                    Text("★", color = AccentBlue, fontSize = 12.sp, maxLines = 1)
                     Spacer(modifier = Modifier.width(6.dp))
                 }
                 if (hasNote) {
-                    Text("硫붾え", color = AccentBlue, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("메모", color = AccentBlue, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.width(6.dp))
                 }
                 if (showHiddenBadge && spec.id in hiddenModelIds) {
-                    Text("?④?", color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("숨김", color = TextSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(modifier = Modifier.width(6.dp))
                 }
                 if (spec.displayName == currentModel) {
-                    Text("?ъ슜 以?, color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text("사용 중", color = AccentBlue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -5314,7 +5316,7 @@ private fun ModelZooSection(
                 when (decision.level) {
                     ModelSelectRiskLevel.DIRECT -> {
                         onSelect(spec)
-                        Toast.makeText(context, "紐⑤뜽???좏깮?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "모델을 선택했습니다.", Toast.LENGTH_SHORT).show()
                         selectedSpec = null
                     }
                     ModelSelectRiskLevel.CAUTION -> {
@@ -5322,7 +5324,7 @@ private fun ModelZooSection(
                     }
                     ModelSelectRiskLevel.BLOCKED -> {
                         if (decision.reason == "already selected") {
-                            Toast.makeText(context, "?대? ?좏깮??紐⑤뜽?낅땲??", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "이미 선택된 모델입니다.", Toast.LENGTH_SHORT).show()
                             selectedSpec = null
                         } else {
                             selectionDecision = decision
@@ -5358,10 +5360,10 @@ private fun ModelZooSection(
             onCopyLink = {
                 val link = spec.directDownloadUrl ?: spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl
                 if (link == null) {
-                    Toast.makeText(context, "?깅줉??留곹겕媛 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
                 } else {
                     clipboard.setText(AnnotatedString(link))
-                    Toast.makeText(context, "紐⑤뜽 留곹겕瑜?蹂듭궗?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "모델 링크를 복사했습니다.", Toast.LENGTH_SHORT).show()
                 }
             },
             modelNote = modelNotes[spec.id].orEmpty(),
@@ -5377,37 +5379,37 @@ private fun ModelZooSection(
             if (decision.level == ModelSelectRiskLevel.CAUTION) {
                 AlertDialog(
                     onDismissRequest = { selectionDecision = null },
-                    title = { Text("??紐⑤뜽???좏깮?섏떆寃좎뒿?덇퉴?") },
+                    title = { Text("이 모델을 선택하시겠습니까?") },
                     text = {
                         Text(
-                            "?꾩옱 湲곌린?먯꽌 硫붾え由?遺?댁씠 諛쒖깮?????덉뒿?덈떎. 湲??묐떟?대굹 硫?고깭?ㅽ궧 ?섍꼍?먯꽌???깆씠 醫낅즺?????덉뒿?덈떎.\n\n" +
-                                "紐⑤뜽: ${decision.spec.displayName}\n" +
-                                "?덉긽 ?ш린: ${modelFootprintLabel(decision.spec)}\n" +
-                                "湲곌린 RAM: ${decision.deviceRamClass}\n" +
-                                "沅뚯옣 maxTokens: ${decision.recommendedMaxTokens}\n" +
-                                "沅뚯옣 ?깃툒: ${decision.recommendationTier}"
+                            "현재 기기에서 메모리 부담이 발생할 수 있습니다. 긴 응답이나 멀티태스킹 환경에서는 앱이 종료될 수 있습니다.\n\n" +
+                                "모델: ${decision.spec.displayName}\n" +
+                                "예상 크기: ${modelFootprintLabel(decision.spec)}\n" +
+                                "기기 RAM: ${decision.deviceRamClass}\n" +
+                                "권장 maxTokens: ${decision.recommendedMaxTokens}\n" +
+                                "권장 등급: ${decision.recommendationTier}"
                         )
                     },
                     confirmButton = {
                         FusionTextButton(onClick = {
                             onSelect(decision.spec)
                             applyDeviceAwareRecommendedSettings(context, context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE).edit(), decision.spec)
-                            Toast.makeText(context, "紐⑤뜽怨?沅뚯옣 ?ㅼ젙???곸슜?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "모델과 권장 설정을 적용했습니다.", Toast.LENGTH_SHORT).show()
                             logModelSelectionDecision(decision.spec, memoryInfo, recommendationMap[decision.spec.id], decision.copy(level = ModelSelectRiskLevel.DIRECT, reason = "selected with recommended settings"))
                             selectionDecision = null
                             selectedSpec = null
-                        }) { Text("沅뚯옣 ?ㅼ젙怨??④퍡 ?좏깮") }
+                        }) { Text("권장 설정과 함께 선택") }
                     },
                     dismissButton = {
                         Row {
                             FusionTextButton(onClick = {
                                 onSelect(decision.spec)
-                                Toast.makeText(context, "紐⑤뜽???좏깮?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "모델을 선택했습니다.", Toast.LENGTH_SHORT).show()
                                 logModelSelectionDecision(decision.spec, memoryInfo, recommendationMap[decision.spec.id], decision.copy(level = ModelSelectRiskLevel.DIRECT, reason = "selected directly"))
                                 selectionDecision = null
                                 selectedSpec = null
-                            }) { Text("紐⑤뜽留??좏깮") }
-                            FusionTextButton(onClick = { selectionDecision = null }) { Text("痍⑥냼") }
+                            }) { Text("모델만 선택") }
+                            FusionTextButton(onClick = { selectionDecision = null }) { Text("취소") }
                         }
                     },
                     containerColor = PanelBg,
@@ -5417,9 +5419,9 @@ private fun ModelZooSection(
             } else {
                 AlertDialog(
                     onDismissRequest = { selectionDecision = null },
-                    title = { Text("濡쒖뺄 ?ㅽ뻾??沅뚯옣?섏? ?딆뒿?덈떎.") },
-                    text = { Text(decision.blockMessage ?: "??紐⑤뜽? ?꾩옱 湲곌린?먯꽌 濡쒖뺄 ?ㅽ뻾?섍린???덈Т ?????덉뒿?덈떎. ?쒕쾭 ?먮뒗 ?먭꺽 ?ㅽ뻾??沅뚯옣?⑸땲??") },
-                    confirmButton = { FusionTextButton(onClick = { selectionDecision = null }) { Text("?뺤씤") } },
+                    title = { Text("로컬 실행을 권장하지 않습니다.") },
+                    text = { Text(decision.blockMessage ?: "이 모델은 현재 기기에서 로컬 실행하기에 너무 클 수 있습니다. 서버 또는 원격 실행을 권장합니다.") },
+                    confirmButton = { FusionTextButton(onClick = { selectionDecision = null }) { Text("확인") } },
                     containerColor = PanelBg,
                     titleContentColor = TextPrimary,
                     textContentColor = TextPrimary
@@ -5478,10 +5480,10 @@ private fun ModelZooDetailDialog(
         }
         val warningCategory = when {
             memoryInfo.warning.isNullOrBlank() -> "none"
-            memoryInfo.warning.contains("?먭꺽", ignoreCase = false) -> "remote"
-            memoryInfo.warning.contains("沅뚯옣?섏? ?딆뒿?덈떎") -> "not_recommended"
-            memoryInfo.warning.contains("蹂??) -> "conversion"
-            memoryInfo.warning.contains("硫붾え由?, ignoreCase = false) -> "memory"
+            memoryInfo.warning.contains("원격", ignoreCase = false) -> "remote"
+            memoryInfo.warning.contains("권장하지 않습니다") -> "not_recommended"
+            memoryInfo.warning.contains("변환") -> "conversion"
+            memoryInfo.warning.contains("메모리", ignoreCase = false) -> "memory"
             else -> "general"
         }
         Log.d(
@@ -5514,7 +5516,7 @@ private fun ModelZooDetailDialog(
             ) {
                 Text(spec.displayName, color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    text = "${spec.sourceLabel ?: spec.family.name} ??${spec.family.name} ??${spec.runtimeFormat.name}",
+                    text = "${spec.sourceLabel ?: spec.family.name} • ${spec.family.name} • ${spec.runtimeFormat.name}",
                     color = TextSecondary,
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -5527,12 +5529,12 @@ private fun ModelZooDetailDialog(
                         .padding(bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    DetailMetaRow("?뚯씪/媛以묒튂 ?ш린", modelFootprintLabel(spec))
-                    DetailMetaRow("湲곌린 硫붾え由?, "??${formatGb(memoryInfo.totalRamGb)}GB")
-                    DetailMetaRow("?꾩옱 ?ъ슜 媛??, "??${formatGb(memoryInfo.availableRamGb)}GB")
-                    DetailMetaRow("沅뚯옣 硫붾え由?, spec.recommendedRamGb?.let { "${it}GB ?댁긽" } ?: "?뺣낫 ?놁쓬")
-                    DetailMetaRow("沅뚯옣 ?깃툒", memoryInfo.tier)
-                    DetailMetaRow("沅뚯옣 ?좏겙 ??, tokenRecommendation.label.removePrefix("沅뚯옣 ?좏겙 ??").trim())
+                    DetailMetaRow("파일/가중치 크기", modelFootprintLabel(spec))
+                    DetailMetaRow("기기 메모리", "약 ${formatGb(memoryInfo.totalRamGb)}GB")
+                    DetailMetaRow("현재 사용 가능", "약 ${formatGb(memoryInfo.availableRamGb)}GB")
+                    DetailMetaRow("권장 메모리", spec.recommendedRamGb?.let { "${it}GB 이상" } ?: "정보 없음")
+                    DetailMetaRow("권장 등급", memoryInfo.tier)
+                    DetailMetaRow("권장 토큰 수", tokenRecommendation.label.removePrefix("권장 토큰 수 ").trim())
                     if (spec.notes.isNotBlank()) Text(spec.notes, color = TextPrimary, fontSize = 13.sp)
                     Text(tokenRecommendation.explanation, color = TextSecondary, fontSize = 12.sp)
                     memoryInfo.warning?.let {
@@ -5542,7 +5544,7 @@ private fun ModelZooDetailDialog(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                "$it 湲??묐떟 ?먮뒗 硫?고깭?ㅽ겕 ?섍꼍?먯꽌 醫낅즺?????덉뒿?덈떎. 媛?ν븯硫????묒? 紐⑤뜽 ?먮뒗 ????? 理쒕? ?좏겙 ?섎? 沅뚯옣?⑸땲??",
+                                "$it 긴 응답 또는 멀티태스크 환경에서 종료될 수 있습니다. 가능하면 더 작은 모델 또는 더 낮은 최대 토큰 수를 권장합니다.",
                                 color = DangerRed,
                                 fontSize = 12.sp,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
@@ -5551,9 +5553,9 @@ private fun ModelZooDetailDialog(
                     }
                     spec.localExecutionWarning?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
                     localSelectionMessage?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
-                    Text("紐⑤뜽 硫붾え", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("모델 메모", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     if (modelNote.isBlank()) {
-                        Text("??λ맂 硫붾え媛 ?놁뒿?덈떎.", color = TextSecondary, fontSize = 12.sp)
+                        Text("저장된 메모가 없습니다.", color = TextSecondary, fontSize = 12.sp)
                     } else {
                         Text(modelNote, color = TextSecondary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
@@ -5562,48 +5564,48 @@ private fun ModelZooDetailDialog(
                             noteDraft = modelNote
                             noteEditorOpen = true
                         }) {
-                            Text(if (modelNote.isBlank()) "硫붾え ?묒꽦" else "硫붾え ?섏젙", fontSize = 12.sp, maxLines = 1)
+                            Text(if (modelNote.isBlank()) "메모 작성" else "메모 수정", fontSize = 12.sp, maxLines = 1)
                         }
                         if (modelNote.isNotBlank()) {
                             FusionTextButton(onClick = { noteDeleteConfirmOpen = true }) {
-                                Text("硫붾え ??젣", fontSize = 12.sp, maxLines = 1)
+                                Text("메모 삭제", fontSize = 12.sp, maxLines = 1)
                             }
                         }
                     }
-                    Text("踰ㅼ튂留덊겕 ?붿빟", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("벤치마크 요약", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     if (benchmarkSummary == null) {
-                        Text("?꾩쭅 痢≪젙??踰ㅼ튂留덊겕媛 ?놁뒿?덈떎.", color = TextSecondary, fontSize = 12.sp)
+                        Text("아직 측정된 벤치마크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
                     } else {
-                        DetailMetaRow("痢≪젙 ?잛닔", "${benchmarkSummary.count}??)
+                        DetailMetaRow("측정 횟수", "${benchmarkSummary.count}회")
                         DetailMetaRow(
-                            "以묒븰媛??붿퐫???띾룄",
-                            benchmarkSummary.medianDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "?뺣낫 ?놁쓬"
+                            "중앙값 디코딩 속도",
+                            benchmarkSummary.medianDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음"
                         )
                         DetailMetaRow(
-                            "理쒓퀬 ?붿퐫???띾룄",
-                            benchmarkSummary.bestDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "?뺣낫 ?놁쓬"
+                            "최고 디코딩 속도",
+                            benchmarkSummary.bestDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음"
                         )
-                        DetailMetaRow("理쒓렐 痢≪젙", formatTimestamp(benchmarkSummary.latestAt))
-                        DetailMetaRow("理쒓렐 媛?띻린", benchmarkSummary.recentAccelerator ?: "?뺣낫 ?놁쓬")
-                        DetailMetaRow("MTP 異붿쿇", benchmarkSummary.mtpRecommendation)
+                        DetailMetaRow("최근 측정", formatTimestamp(benchmarkSummary.latestAt))
+                        DetailMetaRow("최근 가속기", benchmarkSummary.recentAccelerator ?: "정보 없음")
+                        DetailMetaRow("MTP 추천", benchmarkSummary.mtpRecommendation)
                         if (benchmarkSummary.failedCount > 0) {
-                            DetailMetaRow("?ㅽ뙣 ?잛닔", "${benchmarkSummary.failedCount}??)
+                            DetailMetaRow("실패 횟수", "${benchmarkSummary.failedCount}회")
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         FusionTextButton(onClick = {
                             onOpenBenchmark(false)
                         }) {
-                            Text("踰ㅼ튂留덊겕 ?ㅽ뻾", fontSize = 12.sp, maxLines = 1)
+                            Text("벤치마크 실행", fontSize = 12.sp, maxLines = 1)
                         }
                         FusionTextButton(onClick = {
                             onOpenBenchmark(true)
                         }) {
-                            Text("湲곕줉 蹂닿린", fontSize = 12.sp, maxLines = 1)
+                            Text("기록 보기", fontSize = 12.sp, maxLines = 1)
                         }
                     }
                     Text(fusionNpuNoteTitle(socInfo.detectedSocVendor), color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    DetailMetaRow("媛먯???AP", socInfo.vendorLabel)
+                    DetailMetaRow("감지된 AP", socInfo.vendorLabel)
                     DetailMetaRow("SoC", socInfo.compactSocLabel)
                     Text(buildRuntimeNote(spec), color = TextSecondary, fontSize = 12.sp)
                     Text(fusionNpuNoteText(socInfo.detectedSocVendor), color = TextSecondary, fontSize = 12.sp)
@@ -5613,11 +5615,11 @@ private fun ModelZooDetailDialog(
                         fontSize = 12.sp
                     )
                     if (spec.officialUrl == null && spec.downloadUrl == null) {
-                        Text("?깅줉??留곹겕媛 ?놁뒿?덈떎.", color = TextSecondary, fontSize = 12.sp)
+                        Text("등록된 링크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
                     }
                     if (!available) {
                         Text(
-                            "??紐⑤뜽? ?꾩옱 濡쒖뺄 紐⑤뜽濡?諛붾줈 ?좏깮?????놁뒿?덈떎.",
+                            "이 모델은 현재 로컬 모델로 바로 선택할 수 없습니다.",
                             color = TextSecondary,
                             fontSize = 12.sp
                         )
@@ -5642,16 +5644,16 @@ private fun ModelZooDetailDialog(
                         disabledTrailingIconColor = TextSecondary
                     )
                     FusionTextButton(enabled = available, onClick = onSelect) {
-                        Text("?좏깮", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("선택", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(modifier = Modifier.width(4.dp))
                     FusionTextButton(onClick = onApplyRecommendedSettings) {
-                        Text("沅뚯옣 ?ㅼ젙", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("권장 설정", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Spacer(modifier = Modifier.width(4.dp))
                     Box {
                         FusionTextButton(onClick = { overflowExpanded = true }) {
-                            Text("??, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Clip)
+                            Text("⋯", fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Clip)
                         }
                         DropdownMenu(
                             expanded = overflowExpanded,
@@ -5659,7 +5661,7 @@ private fun ModelZooDetailDialog(
                             containerColor = PanelBg
                         ) {
                             DropdownMenuItem(
-                                text = { Text("紐⑤뜽 ?ш텒", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("모델 여권", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
                                 onClick = {
                                     overflowExpanded = false
@@ -5669,7 +5671,7 @@ private fun ModelZooDetailDialog(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (isFavorite) "利먭꺼李얘린?먯꽌 ?쒓굅" else "利먭꺼李얘린??異붽?",
+                                        if (isFavorite) "즐겨찾기에서 제거" else "즐겨찾기에 추가",
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -5683,7 +5685,7 @@ private fun ModelZooDetailDialog(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (isHidden) "?④? ?댁젣" else "紐⑤뜽 ?④린湲?,
+                                        if (isHidden) "숨김 해제" else "모델 숨기기",
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -5699,7 +5701,7 @@ private fun ModelZooDetailDialog(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("?뚯씪 媛?몄삤湲?, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("파일 가져오기", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
                                 onClick = {
                                     overflowExpanded = false
@@ -5707,7 +5709,7 @@ private fun ModelZooDetailDialog(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("?ㅼ슫濡쒕뱶 ?섏씠吏 ?닿린", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("다운로드 페이지 열기", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 enabled = (spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl) != null,
                                 colors = menuItemColors,
                                 onClick = {
@@ -5716,31 +5718,31 @@ private fun ModelZooDetailDialog(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("?몃? ?뺣낫", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("세부 정보", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
                                 onClick = {
                                     overflowExpanded = false
                                     if (spec.officialUrl != null) {
                                         onOpenOfficial()
                                     } else {
-                                        Toast.makeText(context, "?깅줉??留곹겕媛 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("留곹겕 蹂듭궗", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("링크 복사", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
                                 onClick = {
                                     overflowExpanded = false
                                     if (spec.downloadUrl != null || spec.officialUrl != null || spec.modelPageUrl != null) {
                                         onCopyLink()
                                     } else {
-                                        Toast.makeText(context, "?깅줉??留곹겕媛 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("紐⑤뜽 ?명솚??寃??, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("모델 호환성 검사", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
                                 onClick = {
                                     overflowExpanded = false
@@ -5748,19 +5750,19 @@ private fun ModelZooDetailDialog(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("紐⑤뜽 蹂???덈궡", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("모델 변환 안내", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
                                 onClick = {
                                     overflowExpanded = false
                                     if (spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION || spec.availability == ModelAvailability.NEEDS_CONVERSION) {
                                         showConversionGuide = true
                                     } else {
-                                        Toast.makeText(context, "??紐⑤뜽? ?꾩옱 蹂???덈궡 ??곸씠 ?꾨떃?덈떎.", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "이 모델은 현재 변환 안내 대상이 아닙니다.", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("?リ린", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                text = { Text("닫기", maxLines = 1, overflow = TextOverflow.Ellipsis) },
                                 colors = menuItemColors,
                                 onClick = {
                                     overflowExpanded = false
@@ -5777,22 +5779,22 @@ private fun ModelZooDetailDialog(
     compatibilityReport?.let { report ->
         AlertDialog(
             onDismissRequest = { compatibilityReport = null },
-            title = { Text("紐⑤뜽 ?명솚??寃??) },
+            title = { Text("모델 호환성 검사") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(report.summary)
-                    DetailMetaRow("?곹깭", report.localExecutionStatus)
-                    DetailMetaRow("?뺤떇", report.formatLabel)
-                    DetailMetaRow("怨꾩뿴", report.familyLabel)
-                    DetailMetaRow("沅뚯옣 ?좏겙", report.recommendedMaxTokens.takeIf { it > 0 }?.toString() ?: "?대떦 ?놁쓬")
-                    DetailMetaRow("媛?띻린", report.recommendedAccelerator.name)
+                    DetailMetaRow("상태", report.localExecutionStatus)
+                    DetailMetaRow("형식", report.formatLabel)
+                    DetailMetaRow("계열", report.familyLabel)
+                    DetailMetaRow("권장 토큰", report.recommendedMaxTokens.takeIf { it > 0 }?.toString() ?: "해당 없음")
+                    DetailMetaRow("가속기", report.recommendedAccelerator.name)
                     DetailMetaRow("MTP", report.mtpRecommendation)
                     DetailMetaRow("NPU", report.npuCandidateStatus)
                     report.memoryWarning?.let { Text(it, color = DangerRed, fontSize = 12.sp) }
                 }
             },
             confirmButton = {
-                FusionTextButton(onClick = { compatibilityReport = null }) { Text("?뺤씤", maxLines = 1) }
+                FusionTextButton(onClick = { compatibilityReport = null }) { Text("확인", maxLines = 1) }
             },
             containerColor = PanelBg,
             titleContentColor = TextPrimary,
@@ -5803,18 +5805,18 @@ private fun ModelZooDetailDialog(
     if (showConversionGuide) {
         AlertDialog(
             onDismissRequest = { showConversionGuide = false },
-            title = { Text("紐⑤뜽 蹂???덈궡") },
+            title = { Text("모델 변환 안내") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    DetailMetaRow("?꾩옱 ?뺤떇", spec.runtimeFormat.name)
-                    DetailMetaRow("沅뚯옣 ?뺤떇", ".litertlm ?먮뒗 .task")
-                    DetailMetaRow("?곹깭", if (spec.supportsNpuCandidate) "NPU ?꾨낫" else "蹂???꾩슂")
-                    Text("?꾩옱 ?깆뿉???먮룞 蹂?섏? 吏?먰븯吏 ?딆뒿?덈떎.", color = TextSecondary, fontSize = 12.sp)
-                    Text("蹂?????뚯씪 媛?몄삤湲곕줈 紐⑤뜽 ?뚯씪???좏깮??二쇱꽭??", color = TextSecondary, fontSize = 12.sp)
+                    DetailMetaRow("현재 형식", spec.runtimeFormat.name)
+                    DetailMetaRow("권장 형식", ".litertlm 또는 .task")
+                    DetailMetaRow("상태", if (spec.supportsNpuCandidate) "NPU 후보" else "변환 필요")
+                    Text("현재 앱에서 자동 변환은 지원하지 않습니다.", color = TextSecondary, fontSize = 12.sp)
+                    Text("변환 후 파일 가져오기로 모델 파일을 선택해 주세요.", color = TextSecondary, fontSize = 12.sp)
                 }
             },
             confirmButton = {
-                FusionTextButton(onClick = { showConversionGuide = false }) { Text("?뺤씤", maxLines = 1) }
+                FusionTextButton(onClick = { showConversionGuide = false }) { Text("확인", maxLines = 1) }
             },
             containerColor = PanelBg,
             titleContentColor = TextPrimary,
@@ -5825,14 +5827,14 @@ private fun ModelZooDetailDialog(
     if (noteEditorOpen) {
         AlertDialog(
             onDismissRequest = { noteEditorOpen = false },
-            title = { Text("紐⑤뜽 硫붾え") },
+            title = { Text("모델 메모") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("??紐⑤뜽?????媛쒖씤 硫붾え瑜???ν빀?덈떎.", color = TextSecondary, fontSize = 12.sp)
+                    Text("이 모델에 대한 개인 메모를 저장합니다.", color = TextSecondary, fontSize = 12.sp)
                     OutlinedTextField(
                         value = noteDraft,
                         onValueChange = { noteDraft = it },
-                        placeholder = { Text("?? S24?먯꽌??MTP ?붿씠 ??鍮좊쫭?덈떎.", color = TextSecondary) },
+                        placeholder = { Text("예: S24에서는 MTP 끔이 더 빠릅니다.", color = TextSecondary) },
                         textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = AccentBlue,
@@ -5849,11 +5851,11 @@ private fun ModelZooDetailDialog(
                 FusionTextButton(onClick = {
                     onSaveModelNote(noteDraft)
                     noteEditorOpen = false
-                    Toast.makeText(context, "紐⑤뜽 硫붾え瑜???ν뻽?듬땲??", Toast.LENGTH_SHORT).show()
-                }) { Text("???, maxLines = 1) }
+                    Toast.makeText(context, "모델 메모를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                }) { Text("저장", maxLines = 1) }
             },
             dismissButton = {
-                FusionTextButton(onClick = { noteEditorOpen = false }) { Text("痍⑥냼", maxLines = 1) }
+                FusionTextButton(onClick = { noteEditorOpen = false }) { Text("취소", maxLines = 1) }
             },
             containerColor = PanelBg,
             titleContentColor = TextPrimary,
@@ -5864,17 +5866,17 @@ private fun ModelZooDetailDialog(
     if (noteDeleteConfirmOpen) {
         AlertDialog(
             onDismissRequest = { noteDeleteConfirmOpen = false },
-            title = { Text("紐⑤뜽 硫붾え瑜???젣?섏떆寃좎뒿?덇퉴?") },
-            text = { Text("??紐⑤뜽????λ맂 硫붾え留???젣?⑸땲??") },
+            title = { Text("모델 메모를 삭제하시겠습니까?") },
+            text = { Text("이 모델에 저장된 메모만 삭제됩니다.") },
             confirmButton = {
                 FusionTextButton(onClick = {
                     onSaveModelNote(null)
                     noteDeleteConfirmOpen = false
-                    Toast.makeText(context, "紐⑤뜽 硫붾え瑜???젣?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
-                }) { Text("??젣", maxLines = 1) }
+                    Toast.makeText(context, "모델 메모를 삭제했습니다.", Toast.LENGTH_SHORT).show()
+                }) { Text("삭제", maxLines = 1) }
             },
             dismissButton = {
-                FusionTextButton(onClick = { noteDeleteConfirmOpen = false }) { Text("痍⑥냼", maxLines = 1) }
+                FusionTextButton(onClick = { noteDeleteConfirmOpen = false }) { Text("취소", maxLines = 1) }
             },
             containerColor = PanelBg,
             titleContentColor = TextPrimary,
@@ -5927,17 +5929,17 @@ private fun evaluateModelSelectionDecision(
     recommendation: ModelRecommendationEvaluation?
 ): ModelSelectionDecision {
     if (spec.displayName == currentModel) {
-        return ModelSelectionDecision(spec, ModelSelectRiskLevel.BLOCKED, "already selected", recommendation?.tier ?: memoryInfo.tier, 0, ramClassLabel(memoryInfo.totalRamGb), "?대? ?좏깮??紐⑤뜽?낅땲??")
+        return ModelSelectionDecision(spec, ModelSelectRiskLevel.BLOCKED, "already selected", recommendation?.tier ?: memoryInfo.tier, 0, ramClassLabel(memoryInfo.totalRamGb), "이미 선택된 모델입니다.")
     }
     val tier = recommendation?.tier ?: memoryInfo.tier
     val available = isSelectableLocally(spec)
     if (!available) {
         val msg = when (spec.availability) {
-            ModelAvailability.NEEDS_DOWNLOAD -> "紐⑤뜽 ?뚯씪??癒쇱? 媛?몄????⑸땲??"
-            ModelAvailability.NEEDS_CONVERSION -> "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎."
-            ModelAvailability.REMOTE_ONLY -> "??紐⑤뜽? ?먭꺽 ?ㅽ뻾???꾩슂?⑸땲??"
-            ModelAvailability.UNSUPPORTED_ON_DEVICE -> "濡쒖뺄 ?ㅽ뻾??沅뚯옣?섏? ?딆뒿?덈떎.\n\n??紐⑤뜽? ?꾩옱 湲곌린?먯꽌 濡쒖뺄 ?ㅽ뻾?섍린???덈Т ?????덉뒿?덈떎. ?쒕쾭 ?먮뒗 ?먭꺽 ?ㅽ뻾??沅뚯옣?⑸땲??"
-            else -> "濡쒖뺄 ?ㅽ뻾??沅뚯옣?섏? ?딆뒿?덈떎.\n\n??紐⑤뜽? ?꾩옱 湲곌린?먯꽌 濡쒖뺄 ?ㅽ뻾?섍린???덈Т ?????덉뒿?덈떎. ?쒕쾭 ?먮뒗 ?먭꺽 ?ㅽ뻾??沅뚯옣?⑸땲??"
+            ModelAvailability.NEEDS_DOWNLOAD -> "모델 파일을 먼저 가져와야 합니다."
+            ModelAvailability.NEEDS_CONVERSION -> "이 모델은 변환 후 사용할 수 있습니다."
+            ModelAvailability.REMOTE_ONLY -> "이 모델은 원격 실행이 필요합니다."
+            ModelAvailability.UNSUPPORTED_ON_DEVICE -> "로컬 실행을 권장하지 않습니다.\n\n이 모델은 현재 기기에서 로컬 실행하기에 너무 클 수 있습니다. 서버 또는 원격 실행을 권장합니다."
+            else -> "로컬 실행을 권장하지 않습니다.\n\n이 모델은 현재 기기에서 로컬 실행하기에 너무 클 수 있습니다. 서버 또는 원격 실행을 권장합니다."
         }
         return ModelSelectionDecision(spec, ModelSelectRiskLevel.BLOCKED, "not locally available", tier, recommendation?.recommendedTokens ?: 0, ramClassLabel(memoryInfo.totalRamGb), msg)
     }
@@ -5965,7 +5967,7 @@ private fun evaluateModelSelectionDecision(
     val sizeGb = spec.modelSizeEstimateGb ?: 0f
     val eightGbClass = memoryInfo.totalRamGb in 7.0f..8.5f
     val lowAvailRam = memoryInfo.availableRamGb < 1.25f
-    val highRisk = tier == "二쇱쓽 ?꾩슂" || tier == "沅뚯옣?섏? ?딆쓬" ||
+    val highRisk = tier == "주의 필요" || tier == "권장하지 않음" ||
         spec.memoryClass == ModelMemoryClass.HIGH ||
         spec.recommendedDeviceClass in listOf(ModelRecommendedDeviceClass.RAM_12GB_RECOMMENDED, ModelRecommendedDeviceClass.RAM_16GB_RECOMMENDED, ModelRecommendedDeviceClass.SERVER_ONLY) && eightGbClass ||
         (eightGbClass && sizeGb >= 4.0f) || lowAvailRam || !memoryInfo.warning.isNullOrBlank()
@@ -5984,10 +5986,10 @@ private fun isSelectableLocally(spec: FusionModelSpec): Boolean {
 }
 
 private fun ramClassLabel(totalRamGb: Float): String = when {
-    totalRamGb in 7.0f..8.5f -> "8GB湲?
-    totalRamGb <= 12.5f -> "12GB湲?
-    totalRamGb <= 16.5f -> "16GB湲?
-    else -> "怨좊찓紐⑤━"
+    totalRamGb in 7.0f..8.5f -> "8GB급"
+    totalRamGb <= 12.5f -> "12GB급"
+    totalRamGb <= 16.5f -> "16GB급"
+    else -> "고메모리"
 }
 
 private fun logModelSelectionDecision(
@@ -6029,12 +6031,12 @@ private fun ModelPassportDialog(
     val source = spec.sourceLabel
         ?: spec.huggingFaceModelId
         ?: spec.officialUrl
-        ?: "異쒖쿂 ?뺣낫 ?놁쓬"
+        ?: "출처 정보 없음"
     val tier = recommendation?.tier ?: memoryInfo.tier
     val reason = recommendation?.reason
         ?: memoryInfo.warning
         ?: spec.localExecutionWarning
-        ?: "?꾩옱 湲곌린 ?뺣낫瑜?湲곗??쇰줈 紐⑤뜽 ?곹빀?꾨? 怨꾩궛?덉뒿?덈떎."
+        ?: "현재 기기 정보를 기준으로 모델 적합도를 계산했습니다."
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -6051,9 +6053,9 @@ private fun ModelPassportDialog(
                     .padding(horizontal = 18.dp, vertical = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("紐⑤뜽 ?ш텒", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("모델 여권", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "紐⑤뜽???곹깭, 沅뚯옣 ?ㅼ젙, 踰ㅼ튂留덊겕, 硫붾え瑜??쒕늿???뺤씤?⑸땲??",
+                    "모델의 상태, 권장 설정, 벤치마크, 메모를 한눈에 확인합니다.",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
@@ -6065,7 +6067,7 @@ private fun ModelPassportDialog(
                         .padding(top = 4.dp, bottom = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    PassportSection("?꾨줈??) {
+                    PassportSection("프로필") {
                         Text(
                             spec.displayName,
                             color = TextPrimary,
@@ -6075,38 +6077,38 @@ private fun ModelPassportDialog(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            "${spec.family.name} 쨌 ${spec.parameterLabel} 쨌 ${passportRuntimeLabel(spec.runtimeFormat)}",
+                            "${spec.family.name} · ${spec.parameterLabel} · ${passportRuntimeLabel(spec.runtimeFormat)}",
                             color = AccentBlue,
                             fontSize = 12.sp,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
-                        DetailMetaRow("?⑤?由?, spec.family.name)
-                        DetailMetaRow("?ш린", modelFootprintLabel(spec))
-                        DetailMetaRow("?ㅽ뻾 ?뺤떇", passportRuntimeLabel(spec.runtimeFormat))
-                        DetailMetaRow("?곹깭", passportAvailabilityLabel(spec.availability, available))
-                        DetailMetaRow("沅뚯옣 湲곌린", passportDeviceClassLabel(spec.recommendedDeviceClass))
-                        DetailMetaRow("紐⑤뜽 異쒖쿂", source)
+                        DetailMetaRow("패밀리", spec.family.name)
+                        DetailMetaRow("크기", modelFootprintLabel(spec))
+                        DetailMetaRow("실행 형식", passportRuntimeLabel(spec.runtimeFormat))
+                        DetailMetaRow("상태", passportAvailabilityLabel(spec.availability, available))
+                        DetailMetaRow("권장 기기", passportDeviceClassLabel(spec.recommendedDeviceClass))
+                        DetailMetaRow("모델 출처", source)
                     }
 
-                    PassportSection("湲곌린 ?곹빀??) {
-                        DetailMetaRow("?곹빀??, tier)
+                    PassportSection("기기 적합도") {
+                        DetailMetaRow("적합도", tier)
                         Text(reason, color = TextSecondary, fontSize = 12.sp)
-                        DetailMetaRow("湲곌린 RAM", ramClassLabel(memoryInfo.totalRamGb))
-                        DetailMetaRow("?ъ슜 媛??RAM", "??${formatGb(memoryInfo.availableRamGb)}GB")
-                        DetailMetaRow("沅뚯옣 maxTokens", tokenRecommendation.value.takeIf { it > 0 }?.toString() ?: "?먭꺽 ?ㅽ뻾 沅뚯옣")
-                        DetailMetaRow("MTP", if (spec.recommendedMtpEnabled) "耳?沅뚯옣" else "??沅뚯옣")
-                        DetailMetaRow("Reasoning", if (spec.recommendedReasoningEnabled) "耳?沅뚯옣" else "??沅뚯옣")
+                        DetailMetaRow("기기 RAM", ramClassLabel(memoryInfo.totalRamGb))
+                        DetailMetaRow("사용 가능 RAM", "약 ${formatGb(memoryInfo.availableRamGb)}GB")
+                        DetailMetaRow("권장 maxTokens", tokenRecommendation.value.takeIf { it > 0 }?.toString() ?: "원격 실행 권장")
+                        DetailMetaRow("MTP", if (spec.recommendedMtpEnabled) "켬 권장" else "끔 권장")
+                        DetailMetaRow("Reasoning", if (spec.recommendedReasoningEnabled) "켬 권장" else "끔 권장")
                     }
 
-                    PassportSection("NPU 諛?媛???덈궡") {
-                        DetailMetaRow("媛먯???AP", socInfo.vendorLabel)
+                    PassportSection("NPU 및 가속 안내") {
+                        DetailMetaRow("감지된 AP", socInfo.vendorLabel)
                         DetailMetaRow("SoC", socInfo.compactSocLabel)
                         Text(
                             if (spec.supportsNpuCandidate) {
                                 fusionNpuCandidateLabel(socInfo.detectedSocVendor, true)
                             } else {
-                                "?꾩옱 紐⑤뜽? ?꾩슜 NPU ?ㅽ뻾 ?꾨낫濡??뺤씤?섏? ?딆븯?듬땲??"
+                                "현재 모델은 전용 NPU 실행 후보로 확인되지 않았습니다."
                             },
                             color = TextSecondary,
                             fontSize = 12.sp
@@ -6114,45 +6116,45 @@ private fun ModelPassportDialog(
                         Text(fusionNpuNoteText(socInfo.detectedSocVendor), color = TextSecondary, fontSize = 12.sp)
                     }
 
-                    PassportSection("踰ㅼ튂留덊겕 ?붿빟") {
+                    PassportSection("벤치마크 요약") {
                         if (benchmarkSummary == null) {
-                            Text("?꾩쭅 痢≪젙??踰ㅼ튂留덊겕媛 ?놁뒿?덈떎.", color = TextSecondary, fontSize = 12.sp)
+                            Text("아직 측정된 벤치마크가 없습니다.", color = TextSecondary, fontSize = 12.sp)
                         } else {
-                            DetailMetaRow("痢≪젙 ?잛닔", "${benchmarkSummary.count}??)
-                            DetailMetaRow("以묒븰媛?, benchmarkSummary.medianDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "?뺣낫 ?놁쓬")
-                            DetailMetaRow("理쒓퀬 ?띾룄", benchmarkSummary.bestDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "?뺣낫 ?놁쓬")
-                            DetailMetaRow("理쒓렐 痢≪젙", formatTimestamp(benchmarkSummary.latestAt))
-                            DetailMetaRow("理쒓렐 媛?띻린", benchmarkSummary.recentAccelerator ?: "?뺣낫 ?놁쓬")
-                            DetailMetaRow("MTP 異붿쿇", benchmarkSummary.mtpRecommendation)
+                            DetailMetaRow("측정 횟수", "${benchmarkSummary.count}회")
+                            DetailMetaRow("중앙값", benchmarkSummary.medianDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음")
+                            DetailMetaRow("최고 속도", benchmarkSummary.bestDecodeTps?.let { "${formatSpeed(it)} tok/s" } ?: "정보 없음")
+                            DetailMetaRow("최근 측정", formatTimestamp(benchmarkSummary.latestAt))
+                            DetailMetaRow("최근 가속기", benchmarkSummary.recentAccelerator ?: "정보 없음")
+                            DetailMetaRow("MTP 추천", benchmarkSummary.mtpRecommendation)
                         }
                     }
 
-                    PassportSection("?ъ슜??硫붾え") {
+                    PassportSection("사용자 메모") {
                         Text(
-                            modelNote.ifBlank { "??λ맂 硫붾え媛 ?놁뒿?덈떎." },
+                            modelNote.ifBlank { "저장된 메모가 없습니다." },
                             color = TextSecondary,
                             fontSize = 12.sp,
                             maxLines = 4,
                             overflow = TextOverflow.Ellipsis
                         )
                         FusionTextButton(onClick = onEditNote) {
-                            Text(if (modelNote.isBlank()) "硫붾え ?묒꽦" else "硫붾え ?섏젙", fontSize = 12.sp)
+                            Text(if (modelNote.isBlank()) "메모 작성" else "메모 수정", fontSize = 12.sp)
                         }
                     }
 
-                    PassportSection("?뚯씪 諛??곌껐 ?곹깭") {
+                    PassportSection("파일 및 연결 상태") {
                         if (isImported) {
                             DetailMetaRow(
-                                "????꾩튂",
-                                if (spec.externallyReferenced) "?몃? ?뚯씪 ?곌껐?? else "Fusion ?대? ??μ냼"
+                                "저장 위치",
+                                if (spec.externallyReferenced) "외부 파일 연결됨" else "Fusion 내부 저장소"
                             )
-                            DetailMetaRow("?뚯씪 ?대쫫", spec.originalFileName ?: spec.fileName ?: "?뺣낫 ?놁쓬")
-                            DetailMetaRow("?뚯씪 ?ш린", spec.fileSizeBytes?.let { formatBytes(it) } ?: "?뺣낫 ?놁쓬")
-                            DetailMetaRow("?ㅽ뻾 ?곹깭", passportExecutionStatus(spec, available))
+                            DetailMetaRow("파일 이름", spec.originalFileName ?: spec.fileName ?: "정보 없음")
+                            DetailMetaRow("파일 크기", spec.fileSizeBytes?.let { formatBytes(it) } ?: "정보 없음")
+                            DetailMetaRow("실행 상태", passportExecutionStatus(spec, available))
                         } else {
                             Text(
-                                if (available) "Fusion?먯꽌 ?ъ슜?????덈뒗 紐⑤뜽 ?뚯씪?낅땲??"
-                                else "紐⑤뜽 ?뚯씪???꾩쭅 ?곌껐?섏? ?딆븯?듬땲??",
+                                if (available) "Fusion에서 사용할 수 있는 모델 파일입니다."
+                                else "모델 파일이 아직 연결되지 않았습니다.",
                                 color = TextSecondary,
                                 fontSize = 12.sp
                             )
@@ -6166,9 +6168,9 @@ private fun ModelPassportDialog(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    FusionTextButton(enabled = available, onClick = onSelect) { Text("?좏깮", fontSize = 12.sp) }
-                    FusionTextButton(onClick = onApplyRecommendedSettings) { Text("沅뚯옣 ?ㅼ젙", fontSize = 12.sp) }
-                    FusionTextButton(onClick = onOpenBenchmark) { Text("踰ㅼ튂留덊겕", fontSize = 12.sp) }
+                    FusionTextButton(enabled = available, onClick = onSelect) { Text("선택", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onApplyRecommendedSettings) { Text("권장 설정", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onOpenBenchmark) { Text("벤치마크", fontSize = 12.sp) }
                 }
                 Row(
                     modifier = Modifier
@@ -6176,10 +6178,10 @@ private fun ModelPassportDialog(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    FusionTextButton(onClick = onOpenModelPage) { Text("紐⑤뜽 ?섏씠吏", fontSize = 12.sp) }
-                    FusionTextButton(onClick = onCopyLink) { Text("留곹겕 蹂듭궗", fontSize = 12.sp) }
-                    FusionTextButton(onClick = onUploadCustomModel) { Text("?뚯씪 媛?몄삤湲?, fontSize = 12.sp) }
-                    FusionTextButton(onClick = onDismiss) { Text("?リ린", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onOpenModelPage) { Text("모델 페이지", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onCopyLink) { Text("링크 복사", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onUploadCustomModel) { Text("파일 가져오기", fontSize = 12.sp) }
+                    FusionTextButton(onClick = onDismiss) { Text("닫기", fontSize = 12.sp) }
                 }
             }
         }
@@ -6211,35 +6213,35 @@ private fun passportRuntimeLabel(format: ModelRuntimeFormat): String = when (for
     ModelRuntimeFormat.MEDIAPIPE_LLM -> "MediaPipe LLM"
     ModelRuntimeFormat.GGUF -> "GGUF"
     ModelRuntimeFormat.ONNX -> "ONNX"
-    ModelRuntimeFormat.NEEDS_CONVERSION -> "蹂???꾩슂"
-    ModelRuntimeFormat.EXYNOS_AI_STUDIO -> "Exynos AI Studio ?꾨낫"
-    ModelRuntimeFormat.REMOTE_API -> "?먭꺽 API"
-    ModelRuntimeFormat.UNKNOWN -> "吏???뺤씤 ?꾩슂"
+    ModelRuntimeFormat.NEEDS_CONVERSION -> "변환 필요"
+    ModelRuntimeFormat.EXYNOS_AI_STUDIO -> "Exynos AI Studio 후보"
+    ModelRuntimeFormat.REMOTE_API -> "원격 API"
+    ModelRuntimeFormat.UNKNOWN -> "지원 확인 필요"
 }
 
 private fun passportAvailabilityLabel(availability: ModelAvailability, available: Boolean): String = when {
-    available -> "?ъ슜 媛??
-    availability == ModelAvailability.NEEDS_CONVERSION -> "蹂???꾩슂"
-    availability == ModelAvailability.NEEDS_DOWNLOAD -> "?뚯씪 ?꾩슂"
-    availability == ModelAvailability.REMOTE_ONLY -> "?먭꺽 ?꾩슜"
-    availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "吏???뺤씤 ?꾩슂"
-    else -> "?ㅽ뻾 以鍮??꾩슂"
+    available -> "사용 가능"
+    availability == ModelAvailability.NEEDS_CONVERSION -> "변환 필요"
+    availability == ModelAvailability.NEEDS_DOWNLOAD -> "파일 필요"
+    availability == ModelAvailability.REMOTE_ONLY -> "원격 전용"
+    availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "지원 확인 필요"
+    else -> "실행 준비 필요"
 }
 
 private fun passportDeviceClassLabel(deviceClass: ModelRecommendedDeviceClass): String = when (deviceClass) {
-    ModelRecommendedDeviceClass.RAM_8GB_SAFE -> "8GB 湲곌린"
-    ModelRecommendedDeviceClass.RAM_12GB_RECOMMENDED -> "12GB ?댁긽 湲곌린"
-    ModelRecommendedDeviceClass.RAM_16GB_RECOMMENDED -> "16GB ?댁긽 湲곌린"
-    ModelRecommendedDeviceClass.SERVER_ONLY -> "?쒕쾭 ?먮뒗 ?먭꺽 ?ㅽ뻾"
+    ModelRecommendedDeviceClass.RAM_8GB_SAFE -> "8GB 기기"
+    ModelRecommendedDeviceClass.RAM_12GB_RECOMMENDED -> "12GB 이상 기기"
+    ModelRecommendedDeviceClass.RAM_16GB_RECOMMENDED -> "16GB 이상 기기"
+    ModelRecommendedDeviceClass.SERVER_ONLY -> "서버 또는 원격 실행"
 }
 
 private fun passportExecutionStatus(spec: FusionModelSpec, available: Boolean): String = when {
-    available -> "?ㅽ뻾 ?꾨낫"
+    available -> "실행 후보"
     spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION ||
-        spec.availability == ModelAvailability.NEEDS_CONVERSION -> "蹂???꾩슂"
+        spec.availability == ModelAvailability.NEEDS_CONVERSION -> "변환 필요"
     spec.runtimeFormat == ModelRuntimeFormat.UNKNOWN ||
-        spec.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "吏???뺤씤 ?꾩슂"
-    else -> "?ㅽ뻾 以鍮??꾩슂"
+        spec.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "지원 확인 필요"
+    else -> "실행 준비 필요"
 }
 
 @Composable
@@ -6274,10 +6276,10 @@ private fun DirectDownloadConfirmDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("紐⑤뜽 ?뚯씪???ㅼ슫濡쒕뱶?섏떆寃좎뒿?덇퉴?") },
-        text = { Text("紐⑤뜽 ?뚯씪? ?⑸웾???????덉뒿?덈떎. Wi-Fi ?곌껐怨?異⑸텇????κ났媛꾩쓣 ?뺤씤??二쇱꽭??") },
-        confirmButton = { FusionTextButton(onClick = onConfirm) { Text("?ㅼ슫濡쒕뱶") } },
-        dismissButton = { FusionTextButton(onClick = onDismiss) { Text("痍⑥냼") } },
+        title = { Text("모델 파일을 다운로드하시겠습니까?") },
+        text = { Text("모델 파일은 용량이 클 수 있습니다. Wi-Fi 연결과 충분한 저장공간을 확인해 주세요.") },
+        confirmButton = { FusionTextButton(onClick = onConfirm) { Text("다운로드") } },
+        dismissButton = { FusionTextButton(onClick = onDismiss) { Text("취소") } },
         containerColor = PanelBg,
         titleContentColor = TextPrimary,
         textContentColor = TextPrimary
@@ -6317,7 +6319,7 @@ private fun CustomModelFamilyDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("紐⑤뜽 ?⑤?由щ? ?좏깮??二쇱꽭??") },
+        title = { Text("모델 패밀리를 선택해 주세요.") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(
@@ -6340,7 +6342,7 @@ private fun CustomModelFamilyDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("?섏쨷??) } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("나중에") } },
         containerColor = PanelBg,
         titleContentColor = TextPrimary,
         textContentColor = TextPrimary
@@ -6364,15 +6366,15 @@ private fun ModelImportWizardDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("紐⑤뜽 ?뚯씪 ?뺤씤") },
+        title = { Text("모델 파일 확인") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                DetailMetaRow("?뚯씪 ?대쫫", pending.originalFileName)
-                DetailMetaRow("?뚯씪 ?ш린", pending.fileSizeBytes?.let { formatBytes(it) } ?: "紐⑤뜽 ?뚯씪 ?ш린瑜??뺤씤?????놁뒿?덈떎.")
-                DetailMetaRow("?뺤옣??, extension)
-                DetailMetaRow("異붿젙 ?뺤떇", formatLabel)
-                DetailMetaRow("?ㅽ뻾 ?곹깭", executionStatus)
-                Text("紐⑤뜽 ?⑤?由щ? ?좏깮??二쇱꽭??", color = TextSecondary, fontSize = 12.sp)
+                DetailMetaRow("파일 이름", pending.originalFileName)
+                DetailMetaRow("파일 크기", pending.fileSizeBytes?.let { formatBytes(it) } ?: "모델 파일 크기를 확인할 수 없습니다.")
+                DetailMetaRow("확장자", extension)
+                DetailMetaRow("추정 형식", formatLabel)
+                DetailMetaRow("실행 상태", executionStatus)
+                Text("모델 패밀리를 선택해 주세요.", color = TextSecondary, fontSize = 12.sp)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(
                         ModelFamily.GEMMA to "Gemma",
@@ -6398,21 +6400,21 @@ private fun ModelImportWizardDialog(
                     }
                 }
                 if (!pending.permissionPersisted) {
-                    Text("紐⑤뜽 ?뚯씪 沅뚰븳???좎??????놁뒿?덈떎.", color = DangerRed, fontSize = 12.sp)
+                    Text("모델 파일 권한을 유지할 수 없습니다.", color = DangerRed, fontSize = 12.sp)
                 }
                 if (format == ModelRuntimeFormat.MEDIAPIPE_LLM) {
-                    Text("??紐⑤뜽? ?ㅽ뻾 ?꾩뿉 Fusion ?대? ??μ냼濡?蹂듭궗?댁빞 ?????덉뒿?덈떎.", color = TextSecondary, fontSize = 12.sp)
+                    Text("이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", color = TextSecondary, fontSize = 12.sp)
                 }
                 Text(nextAction, color = TextSecondary, fontSize = 12.sp)
             }
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { onLink(selectedFamily) }) { Text("?곌껐", color = AccentBlue, maxLines = 1) }
+                TextButton(onClick = { onLink(selectedFamily) }) { Text("연결", color = AccentBlue, maxLines = 1) }
                 TextButton(onClick = { onCopyForRun(selectedFamily) }, enabled = canCopyForRun) {
-                    Text("?ㅽ뻾?⑹쑝濡?蹂듭궗", color = if (canCopyForRun) AccentBlue else TextSecondary, maxLines = 1)
+                    Text("실행용으로 복사", color = if (canCopyForRun) AccentBlue else TextSecondary, maxLines = 1)
                 }
-                TextButton(onClick = onDismiss) { Text("痍⑥냼", color = TextSecondary, maxLines = 1) }
+                TextButton(onClick = onDismiss) { Text("취소", color = TextSecondary, maxLines = 1) }
             }
         },
         containerColor = PanelBg,
@@ -6480,16 +6482,16 @@ private fun evaluateModelRecommendation(
         tier = risk.label,
         reason = risk.summary,
         recommendedTokens = risk.recommendedMaxTokens,
-        hint = if (spec.recommendedReasoningEnabled) "MTP ?? else "MTP ??쨌 Reasoning ??,
+        hint = if (spec.recommendedReasoningEnabled) "MTP 끔" else "MTP 끔 · Reasoning 끔",
         deviceRamClass = risk.ramClass.label,
         includedInRecommendedLocal = dynamicIncluded,
         includeReason = if (dynamicIncluded) "included" else "risk_excluded"
     )
     @Suppress("UNREACHABLE_CODE")
     val token = buildDeviceAwareTokenRecommendation(spec, totalRamGb, availableRamGb).value.coerceAtLeast(1024)
-    val hintParts = mutableListOf("MTP ??)
-    if (!spec.recommendedReasoningEnabled || totalRamGb <= 8.5f) hintParts += "Reasoning ??
-    val hint = hintParts.distinct().joinToString(" 쨌 ")
+    val hintParts = mutableListOf("MTP 끔")
+    if (!spec.recommendedReasoningEnabled || totalRamGb <= 8.5f) hintParts += "Reasoning 끔"
+    val hint = hintParts.distinct().joinToString(" · ")
     val effectiveTotalRamGb = when {
         totalRamGb >= 7.0f && totalRamGb <= 8.5f -> 8.0f
         totalRamGb <= 12.5f -> 12.0f
@@ -6516,53 +6518,53 @@ private fun evaluateModelRecommendation(
     }
     val sizeTier = when (ramClass) {
         "8GB" -> when {
-            sizeGb >= 5.0f -> "沅뚯옣?섏? ?딆쓬"
-            sizeGb >= 4.0f -> "二쇱쓽 ?꾩슂"
-            sizeGb > 3.0f -> "二쇱쓽 ?꾩슂"
-            sizeGb > 1.5f -> "?ㅽ뿕 媛??
-            else -> "沅뚯옣"
+            sizeGb >= 5.0f -> "권장하지 않음"
+            sizeGb >= 4.0f -> "주의 필요"
+            sizeGb > 3.0f -> "주의 필요"
+            sizeGb > 1.5f -> "실험 가능"
+            else -> "권장"
         }
         "12GB" -> when {
-            sizeGb > 7.0f -> "沅뚯옣?섏? ?딆쓬"
-            sizeGb > 5.0f -> "二쇱쓽 ?꾩슂"
-            sizeGb > 3.0f -> "?ㅽ뿕 媛??
-            else -> "沅뚯옣"
+            sizeGb > 7.0f -> "권장하지 않음"
+            sizeGb > 5.0f -> "주의 필요"
+            sizeGb > 3.0f -> "실험 가능"
+            else -> "권장"
         }
         "16GB" -> when {
-            sizeGb > 10.0f -> "沅뚯옣?섏? ?딆쓬"
-            sizeGb > 5.0f -> "?ㅽ뿕 媛??
-            else -> "沅뚯옣"
+            sizeGb > 10.0f -> "권장하지 않음"
+            sizeGb > 5.0f -> "실험 가능"
+            else -> "권장"
         }
-        else -> if (sizeGb > 12.0f) "二쇱쓽 ?꾩슂" else "沅뚯옣"
+        else -> if (sizeGb > 12.0f) "주의 필요" else "권장"
     }
     val tier = when {
-        spec.availability == ModelAvailability.REMOTE_ONLY || spec.recommendedDeviceClass == ModelRecommendedDeviceClass.SERVER_ONLY -> "?먭꺽 ?꾩슜"
-        spec.memoryClass == ModelMemoryClass.SERVER -> "沅뚯옣?섏? ?딆쓬"
-        spec.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "沅뚯옣?섏? ?딆쓬"
-        sizeTier == "沅뚯옣?섏? ?딆쓬" -> "沅뚯옣?섏? ?딆쓬"
-        sizeTier == "二쇱쓽 ?꾩슂" -> "二쇱쓽 ?꾩슂"
-        isEightGbSafe && effectiveTotalRamGb >= 8.0f && isSmallModel -> "沅뚯옣"
-        isEightGbSafe && effectiveTotalRamGb >= 8.0f -> "?ㅽ뿕 媛??
-        spec.availability == ModelAvailability.READY && isSmallModel && meetsMinimum -> "沅뚯옣"
-        spec.availability == ModelAvailability.CUSTOM_IMPORTED && isSmallModel && meetsMinimum -> "沅뚯옣"
-        recommendedRam > 0 && effectiveTotalRamGb >= recommendedRam -> "沅뚯옣"
-        meetsMinimum -> "?ㅽ뿕 媛??
-        slightlyBelowMinimum -> "二쇱쓽 ?꾩슂"
-        else -> "沅뚯옣?섏? ?딆쓬"
+        spec.availability == ModelAvailability.REMOTE_ONLY || spec.recommendedDeviceClass == ModelRecommendedDeviceClass.SERVER_ONLY -> "원격 전용"
+        spec.memoryClass == ModelMemoryClass.SERVER -> "권장하지 않음"
+        spec.availability == ModelAvailability.UNSUPPORTED_ON_DEVICE -> "권장하지 않음"
+        sizeTier == "권장하지 않음" -> "권장하지 않음"
+        sizeTier == "주의 필요" -> "주의 필요"
+        isEightGbSafe && effectiveTotalRamGb >= 8.0f && isSmallModel -> "권장"
+        isEightGbSafe && effectiveTotalRamGb >= 8.0f -> "실험 가능"
+        spec.availability == ModelAvailability.READY && isSmallModel && meetsMinimum -> "권장"
+        spec.availability == ModelAvailability.CUSTOM_IMPORTED && isSmallModel && meetsMinimum -> "권장"
+        recommendedRam > 0 && effectiveTotalRamGb >= recommendedRam -> "권장"
+        meetsMinimum -> "실험 가능"
+        slightlyBelowMinimum -> "주의 필요"
+        else -> "권장하지 않음"
     }
     val availableMemoryVeryLow = lowMemory || availableRamGb < 1.25f
     val shouldDowngradeForAvailableMemory = availableMemoryVeryLow && !isCurrentSelected && !(isEightGbSafe && isSmallModel)
     val downgradedTier = when {
-        shouldDowngradeForAvailableMemory && tier == "沅뚯옣" -> "?ㅽ뿕 媛??
-        shouldDowngradeForAvailableMemory && tier == "?ㅽ뿕 媛?? -> "二쇱쓽 ?꾩슂"
+        shouldDowngradeForAvailableMemory && tier == "권장" -> "실험 가능"
+        shouldDowngradeForAvailableMemory && tier == "실험 가능" -> "주의 필요"
         else -> tier
     }
     val reason = when (downgradedTier) {
-        "沅뚯옣" -> if (availableRamGb < 2.0f) "?꾩옱 ?ъ슜 媛?ν븳 硫붾え由ш? ??븘 ?ㅽ뻾 ?꾩뿉 ?ㅻⅨ ?깆쓣 ?뺣━?섎뒗 寃껋씠 醫뗭뒿?덈떎." else "?꾩옱 湲곌린 硫붾え由?湲곗??쇰줈 ?덉젙?곸씤 ?뚰삎 紐⑤뜽?낅땲??"
-        "?ㅽ뿕 媛?? -> if (spec.availability == ModelAvailability.NEEDS_CONVERSION) "蹂?섏씠 ?꾩슂?섏?留?硫붾え由?湲곗?? 異⑹”?⑸땲??" else "8GB 湲곌린?먯꽌 ?ㅽ뿕?섍린 ?곹빀?⑸땲??"
-        "二쇱쓽 ?꾩슂" -> if (availableRamGb < 2.0f) "?꾩옱 ?ъ슜 媛?ν븳 硫붾え由ш? ??븘 ?ㅽ뻾 ?꾩뿉 ?ㅻⅨ ?깆쓣 ?뺣━?섎뒗 寃껋씠 醫뗭뒿?덈떎." else "湲??묐떟 ?먮뒗 硫?고깭?ㅽ궧 ?섍꼍?먯꽌 醫낅즺?????덉뒿?덈떎. 媛?ν븯硫???? 理쒕? ?좏겙 ?섎? 沅뚯옣?⑸땲??"
-        "沅뚯옣?섏? ?딆쓬" -> "?꾩옱 湲곌린 硫붾え由??鍮?紐⑤뜽 ?붽뎄?ы빆???믪뒿?덈떎."
-        else -> "??紐⑤뜽? ?먭꺽 ?ㅽ뻾??沅뚯옣?⑸땲??"
+        "권장" -> if (availableRamGb < 2.0f) "현재 사용 가능한 메모리가 낮아 실행 전에 다른 앱을 정리하는 것이 좋습니다." else "현재 기기 메모리 기준으로 안정적인 소형 모델입니다."
+        "실험 가능" -> if (spec.availability == ModelAvailability.NEEDS_CONVERSION) "변환이 필요하지만 메모리 기준은 충족합니다." else "8GB 기기에서 실험하기 적합합니다."
+        "주의 필요" -> if (availableRamGb < 2.0f) "현재 사용 가능한 메모리가 낮아 실행 전에 다른 앱을 정리하는 것이 좋습니다." else "긴 응답 또는 멀티태스킹 환경에서 종료될 수 있습니다. 가능하면 낮은 최대 토큰 수를 권장합니다."
+        "권장하지 않음" -> "현재 기기 메모리 대비 모델 요구사항이 높습니다."
+        else -> "이 모델은 원격 실행을 권장합니다."
     }
     val includeBySizeRule = when (ramClass) {
         "8GB" -> when {
@@ -6574,7 +6576,7 @@ private fun evaluateModelRecommendation(
         "16GB" -> sizeGb <= 10.0f
         else -> true
     }
-    val includeByAvailability = downgradedTier in listOf("沅뚯옣", "?ㅽ뿕 媛??, "二쇱쓽 ?꾩슂")
+    val includeByAvailability = downgradedTier in listOf("권장", "실험 가능", "주의 필요")
     val included = includeByAvailability && includeBySizeRule
     val includeReason = if (included) "included" else if (!includeByAvailability) "tier_excluded" else "size_cutoff"
     return ModelRecommendationEvaluation(spec, downgradedTier, reason, token, hint, ramClass, included, includeReason)
@@ -6630,27 +6632,27 @@ private fun buildModelMemoryWarning(
         evaluation.tier == FusionModelMemoryRiskLevel.RECOMMENDED.label
     }
     @Suppress("UNREACHABLE_CODE")
-    if (evaluation.tier == "?먭꺽 ?꾩슜") {
-        return "??紐⑤뜽? 紐⑤컮??濡쒖뺄 ?ㅽ뻾?⑹씠 ?꾨떃?덈떎."
+    if (evaluation.tier == "원격 전용") {
+        return "이 모델은 모바일 로컬 실행용이 아닙니다."
     }
     if (spec.availability == ModelAvailability.NEEDS_CONVERSION) {
-        return if (evaluation.tier == "沅뚯옣?섏? ?딆쓬") {
-            "??紐⑤뜽? 蹂?섏씠 ?꾩슂?섎ŉ ?꾩옱 湲곌린 硫붾え由щ줈??濡쒖뺄 ?ㅽ뻾??沅뚯옣?섏? ?딆뒿?덈떎."
+        return if (evaluation.tier == "권장하지 않음") {
+            "이 모델은 변환이 필요하며 현재 기기 메모리로는 로컬 실행을 권장하지 않습니다."
         } else {
-            "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎. ${evaluation.reason}"
+            "이 모델은 변환 후 사용할 수 있습니다. ${evaluation.reason}"
         }
     }
-    if (evaluation.tier == "沅뚯옣?섏? ?딆쓬") {
+    if (evaluation.tier == "권장하지 않음") {
         if (evaluation.deviceRamClass == "8GB" && (spec.modelSizeEstimateGb ?: 0f) >= 5.0f) {
-            return "?꾩옱 湲곌린?먯꽌????紐⑤뜽??濡쒖뺄 ?ㅽ뻾??沅뚯옣?섏? ?딆뒿?덈떎."
+            return "현재 기기에서는 이 모델의 로컬 실행을 권장하지 않습니다."
         }
-        return "?꾩옱 湲곌린 硫붾え由щ줈????紐⑤뜽??濡쒖뺄 ?ㅽ뻾??沅뚯옣?섏? ?딆뒿?덈떎."
+        return "현재 기기 메모리로는 이 모델의 로컬 실행을 권장하지 않습니다."
     }
-    if (availableRamGb > 0f && availableRamGb < 2f && evaluation.tier == "沅뚯옣") {
-        return "?꾩옱 ?ъ슜 媛?ν븳 硫붾え由ш? ??븘 ?ㅽ뻾 ?꾩뿉 ?ㅻⅨ ?깆쓣 ?뺣━?섎뒗 寃껋씠 醫뗭뒿?덈떎."
+    if (availableRamGb > 0f && availableRamGb < 2f && evaluation.tier == "권장") {
+        return "현재 사용 가능한 메모리가 낮아 실행 전에 다른 앱을 정리하는 것이 좋습니다."
     }
     if (totalRamGb in 7.0f..8.5f && (spec.memoryClass == ModelMemoryClass.LOW || (spec.modelSizeEstimateGb ?: 99f) <= 1.5f)) {
-        return "?꾩옱 湲곌린?먯꽌 ?ㅽ뿕?섍린 ?곹빀???뚰삎 紐⑤뜽?낅땲??"
+        return "현재 기기에서 실험하기 적합한 소형 모델입니다."
     }
     return evaluation.reason
 }
@@ -6663,8 +6665,8 @@ private fun buildDeviceAwareTokenRecommendation(
     val recommended = FusionModelMemoryPreflight.recommendedTokens(spec, gbToBytes(totalRamGb), gbToBytes(availableRamGb))
     return TokenRecommendation(
         value = recommended,
-        label = if (recommended > 0) "沅뚯옣 ?좏겙 ?? ??$recommended" else "沅뚯옣 ?좏겙 ?? ?먭꺽 ?ㅽ뻾 沅뚯옣",
-        explanation = "?꾩옱 湲곌린??珥?硫붾え由ъ? ?ъ슜 媛?ν븳 硫붾え由щ? 湲곗??쇰줈 沅뚯옣媛믪쓣 怨꾩궛?덉뒿?덈떎."
+        label = if (recommended > 0) "권장 토큰 수: 약 $recommended" else "권장 토큰 수: 원격 실행 권장",
+        explanation = "현재 기기의 총 메모리와 사용 가능한 메모리를 기준으로 권장값을 계산했습니다."
     )
     @Suppress("UNREACHABLE_CODE")
     val sizeGb = spec.modelSizeEstimateGb ?: when (spec.memoryClass) {
@@ -6697,13 +6699,13 @@ private fun buildDeviceAwareTokenRecommendation(
         base
     }
     val label = if (adjusted <= 0) {
-        "沅뚯옣 ?좏겙 ?? ?먭꺽 ?ㅽ뻾 沅뚯옣"
+        "권장 토큰 수: 원격 실행 권장"
     } else if (totalRamGb >= 12f && adjusted >= 4096) {
-        "沅뚯옣 ?좏겙 ?? ??2048~$adjusted"
+        "권장 토큰 수: 약 2048~$adjusted"
     } else {
-        "沅뚯옣 ?좏겙 ?? ??$adjusted"
+        "권장 토큰 수: 약 $adjusted"
     }
-    val explanation = "?꾩옱 湲곌린??硫붾え由щ? 湲곗??쇰줈 沅뚯옣媛믪쓣 怨꾩궛?덉뒿?덈떎. 硫붾え由ш? 遺議깊븳 湲곌린?먯꽌??湲?異쒕젰?먯꽌 ?띾룄 ????먮뒗 醫낅즺媛 諛쒖깮?????덉뒿?덈떎."
+    val explanation = "현재 기기의 메모리를 기준으로 권장값을 계산했습니다. 메모리가 부족한 기기에서는 긴 출력에서 속도 저하 또는 종료가 발생할 수 있습니다."
     return TokenRecommendation(value = adjusted, label = label, explanation = explanation)
 }
 
@@ -6726,7 +6728,7 @@ private fun applyDeviceAwareRecommendedSettings(
 }
 
 private fun modelFootprintLabel(spec: FusionModelSpec): String {
-    return spec.modelSizeEstimateGb?.let { "??${formatGb(it)}GB" } ?: "硫붾え由?${spec.memoryClass.name}"
+    return spec.modelSizeEstimateGb?.let { "약 ${formatGb(it)}GB" } ?: "메모리 ${spec.memoryClass.name}"
 }
 
 private fun compactCompatibilityLine(
@@ -6738,25 +6740,25 @@ private fun compactCompatibilityLine(
 
 private fun buildRuntimeNote(spec: FusionModelSpec): String {
     return when (spec.availability) {
-        ModelAvailability.REMOTE_ONLY -> "????ぉ? ?먭꺽 ?ㅽ뻾 ?꾨낫?낅땲?? 濡쒖뺄 GPU/CPU ?ㅽ뻾???꾩젣濡??섏? ?딆뒿?덈떎."
-        ModelAvailability.NEEDS_CONVERSION -> "濡쒖뺄 ?ㅽ뻾 ??蹂?섍낵 ?ㅼ젣 湲곌린 ?명솚???뺤씤???꾩슂?⑸땲??"
-        ModelAvailability.NEEDS_DOWNLOAD -> "濡쒖뺄 ?뚯씪??媛?몄삩 ???꾩옱 LiteRT/Gemma ?ㅽ뻾 寃쎈줈?먯꽌 ?뺤씤?댁빞 ?⑸땲??"
-        ModelAvailability.UNSUPPORTED_ON_DEVICE -> "?꾩옱 ?깆쓽 濡쒖뺄 ?ㅽ뻾 ?뺤떇?쇰줈??沅뚯옣?섏? ?딆뒿?덈떎."
-        else -> "濡쒖뺄 ?뚯씪??以鍮꾨맂 寃쎌슦 ?꾩옱 ?ㅼ젙??GPU/CPU 寃쎈줈?먯꽌 ?ㅽ뻾?????덉뒿?덈떎."
+        ModelAvailability.REMOTE_ONLY -> "이 항목은 원격 실행 후보입니다. 로컬 GPU/CPU 실행을 전제로 하지 않습니다."
+        ModelAvailability.NEEDS_CONVERSION -> "로컬 실행 전 변환과 실제 기기 호환성 확인이 필요합니다."
+        ModelAvailability.NEEDS_DOWNLOAD -> "로컬 파일을 가져온 뒤 현재 LiteRT/Gemma 실행 경로에서 확인해야 합니다."
+        ModelAvailability.UNSUPPORTED_ON_DEVICE -> "현재 앱의 로컬 실행 형식으로는 권장하지 않습니다."
+        else -> "로컬 파일이 준비된 경우 현재 설정의 GPU/CPU 경로에서 실행할 수 있습니다."
     }
 }
 
 private fun buildLocalSelectionMessage(spec: FusionModelSpec, available: Boolean): String? {
     if (available) return null
     if (spec.externallyReferenced && spec.localPath.isNullOrBlank() && spec.availability == ModelAvailability.CUSTOM_IMPORTED) {
-        return "?ㅽ뻾 以鍮??꾩슂"
+        return "실행 준비 필요"
     }
     return when (spec.availability) {
-        ModelAvailability.NEEDS_DOWNLOAD -> "紐⑤뜽 ?뚯씪??癒쇱? 媛?몄????⑸땲??"
-        ModelAvailability.NEEDS_CONVERSION -> "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎."
-        ModelAvailability.REMOTE_ONLY -> "??紐⑤뜽? ?먭꺽 ?ㅽ뻾???꾩슂?⑸땲??"
-        ModelAvailability.UNSUPPORTED_ON_DEVICE -> "?꾩옱 湲곌린?먯꽌??濡쒖뺄 ?ㅽ뻾??沅뚯옣?섏? ?딆뒿?덈떎."
-        else -> "紐⑤뜽 ?뚯씪??癒쇱? 媛?몄????⑸땲??"
+        ModelAvailability.NEEDS_DOWNLOAD -> "모델 파일을 먼저 가져와야 합니다."
+        ModelAvailability.NEEDS_CONVERSION -> "이 모델은 변환 후 사용할 수 있습니다."
+        ModelAvailability.REMOTE_ONLY -> "이 모델은 원격 실행이 필요합니다."
+        ModelAvailability.UNSUPPORTED_ON_DEVICE -> "현재 기기에서는 로컬 실행을 권장하지 않습니다."
+        else -> "모델 파일을 먼저 가져와야 합니다."
     }
 }
 
@@ -6868,14 +6870,14 @@ private fun recordRecentModel(prefs: SharedPreferences, modelId: String, display
 }
 
 private fun formatRecentUsedLabel(lastUsedAt: Long): String {
-    if (lastUsedAt <= 0L) return "理쒓렐 ?ъ슜: ?뺣낫 ?놁쓬"
+    if (lastUsedAt <= 0L) return "최근 사용: 정보 없음"
     val now = System.currentTimeMillis()
     val today = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(now))
     val usedDay = SimpleDateFormat("yyyyMMdd", Locale.getDefault()).format(Date(lastUsedAt))
     return if (today == usedDay) {
-        "理쒓렐 ?ъ슜: ?ㅻ뒛"
+        "최근 사용: 오늘"
     } else {
-        "理쒓렐 ?ъ슜: ${SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(lastUsedAt))}"
+        "최근 사용: ${SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(lastUsedAt))}"
     }
 }
 
@@ -6949,37 +6951,37 @@ private fun buildModelBenchmarkSummary(
 private fun buildMtpRecommendation(success: List<BenchmarkResultEntity>): String {
     val on = success.filter { it.mtpEnabled }
     val off = success.filter { !it.mtpEnabled }
-    if (on.size < 3 || off.size < 3) return "痢≪젙 遺議?
+    if (on.size < 3 || off.size < 3) return "측정 부족"
     val onMedian = on.mapNotNull { it.decodeTokensPerSecond?.takeIf { v -> v > 0f } ?: it.totalTokensPerSecond.takeIf { v -> v > 0f } }.sorted().let { arr ->
-        if (arr.isEmpty()) return "痢≪젙 遺議?
+        if (arr.isEmpty()) return "측정 부족"
         val mid = arr.size / 2
         if (arr.size % 2 == 0) (arr[mid - 1] + arr[mid]) / 2f else arr[mid]
     }
     val offMedian = off.mapNotNull { it.decodeTokensPerSecond?.takeIf { v -> v > 0f } ?: it.totalTokensPerSecond.takeIf { v -> v > 0f } }.sorted().let { arr ->
-        if (arr.isEmpty()) return "痢≪젙 遺議?
+        if (arr.isEmpty()) return "측정 부족"
         val mid = arr.size / 2
         if (arr.size % 2 == 0) (arr[mid - 1] + arr[mid]) / 2f else arr[mid]
     }
     return when {
-        onMedian >= offMedian * 1.05f -> "耳?
-        offMedian >= onMedian * 1.05f -> "??
-        else -> "李⑥씠 ?묒쓬"
+        onMedian >= offMedian * 1.05f -> "켬"
+        offMedian >= onMedian * 1.05f -> "끔"
+        else -> "차이 작음"
     }
 }
 
 private fun buildCardBenchmarkLine(summary: ModelBenchmarkSummary): String {
     val speed = summary.medianDecodeTps ?: summary.averageTotalTps
     return if (speed != null) {
-        "踰ㅼ튂留덊겕 ${summary.count}??쨌 以묒븰媛?${formatSpeed(speed)} tok/s"
+        "벤치마크 ${summary.count}회 · 중앙값 ${formatSpeed(speed)} tok/s"
     } else {
-        "踰ㅼ튂留덊겕 ${summary.count}??
+        "벤치마크 ${summary.count}회"
     }
 }
 
 private fun formatSpeed(value: Float): String = String.format(Locale.US, "%.1f", value)
 
 private fun formatTimestamp(ts: Long): String {
-    if (ts <= 0L) return "?뺣낫 ?놁쓬"
+    if (ts <= 0L) return "정보 없음"
     return SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(ts))
 }
 
@@ -7007,30 +7009,30 @@ private fun localExecutionSortRank(model: FusionModelSpec): Int {
 
 private fun openModelLink(context: Context, url: String?) {
     if (url.isNullOrBlank()) {
-        Toast.makeText(context, "?깅줉??留곹겕媛 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "등록된 링크가 없습니다.", Toast.LENGTH_SHORT).show()
         return
     }
     try {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     } catch (_: ActivityNotFoundException) {
-        Toast.makeText(context, "留곹겕瑜??????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "링크를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
     } catch (_: Exception) {
-        Toast.makeText(context, "留곹겕瑜??????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "링크를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
     }
 }
 
 private fun startModelDirectDownload(context: Context, spec: FusionModelSpec) {
     val url = spec.directDownloadUrl
     if (url.isNullOrBlank()) {
-        Toast.makeText(context, "?ㅼ슫濡쒕뱶 ?섏씠吏瑜??댁뼱 二쇱꽭??", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "다운로드 페이지를 열어 주세요.", Toast.LENGTH_SHORT).show()
         openModelLink(context, spec.modelPageUrl ?: spec.downloadUrl ?: spec.officialUrl)
         return
     }
     try {
         val request = DownloadManager.Request(url.toUri()).apply {
             setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            setTitle(spec.directDownloadFileName ?: "${spec.displayName} 紐⑤뜽 ?뚯씪")
-            setDescription("${spec.directDownloadFormat ?: "紐⑤뜽"} ?뚯씪 ?ㅼ슫濡쒕뱶")
+            setTitle(spec.directDownloadFileName ?: "${spec.displayName} 모델 파일")
+            setDescription("${spec.directDownloadFormat ?: "모델"} 파일 다운로드")
             setAllowedOverMetered(false)
             setAllowedOverRoaming(false)
             setDestinationInExternalPublicDir(
@@ -7040,14 +7042,14 @@ private fun startModelDirectDownload(context: Context, spec: FusionModelSpec) {
         }
         val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
         if (manager == null) {
-            Toast.makeText(context, "紐⑤뜽 ?뚯씪 ?ㅼ슫濡쒕뱶瑜??쒖옉?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "모델 파일 다운로드를 시작할 수 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
         manager.enqueue(request)
-        Toast.makeText(context, "紐⑤뜽 ?뚯씪 ?ㅼ슫濡쒕뱶瑜??쒖옉?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
-        Toast.makeText(context, "?ㅼ슫濡쒕뱶媛 ?꾨즺?섎㈃ ?뚯씪 媛?몄삤湲곕줈 紐⑤뜽 ?뚯씪???좏깮??二쇱꽭??", Toast.LENGTH_LONG).show()
+        Toast.makeText(context, "모델 파일 다운로드를 시작했습니다.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "다운로드가 완료되면 파일 가져오기로 모델 파일을 선택해 주세요.", Toast.LENGTH_LONG).show()
     } catch (_: Exception) {
-        Toast.makeText(context, "紐⑤뜽 ?뚯씪 ?ㅼ슫濡쒕뱶瑜??쒖옉?????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "모델 파일 다운로드를 시작할 수 없습니다.", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -7092,56 +7094,56 @@ private fun ModelStorageManagerDialog(
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("紐⑤뜽 ??κ났媛?, color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                Text("媛?몄삩 紐⑤뜽怨??몃? ?곌껐 ?뚯씪??愿由ы빀?덈떎.", color = TextSecondary, fontSize = 13.sp)
-                Text("珥??⑸웾 ??${formatBytes(totalSize)}", color = TextSecondary, fontSize = 12.sp)
+                Text("모델 저장공간", color = TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                Text("가져온 모델과 외부 연결 파일을 관리합니다.", color = TextSecondary, fontSize = 13.sp)
+                Text("총 용량 약 ${formatBytes(totalSize)}", color = TextSecondary, fontSize = 12.sp)
 
                 LazyColumn(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     item {
-                        Text("Fusion ?대? 紐⑤뜽 ?뚯씪", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Fusion 내부 모델 파일", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
                     items(internalFiles) { file ->
                         val spec = models.firstOrNull { it.localPath == file.absolutePath }
                         StorageModelRow(
                             name = spec?.displayName ?: file.name,
-                            source = "Fusion ?대? ??μ냼",
+                            source = "Fusion 내부 저장소",
                             size = formatBytes(file.length()),
                             runtimeFormat = FusionModelCatalog.runtimeFormatForFile(file.name).name,
                             family = spec?.family?.name ?: ModelFamily.CUSTOM.name,
-                            status = if (file.exists()) "?ъ슜 媛?? else "?뚯씪??李얠쓣 ???놁뒿?덈떎.",
+                            status = if (file.exists()) "사용 가능" else "파일을 찾을 수 없습니다.",
                             current = spec?.displayName == currentModel,
                             actions = {
                                 FusionTextButton(onClick = {
                                     onSelect(spec ?: FusionModelCatalog.importedSpec(file.name, file.absolutePath, ModelFamily.CUSTOM))
-                                }) { Text("?좏깮", fontSize = 12.sp) }
+                                }) { Text("선택", fontSize = 12.sp) }
                                 FusionTextButton(onClick = {
                                     openModelFile(context, file)
-                                }) { Text("?뚯씪 ?닿린", fontSize = 12.sp) }
+                                }) { Text("파일 열기", fontSize = 12.sp) }
                                 FusionTextButton(onClick = {
                                     deleteTarget = spec ?: FusionModelCatalog.importedSpec(file.name, file.absolutePath, ModelFamily.CUSTOM)
-                                }) { Text("??젣", fontSize = 12.sp, color = DangerRed) }
+                                }) { Text("삭제", fontSize = 12.sp, color = DangerRed) }
                             }
                         )
                     }
                     item {
-                        Text("?몃? ?곌껐 紐⑤뜽 ?뚯씪", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Text("외부 연결 모델 파일", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
                     items(models.filter { it.externallyReferenced }) { spec ->
                         val available = canOpenUri(context, spec.uriString)
                         StorageModelRow(
                             name = spec.displayName,
-                            source = "?몃? ?뚯씪 ?곌껐",
-                            size = spec.fileSizeBytes?.let { formatBytes(it) } ?: "?ш린 ?뺣낫 ?놁쓬",
+                            source = "외부 파일 연결",
+                            size = spec.fileSizeBytes?.let { formatBytes(it) } ?: "크기 정보 없음",
                             runtimeFormat = spec.runtimeFormat.name,
                             family = spec.family.name,
                             status = storageStatusLabel(spec, available),
                             current = spec.displayName == currentModel,
                             actions = {
-                                FusionTextButton(onClick = { onSelect(spec) }) { Text("?좏깮", fontSize = 12.sp) }
-                                FusionTextButton(onClick = { openModelUri(context, spec.uriString) }) { Text("?뚯씪 ?닿린", fontSize = 12.sp) }
+                                FusionTextButton(onClick = { onSelect(spec) }) { Text("선택", fontSize = 12.sp) }
+                                FusionTextButton(onClick = { openModelUri(context, spec.uriString) }) { Text("파일 열기", fontSize = 12.sp) }
                                 if (spec.availability == ModelAvailability.CUSTOM_IMPORTED && spec.localPath.isNullOrBlank()) {
                                     FusionTextButton(onClick = {
                                         scope.launch {
@@ -7151,7 +7153,7 @@ private fun ModelStorageManagerDialog(
                                                 displayName = spec.originalFileName ?: spec.fileName ?: spec.displayName
                                             )
                                             if (copied == null) {
-                                                Toast.makeText(context, "紐⑤뜽 ?뚯씪???묎렐?????놁뒿?덈떎. ?뚯씪???ㅼ떆 ?곌껐??二쇱꽭??", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
                                             } else {
                                                 FusionModelCatalog.saveImported(
                                                     context,
@@ -7160,29 +7162,29 @@ private fun ModelStorageManagerDialog(
                                                         fileName = copied.name,
                                                         copiedInternally = true,
                                                         externallyReferenced = false,
-                                                        sourceLabel = "?ъ슜??媛?몄삤湲?,
+                                                        sourceLabel = "사용자 가져오기",
                                                         lastCheckedAt = System.currentTimeMillis()
                                                     )
                                                 )
                                                 models = FusionModelCatalog.loadImported(context)
                                                 onChanged()
-                                                Toast.makeText(context, "?ㅽ뻾?⑹쑝濡?蹂듭궗?덉뒿?덈떎.", Toast.LENGTH_SHORT).show()
+                                                Toast.makeText(context, "실행용으로 복사했습니다.", Toast.LENGTH_SHORT).show()
                                             }
                                         }
-                                    }) { Text("?ㅽ뻾?⑹쑝濡?蹂듭궗", fontSize = 12.sp) }
+                                    }) { Text("실행용으로 복사", fontSize = 12.sp) }
                                 }
                                 FusionTextButton(onClick = {
                                     FusionModelCatalog.removeImported(context, spec)
                                     models = FusionModelCatalog.loadImported(context)
                                     onChanged()
-                                }) { Text("?곌껐 ?댁젣", fontSize = 12.sp) }
+                                }) { Text("연결 해제", fontSize = 12.sp) }
                             }
                         )
                     }
                 }
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    FusionTextButton(onClick = onDismiss) { Text("?リ린", fontSize = 13.sp) }
+                    FusionTextButton(onClick = onDismiss) { Text("닫기", fontSize = 13.sp) }
                 }
             }
         }
@@ -7191,8 +7193,8 @@ private fun ModelStorageManagerDialog(
     deleteTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("紐⑤뜽 ?뚯씪????젣?섏떆寃좎뒿?덇퉴?") },
-            text = { Text("Fusion ?대? ??μ냼??紐⑤뜽 ?뚯씪????젣?⑸땲??") },
+            title = { Text("모델 파일을 삭제하시겠습니까?") },
+            text = { Text("Fusion 내부 저장소의 모델 파일이 삭제됩니다.") },
             confirmButton = {
                 FusionTextButton(onClick = {
                     target.localPath?.let { File(it).delete() }
@@ -7200,9 +7202,9 @@ private fun ModelStorageManagerDialog(
                     models = FusionModelCatalog.loadImported(context)
                     deleteTarget = null
                     onChanged()
-                }) { Text("??젣") }
+                }) { Text("삭제") }
             },
-            dismissButton = { FusionTextButton(onClick = { deleteTarget = null }) { Text("痍⑥냼") } },
+            dismissButton = { FusionTextButton(onClick = { deleteTarget = null }) { Text("취소") } },
             containerColor = PanelBg,
             titleContentColor = TextPrimary,
             textContentColor = TextPrimary
@@ -7224,19 +7226,19 @@ private fun StorageModelRow(
     Surface(shape = RoundedCornerShape(12.dp), color = if (current) BubbleBg else Color.Transparent) {
         Column(modifier = Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(name, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("$source 쨌 $size 쨌 $runtimeFormat 쨌 $family", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(status, color = if (status == "?ъ슜 媛??) AccentBlue else TextSecondary, fontSize = 12.sp)
+            Text("$source · $size · $runtimeFormat · $family", color = TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(status, color = if (status == "사용 가능") AccentBlue else TextSecondary, fontSize = 12.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), content = actions)
         }
     }
 }
 
 private fun storageStatusLabel(spec: FusionModelSpec, uriAvailable: Boolean): String {
-    if (!uriAvailable) return "?뚯씪??李얠쓣 ???놁뒿?덈떎."
-    if (spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION) return "蹂???꾩슂"
-    if (spec.availability != ModelAvailability.CUSTOM_IMPORTED) return "?ㅽ뻾 以鍮??꾩슂"
-    if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return "?ㅽ뻾 以鍮??꾩슂"
-    return "?ъ슜 媛??
+    if (!uriAvailable) return "파일을 찾을 수 없습니다."
+    if (spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION) return "변환 필요"
+    if (spec.availability != ModelAvailability.CUSTOM_IMPORTED) return "실행 준비 필요"
+    if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return "실행 준비 필요"
+    return "사용 가능"
 }
 
 private fun importFormatLabel(fileName: String, format: ModelRuntimeFormat): String {
@@ -7245,15 +7247,15 @@ private fun importFormatLabel(fileName: String, format: ModelRuntimeFormat): Str
         "task" -> "MediaPipe LLM"
         "gguf" -> "GGUF"
         "onnx" -> "ONNX"
-        "safetensors" -> "蹂???꾩슂"
-        "bin" -> "?뺤씤 ?꾩슂"
+        "safetensors" -> "변환 필요"
+        "bin" -> "확인 필요"
         else -> when (format) {
             ModelRuntimeFormat.LITERT_LM -> "LiteRT-LM"
             ModelRuntimeFormat.MEDIAPIPE_LLM -> "MediaPipe LLM"
             ModelRuntimeFormat.GGUF -> "GGUF"
             ModelRuntimeFormat.ONNX -> "ONNX"
-            ModelRuntimeFormat.NEEDS_CONVERSION -> "蹂???꾩슂"
-            else -> "吏???뺤씤 ?꾩슂"
+            ModelRuntimeFormat.NEEDS_CONVERSION -> "변환 필요"
+            else -> "지원 확인 필요"
         }
     }
 
@@ -7261,17 +7263,17 @@ private fun importFormatLabel(fileName: String, format: ModelRuntimeFormat): Str
 
 private fun importExecutionStatusMessage(format: ModelRuntimeFormat): String {
     return when (format) {
-        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "??紐⑤뜽 ?뚯씪? Fusion?먯꽌 ?ㅽ뻾 ?꾨낫濡??ъ슜?????덉뒿?덈떎."
-        ModelRuntimeFormat.NEEDS_CONVERSION -> "??紐⑤뜽? 蹂?????ъ슜?????덉뒿?덈떎."
-        else -> "???뺤떇? ?꾩옱 吏곸젒 ?ㅽ뻾?????놁뒿?덈떎."
+        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "이 모델 파일은 Fusion에서 실행 후보로 사용할 수 있습니다."
+        ModelRuntimeFormat.NEEDS_CONVERSION -> "이 모델은 변환 후 사용할 수 있습니다."
+        else -> "이 형식은 현재 직접 실행할 수 없습니다."
     }
 }
 
 private fun importRecommendedActionMessage(format: ModelRuntimeFormat): String {
     return when (format) {
-        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "沅뚯옣 ?숈옉: 癒쇱? ?곌껐?섍퀬, ?ㅽ뻾???꾩슂?섎㈃ ?ㅽ뻾?⑹쑝濡?蹂듭궗??二쇱꽭??"
-        ModelRuntimeFormat.NEEDS_CONVERSION -> "沅뚯옣 ?숈옉: ?곌껐濡?蹂닿??섍퀬 蹂?????ㅼ떆 媛?몄? 二쇱꽭??"
-        else -> "沅뚯옣 ?숈옉: ?곌껐濡?蹂닿??섍퀬 吏???щ?瑜??뺤씤??二쇱꽭??"
+        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "권장 동작: 먼저 연결하고, 실행이 필요하면 실행용으로 복사해 주세요."
+        ModelRuntimeFormat.NEEDS_CONVERSION -> "권장 동작: 연결로 보관하고 변환 후 다시 가져와 주세요."
+        else -> "권장 동작: 연결로 보관하고 지원 여부를 확인해 주세요."
     }
 }
 
@@ -7300,7 +7302,7 @@ private fun canOpenUri(context: Context, uriString: String?): Boolean {
 
 private fun openModelUri(context: Context, uriString: String?) {
     if (uriString.isNullOrBlank()) {
-        Toast.makeText(context, "紐⑤뜽 ?뚯씪???묎렐?????놁뒿?덈떎. ?뚯씪???ㅼ떆 ?곌껐??二쇱꽭??", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
         return
     }
     try {
@@ -7309,7 +7311,7 @@ private fun openModelUri(context: Context, uriString: String?) {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         })
     } catch (_: Exception) {
-        Toast.makeText(context, "?뚯씪???????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "파일을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -7321,16 +7323,16 @@ private fun openModelFile(context: Context, file: File) {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         })
     } catch (_: Exception) {
-        Toast.makeText(context, "?뚯씪???????놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "파일을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
     }
 }
 
 private fun formatBytes(bytes: Long): String {
     if (bytes <= 0L) return "0 B"
     val gb = bytes / (1024f * 1024f * 1024f)
-    if (gb >= 1f) return "??${formatGb(gb)}GB"
+    if (gb >= 1f) return "약 ${formatGb(gb)}GB"
     val mb = bytes / (1024f * 1024f)
-    return "??${String.format(Locale.US, "%.1f", mb)}MB"
+    return "약 ${String.format(Locale.US, "%.1f", mb)}MB"
 }
 
 @Composable
@@ -7410,7 +7412,7 @@ private fun AdvancedSettingsEntry(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)
         ) {
             Text(
-                text = "怨좉툒 ?ㅼ젙",
+                text = "고급 설정",
                 color = TextPrimary,
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold
@@ -7418,9 +7420,9 @@ private fun AdvancedSettingsEntry(
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "Max ${settings.maxTokens} 쨌 TopK ${settings.topK} 쨌 TopP ${
+                text = "Max ${settings.maxTokens} · TopK ${settings.topK} · TopP ${
                     "%.2f".format(settings.topP)
-                } 쨌 Temp ${"%.2f".format(settings.temperature)}",
+                } · Temp ${"%.2f".format(settings.temperature)}",
                 color = TextSecondary,
                 fontSize = 13.sp,
                 maxLines = 1,
@@ -7430,7 +7432,7 @@ private fun AdvancedSettingsEntry(
             Spacer(modifier = Modifier.height(2.dp))
 
             Text(
-                text = "${settings.accelerator.name} 쨌 Reason ${settings.reasoningBudgetTokens} 쨌 MTP ${
+                text = "${settings.accelerator.name} · Reason ${settings.reasoningBudgetTokens} · MTP ${
                     when (settings.speculativeDecodingEnabled) {
                         true -> "On"
                         false -> "Off"
@@ -7453,7 +7455,7 @@ private fun DownloadModelDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text("紐⑤뜽 ?ㅼ슫濡쒕뱶")
+            Text("모델 다운로드")
         },
         text = {
             Column {
@@ -7467,9 +7469,9 @@ private fun DownloadModelDialog(
 
                 Text(
                     text = if (model.downloadUrl != null) {
-                        "??紐⑤뜽? ?꾩쭅 湲곌린???놁뒿?덈떎. ?ㅼ슫濡쒕뱶????濡쒖뺄 異붾줎 ?붿쭊???곌껐?????덉뒿?덈떎."
+                        "이 모델은 아직 기기에 없습니다. 다운로드한 뒤 로컬 추론 엔진에 연결할 수 있습니다."
                     } else {
-                        "??紐⑤뜽? ?꾩쭅 ?ㅼ슫濡쒕뱶 URL???깅줉?섏? ?딆븯?듬땲??"
+                        "이 모델은 아직 다운로드 URL이 등록되지 않았습니다."
                     },
                     color = TextSecondary,
                     fontSize = 14.sp
@@ -7481,12 +7483,12 @@ private fun DownloadModelDialog(
                 onClick = onDownload,
                 enabled = model.downloadUrl != null
             ) {
-                Text("?ㅼ슫濡쒕뱶")
+                Text("다운로드")
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("痍⑥냼")
+                Text("취소")
             }
         },
         containerColor = PanelBg,
@@ -7599,9 +7601,9 @@ private fun AdvancedSettingsDialog(
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         Text("\ud604\uc7ac \uc801\uc6a9\uac12", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                         Text("\ubaa8\ub378: $selectedModel", color = TextSecondary, fontSize = 12.sp)
-                        Text("\uac00\uc18d\uae30: ${accelerator.name} 쨌 MTP: ${if (speculativeDecodingEnabled) "\ucf1c\uc9d0" else "\uaebc\uc9d0"}", color = TextSecondary, fontSize = 12.sp)
-                        Text("maxTokens=$maxTokensText 쨌 temp=$temperatureText 쨌 topK=$topKText 쨌 topP=$topPText", color = TextSecondary, fontSize = 12.sp)
-                        Text("Reasoning: ${if (reasoningEnabledLocal) "\ucf1c\uc9d0" else "\uaebc\uc9d0"} 쨌 Web Search: ${if (webSearchEnabledLocal) "\ucf1c\uc9d0" else "\uaebc\uc9d0"}", color = TextSecondary, fontSize = 12.sp)
+                        Text("\uac00\uc18d\uae30: ${accelerator.name} · MTP: ${if (speculativeDecodingEnabled) "\ucf1c\uc9d0" else "\uaebc\uc9d0"}", color = TextSecondary, fontSize = 12.sp)
+                        Text("maxTokens=$maxTokensText · temp=$temperatureText · topK=$topKText · topP=$topPText", color = TextSecondary, fontSize = 12.sp)
+                        Text("Reasoning: ${if (reasoningEnabledLocal) "\ucf1c\uc9d0" else "\uaebc\uc9d0"} · Web Search: ${if (webSearchEnabledLocal) "\ucf1c\uc9d0" else "\uaebc\uc9d0"}", color = TextSecondary, fontSize = 12.sp)
                     }
                 }
                 Text(
@@ -7735,8 +7737,8 @@ private fun AdvancedSettingsDialog(
                 }
 
                 SettingSwitchRow(
-                    title = "MTP 媛??,
-                    subtitle = "Gemma 4?먯꽌 speculative decoding?쇰줈 異쒕젰 ?띾룄瑜??믪엯?덈떎.",
+                    title = "MTP 가속",
+                    subtitle = "Gemma 4에서 speculative decoding으로 출력 속도를 높입니다.",
                     checked = if (speculativeDecodingTouched) {
                         speculativeDecodingEnabled
                     } else {
@@ -8004,7 +8006,7 @@ private fun AcceleratorSegment(
         contentAlignment = Alignment.Center
     ) {
         Text(
-            text = if (selected) "??$text" else text,
+            text = if (selected) "✓ $text" else text,
             color = Color.White,
             fontSize = 16.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
@@ -8126,20 +8128,20 @@ private suspend fun generateWithLiteRtRecovery(
 
     Log.e("FusionEngine", "LiteRT generation retry failed: $retryResult")
     FusionRuntimeManager.unloadSharedEngineForActiveOwner("chat_retry_failed")
-    throw IllegalStateException("紐⑤뜽??遺덈윭?????놁뒿?덈떎. 紐⑤뜽 ?ㅼ젙???뺤씤?????ㅼ떆 ?쒕룄??二쇱꽭??")
+    throw IllegalStateException("모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.")
 }
 
 private fun looksLikeLiteRtEngineFailure(text: String): Boolean {
     return text.contains("Failed to create engine", ignoreCase = true) ||
         text.contains("litert_compiled_model", ignoreCase = true) ||
-        text.contains("紐⑤뜽??遺덈윭?????놁뒿?덈떎") ||
-        text.contains("LiteRT-LM ?ㅽ뻾 ?ㅽ뙣", ignoreCase = true) ||
+        text.contains("모델을 불러올 수 없습니다") ||
+        text.contains("LiteRT-LM 실행 실패", ignoreCase = true) ||
         text.contains("LiteRT-LM", ignoreCase = true) && text.contains("INTERNAL", ignoreCase = true)
 }
 
 private fun isLiteRtModelLoadException(error: Throwable): Boolean {
     val message = error.message.orEmpty()
-    return message.contains("紐⑤뜽??遺덈윭?????놁뒿?덈떎") ||
+    return message.contains("모델을 불러올 수 없습니다") ||
         message.contains("Failed to create engine", ignoreCase = true) ||
         message.contains("litert_compiled_model", ignoreCase = true) ||
         message.contains("INTERNAL", ignoreCase = true)
@@ -8152,12 +8154,12 @@ private fun estimateOutputTokens(text: String): Int {
 
     if (trimmed.isBlank()) return 0
 
-    val wordLikeTokens = Regex("""[A-Za-z0-9_]+|[媛-??+|[^\s]""")
+    val wordLikeTokens = Regex("""[A-Za-z0-9_]+|[가-힣]+|[^\s]""")
         .findAll(trimmed)
         .sumOf { match ->
             val value = match.value
             when {
-                value.any { it in '媛'..'?? } -> (value.length + 1) / 2
+                value.any { it in '가'..'힣' } -> (value.length + 1) / 2
                 value.length > 8 -> (value.length + 3) / 4
                 else -> 1
             }
@@ -8183,17 +8185,17 @@ private fun buildFusionMetricsLine(
 
     val mainLine = buildString {
         append(modelName)
-        append(" 쨌 ")
+        append(" · ")
         append(acceleratorName)
-        append(" 쨌 ")
+        append(" · ")
         append("${totalSecondsText}s")
-        append(" 쨌 ")
-        append("??${tokensPerSecondText} tok/s")
+        append(" · ")
+        append("약 ${tokensPerSecondText} tok/s")
 
         if (firstTokenLatencyMs != null && firstTokenLatencyMs > 0L) {
             val firstTokenSeconds = firstTokenLatencyMs / 1000.0
             val firstTokenText = String.format(Locale.US, "%.1f", firstTokenSeconds)
-            append(" 쨌 泥??좏겙 ${firstTokenText}s")
+            append(" · 첫 토큰 ${firstTokenText}s")
         }
     }
 
@@ -8227,7 +8229,7 @@ private fun appendFusionMetrics(
 private fun buildFusionSettingsMetricsLine(
     settings: GenerationSettings
 ): String {
-    return "?ㅼ젙 쨌 max ${settings.maxTokens} 쨌 temp ${settings.temperature} 쨌 topK ${settings.topK} 쨌 topP ${settings.topP} 쨌 ${settings.accelerator.name}"
+    return "설정 · max ${settings.maxTokens} · temp ${settings.temperature} · topK ${settings.topK} · topP ${settings.topP} · ${settings.accelerator.name}"
 }
 
 private fun visibleAssistantHistoryText(content: String): String {
@@ -8393,6 +8395,199 @@ private fun getDisplayNameFromUri(
     return displayName ?: uri.lastPathSegment ?: "custom_model"
 
 }
+private suspend fun performSimpleWebSearch(
+    query: String
+): String? {
+    return withContext(Dispatchers.IO) {
+        val instantResult = runCatching {
+            performDuckDuckGoInstantSearch(query)
+        }.getOrNull()
+
+        if (!instantResult.isNullOrBlank() && !instantResult.contains("검색 결과가 충분하지 않았어")) {
+            return@withContext instantResult
+        }
+
+        val htmlResult = runCatching {
+            performDuckDuckGoHtmlSearch(query)
+        }.getOrNull()
+
+        if (!htmlResult.isNullOrBlank()) {
+            return@withContext htmlResult
+        }
+
+        instantResult ?: "검색 결과를 가져오지 못했습니다. 일반 지식과 추론을 구분해서 답변해야 합니다."
+    }
+}
+private fun performDuckDuckGoInstantSearch(
+    query: String
+): String? {
+    val encodedQuery = URLEncoder.encode(query, "UTF-8")
+    val url = URL(
+        "https://api.duckduckgo.com/?q=$encodedQuery&format=json&no_html=1&skip_disambig=1"
+    )
+
+    val jsonText = url.readText()
+    val json = JSONObject(jsonText)
+    val lines = mutableListOf<String>()
+
+    val heading = json.optString("Heading")
+    val abstractText = json.optString("AbstractText")
+    val abstractUrl = json.optString("AbstractURL")
+    val answer = json.optString("Answer")
+    val definition = json.optString("Definition")
+
+    if (answer.isNotBlank()) {
+        lines.add("즉답: $answer")
+    }
+
+    if (definition.isNotBlank()) {
+        lines.add("정의: $definition")
+    }
+
+    if (abstractText.isNotBlank()) {
+        if (heading.isNotBlank()) {
+            lines.add("주제: $heading")
+        }
+        lines.add("요약: $abstractText")
+        if (abstractUrl.isNotBlank()) {
+            lines.add("출처: $abstractUrl")
+        }
+    }
+
+    val relatedTopics = json.optJSONArray("RelatedTopics")
+    if (relatedTopics != null) {
+        var added = 0
+        var index = 0
+
+        while (index < relatedTopics.length() && added < 3) {
+            val item = relatedTopics.optJSONObject(index)
+
+            if (item != null) {
+                val text = item.optString("Text")
+                val firstUrl = item.optString("FirstURL")
+
+                if (text.isNotBlank()) {
+                    lines.add("관련: $text")
+                    if (firstUrl.isNotBlank()) {
+                        lines.add("관련 출처: $firstUrl")
+                    }
+                    added += 1
+                } else {
+                    val nestedTopics = item.optJSONArray("Topics")
+                    if (nestedTopics != null) {
+                        var nestedIndex = 0
+
+                        while (nestedIndex < nestedTopics.length() && added < 3) {
+                            val nested = nestedTopics.optJSONObject(nestedIndex)
+                            val nestedText = nested?.optString("Text").orEmpty()
+                            val nestedUrl = nested?.optString("FirstURL").orEmpty()
+
+                            if (nestedText.isNotBlank()) {
+                                lines.add("관련: $nestedText")
+                                if (nestedUrl.isNotBlank()) {
+                                    lines.add("관련 출처: $nestedUrl")
+                                }
+                                added += 1
+                            }
+
+                            nestedIndex += 1
+                        }
+                    }
+                }
+            }
+
+            index += 1
+        }
+    }
+
+    return if (lines.isEmpty()) {
+        null
+    } else {
+        lines.joinToString("\n")
+    }
+}
+
+private fun performDuckDuckGoHtmlSearch(
+    query: String
+): String? {
+    val encodedQuery = URLEncoder.encode(query, "UTF-8")
+    val url = URL("https://html.duckduckgo.com/html/?q=$encodedQuery")
+
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 8000
+        readTimeout = 8000
+        setRequestProperty(
+            "User-Agent",
+            "Mozilla/5.0 (Android; Fusion) AppleWebKit/537.36 Chrome Mobile Safari/537.36"
+        )
+    }
+
+    val html = connection.inputStream.bufferedReader().use { it.readText() }
+
+    val resultRegex = Regex(
+        pattern = """(?s)<div class="result results_links.*?</div>\s*</div>"""
+    )
+
+    val titleRegex = Regex(
+        pattern = """(?s)<a rel="nofollow" class="result__a" href="(.*?)">(.*?)</a>"""
+    )
+
+    val snippetRegex = Regex(
+        pattern = """(?s)<a class="result__snippet".*?>(.*?)</a>|<div class="result__snippet".*?>(.*?)</div>"""
+    )
+
+    val results = resultRegex.findAll(html)
+        .mapNotNull { blockMatch ->
+            val block = blockMatch.value
+            val titleMatch = titleRegex.find(block) ?: return@mapNotNull null
+
+            val rawUrl = titleMatch.groupValues[1]
+            val rawTitle = titleMatch.groupValues[2]
+
+            val snippetMatch = snippetRegex.find(block)
+            val rawSnippet = snippetMatch?.groupValues
+                ?.drop(1)
+                ?.firstOrNull { it.isNotBlank() }
+                .orEmpty()
+
+            val title = cleanHtmlText(rawTitle)
+            val snippet = cleanHtmlText(rawSnippet)
+            val link = cleanDuckDuckGoUrl(rawUrl)
+
+            if (title.isBlank()) {
+                null
+            } else {
+                SearchResultText(
+                    title = title,
+                    snippet = snippet,
+                    url = link
+                )
+            }
+        }
+        .take(5)
+        .toList()
+
+    if (results.isEmpty()) return null
+
+    return buildString {
+        appendLine("검색어: $query")
+        appendLine("아래는 DuckDuckGo HTML 검색에서 가져온 참고 결과다.")
+        appendLine()
+
+        results.forEachIndexed { index, result ->
+            appendLine("${index + 1}. ${result.title}")
+            if (result.snippet.isNotBlank()) {
+                appendLine("요약: ${result.snippet}")
+            }
+            if (result.url.isNotBlank()) {
+                appendLine("출처: ${result.url}")
+            }
+            appendLine()
+        }
+    }.trim()
+}
+
 private data class SearchResultText(
     val title: String,
     val snippet: String,
@@ -8465,7 +8660,7 @@ private fun openAttachmentFile(
     if (!file.exists()) {
         Toast.makeText(
             context,
-            "泥⑤? ?뚯씪??李얠쓣 ???놁뒿?덈떎: ${attachment.localPath}",
+            "첨부 파일을 찾을 수 없습니다: ${attachment.localPath}",
             Toast.LENGTH_LONG
         ).show()
         return
@@ -8484,14 +8679,14 @@ private fun openAttachmentFile(
         }
 
         context.startActivity(
-            Intent.createChooser(intent, "?뚯씪 ?닿린")
+            Intent.createChooser(intent, "파일 열기")
         )
     } catch (_: ActivityNotFoundException) {
-        Toast.makeText(context, "???뚯씪???????덈뒗 ?깆씠 ?놁뒿?덈떎.", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "이 파일을 열 수 있는 앱이 없습니다.", Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
         Toast.makeText(
             context,
-            "?뚯씪???????놁뒿?덈떎.",
+            "파일을 열 수 없습니다.",
             Toast.LENGTH_SHORT
         ).show()
     }
@@ -8641,7 +8836,7 @@ private fun recordWebSearchDiagnostics(
         DeveloperLogStore.record(
             context = context,
             category = "web_search",
-            message = "?밴???寃?됱뼱 怨꾪쉷 ?앹꽦",
+            message = "웹검색 검색어 계획 생성",
             technicalSummary = "primary=${plan.primaryQuery.take(90)}, alternates=${plan.alternateQueries.size}, preferred=${plan.preferredProviderTypes.joinToString { it.name }}, reason=${plan.reason.take(80)}"
         )
     }
@@ -8649,7 +8844,7 @@ private fun recordWebSearchDiagnostics(
         DeveloperLogStore.record(
             context = context,
             category = "web_search",
-            message = "?밴????쒓났???쒕룄: ${trace.providerDisplayName}",
+            message = "웹검색 제공자 시도: ${trace.providerDisplayName}",
             technicalSummary = buildString {
                 append("query=${trace.queryUsed.take(80)}, results=${trace.parsedResultCount}")
                 trace.httpStatus?.let { append(", status=$it") }
@@ -8666,22 +8861,22 @@ private fun isGenericWebSearchRequest(userInput: String): Boolean {
     if (normalized.isBlank()) return false
 
     return listOf(
-        "寃??,
-        "寃?됲빐以?,
-        "寃?됲빐???뚮젮以?,
-        "李얠븘以?,
-        "李얠븘???뚮젮以?,
-        "??寃??,
-        "?밴???,
-        "?뚮젮以?
+        "검색",
+        "검색해줘",
+        "검색해서 알려줘",
+        "찾아줘",
+        "찾아서 알려줘",
+        "웹 검색",
+        "웹검색",
+        "알려줘"
     ).any { keyword -> normalized == keyword }
 }
 
 private fun normalizeWebSearchQuery(query: String): String {
     val normalized = query.trim()
 
-    return if (normalized.contains("?쇱꽦?꾩옄") && normalized.contains("二쇨?")) {
-        "?쇱꽦?꾩옄 005930 二쇨? ?ㅻ뒛 ?ㅼ씠踰?湲덉쑖"
+    return if (normalized.contains("삼성전자") && normalized.contains("주가")) {
+        "삼성전자 005930 주가 오늘 네이버 금융"
     } else {
         normalized
     }
@@ -8734,24 +8929,24 @@ private fun buildFinalUserContent(
         .orEmpty()
 
     return """
-        ?덈뒗 吏湲??깆쓽 ??寃??湲곕뒫???듯빐 寃??寃곌낵瑜?諛쏆? ?곹깭??
+        너는 지금 앱의 웹 검색 기능을 통해 검색 결과를 받은 상태다.
 
-        ??寃??寃곌낵:
-        ${resultText.ifBlank { "寃??寃곌낵瑜?媛?몄삤吏 紐삵뻽??" }}
+        웹 검색 결과:
+        ${resultText.ifBlank { "검색 결과를 가져오지 못했다." }}
 
-        ?듬? 洹쒖튃:
-        - [FUSION_WEB_SEARCH_RESULTS]??Result count媛 1 ?댁긽?대㈃ 寃??寃곌낵瑜?吏곸젒 ?붿빟?쒕떎.
-        - "?ㅼ떆媛??뺣낫瑜?議고쉶?????녿떎", "??寃?됱쓣 ?????녿떎"?쇨퀬 留먰븯吏 ?딅뒗??
-        - ?댁뒪 ?ъ씠?몃? ?뺤씤?섎씪怨?沅뚰븯吏 ?딅뒗??
-        - ?대뼡 二쇱젣??愿???덈뒗吏 ?섎Щ吏 ?딅뒗??
-        - 寃??寃곌낵媛 ?덉쑝硫?洹?寃곌낵瑜?諛뷀깢?쇰줈 ?듯븳??
-        - 寃??寃곌낵媛 遺議깊븯硫?"寃??寃곌낵留뚯쑝濡쒕뒗 遺議깊븯??怨?吏㏐쾶 留먰븳 ?? ?쇰컲 吏?앷낵 異붾줎??援щ텇?쒕떎.
-        - ?ㅻ뒛 二쇱슂 ?댁뒪泥섎읆 ?볦? ?댁뒪 吏덈Ц?대㈃ 以묒슂????ぉ 5媛쒕? 踰덊샇 紐⑸줉?쇰줈 ?뺣━?쒕떎.
-        - 媛??댁뒪 ??ぉ?먮뒗 遺꾩빞/二쇱젣, 吏㏃? ?붿빟, 媛?ν븳 寃쎌슦 異쒖쿂瑜??ы븿?쒕떎.
-        - ?ъ슜?먭? 二쇨?, ?댁뒪, 理쒖떊 ?뺣낫泥섎읆 ?꾩옱?깆씠 ?꾩슂??吏덈Ц???섎㈃ 寃??寃곌낵 湲곗??대씪怨?遺꾨챸??留먰븳??
-        - 萸?寃?됲븷吏 ?ㅼ떆 臾살? 留먭퀬, ?꾨옒 ?ъ슜???붿껌??諛붾줈 ?듯븳??
+        답변 규칙:
+        - [FUSION_WEB_SEARCH_RESULTS]의 Result count가 1 이상이면 검색 결과를 직접 요약한다.
+        - "실시간 정보를 조회할 수 없다", "웹 검색을 할 수 없다"라고 말하지 않는다.
+        - 뉴스 사이트를 확인하라고 권하지 않는다.
+        - 어떤 주제에 관심 있는지 되묻지 않는다.
+        - 검색 결과가 있으면 그 결과를 바탕으로 답한다.
+        - 검색 결과가 부족하면 "검색 결과만으로는 부족하다"고 짧게 말한 뒤, 일반 지식과 추론을 구분한다.
+        - 오늘 주요 뉴스처럼 넓은 뉴스 질문이면 중요한 항목 5개를 번호 목록으로 정리한다.
+        - 각 뉴스 항목에는 분야/주제, 짧은 요약, 가능한 경우 출처를 포함한다.
+        - 사용자가 주가, 뉴스, 최신 정보처럼 현재성이 필요한 질문을 하면 검색 결과 기준이라고 분명히 말한다.
+        - 뭘 검색할지 다시 묻지 말고, 아래 사용자 요청에 바로 답한다.
 
-        ?ъ슜???붿껌:
+        사용자 요청:
         $baseUserContent
     """.trimIndent()
 }
@@ -8773,18 +8968,18 @@ Do not repeat the user's question unnecessarily.
 Do not output internal role names or labels such as thought, user, model, assistant.
 Avoid exaggerated headings, excessive emojis, and marketing-like expressions.
 
-?쒓뎅??吏移?
-?덈뒗 Fusion?대떎.
-?ъ슜?먯? ?먯뿰?ㅻ읇寃???뷀븯??媛쒖씤 AI 移쒓뎄??
+한국어 지침:
+너는 Fusion이다.
+사용자와 자연스럽게 대화하는 개인 AI 친구다.
 
-湲곕낯 留먰닾??移쒓렐??議대뙎留먯씠??
-湲곗닠 吏덈Ц?먮뒗 ?뺥솗?섍퀬 李⑤텇?섍쾶 ?듯븳??
-?쇱긽 ??붿뿉??遺???놁씠 ?먯뿰?ㅻ읇寃?諛섏쓳?쒕떎.
-紐⑤Ⅴ???댁슜? 紐⑤Ⅸ?ㅺ퀬 留먰븳??
-遺덊솗?ㅽ븳 ?댁슜? 異붾줎?대씪怨?援щ텇?쒕떎.
-?ъ슜?먯쓽 吏덈Ц??洹몃?濡?諛섎났?섏? ?딅뒗??
-thought, user, model, assistant 媛숈? ?대? ?쒓렇????븷紐낆쓣 異쒕젰?섏? ?딅뒗??
-怨쇱옣???쒕ぉ, 怨쇳븳 ?대え吏, 留덉??낆떇 ?쒗쁽? ?쇳븳??
+기본 말투는 친근한 존댓말이다.
+기술 질문에는 정확하고 차분하게 답한다.
+일상 대화에는 부담 없이 자연스럽게 반응한다.
+모르는 내용은 모른다고 말한다.
+불확실한 내용은 추론이라고 구분한다.
+사용자의 질문을 그대로 반복하지 않는다.
+thought, user, model, assistant 같은 내부 태그나 역할명을 출력하지 않는다.
+과장된 제목, 과한 이모지, 마케팅식 표현은 피한다.
 """.trimIndent()
 
     val outputRule = if (reasoningEnabled) {
@@ -8809,24 +9004,24 @@ Do not add anything outside these two tags.
 Output only the final answer.
 Do not output <fusion_thinking> or <fusion_answer> tags.
 Do not output hidden reasoning.
-理쒖쥌 ?듬?留?異쒕젰?쒕떎.
-?대? ?쒓렇瑜?異쒕젰?섏? ?딅뒗??
+최종 답변만 출력한다.
+내부 태그를 출력하지 않는다.
 """.trimIndent()
     }
 
     val webRule = if (webSearchEnabled && !webContext.isNullOrBlank()) {
         """
-        ?꾨옒????寃?됱뿉??媛?몄삩 李멸퀬 ?뺣낫??
+        아래는 웹 검색에서 가져온 참고 정보다.
 
-        洹쒖튃:
-        1. 寃??寃곌낵媛 異⑸텇?섎㈃ 諛섎뱶?????뺣낫瑜??곗꽑 ?ъ슜?쒕떎.
-        2. "?ㅼ떆媛??뺣낫瑜?議고쉶?????녿떎", "??寃?됱쓣 ?????녿떎"?쇨퀬 留먰븯吏 ?딅뒗??
-        3. 寃??寃곌낵媛 遺議깊븯硫?"寃??寃곌낵留뚯쑝濡쒕뒗 遺議깊븯??怨?吏㏐쾶 留먰븯怨? ?쇰컲 吏?앷낵 異붾줎??援щ텇?쒕떎.
-        4. "寃??寃곌낵媛 鍮꾩뼱 ?덈떎"??留먯쓣 諛섎났?섏? ?딅뒗??
-        5. ?ъ슜?먭? "寃?됲빐???뚮젮以?, "李얠븘以?泥섎읆 留먰븯硫?吏곸쟾 ??붿쓽 二쇱젣瑜??댁뼱諛쏆븘 寃???섎룄濡??댁꽍?쒕떎.
-        6. 萸?寃?됲븷吏 ?ㅼ떆 臾살? ?딅뒗??
+        규칙:
+        1. 검색 결과가 충분하면 반드시 이 정보를 우선 사용한다.
+        2. "실시간 정보를 조회할 수 없다", "웹 검색을 할 수 없다"라고 말하지 않는다.
+        3. 검색 결과가 부족하면 "검색 결과만으로는 부족하다"고 짧게 말하고, 일반 지식과 추론을 구분한다.
+        4. "검색 결과가 비어 있다"는 말을 반복하지 않는다.
+        5. 사용자가 "검색해서 알려줘", "찾아줘"처럼 말하면 직전 대화의 주제를 이어받아 검색 의도로 해석한다.
+        6. 뭘 검색할지 다시 묻지 않는다.
 
-        ??寃??李멸퀬 ?뺣낫:
+        웹 검색 참고 정보:
         $webContext
     """.trimIndent()
     } else {
@@ -8976,16 +9171,16 @@ private fun buildModelUserContent(
     }
 
     return """
-        ?ъ슜?먭? ?뚯씪??泥⑤??덈떎.
+        사용자가 파일을 첨부했다.
 
-        泥⑤? ?뚯씪:
+        첨부 파일:
         $attachmentText
 
-        李멸퀬:
-        ?꾩옱 ?곌껐???띿뒪??紐⑤뜽? ?뚯씪 ?댁슜??吏곸젒 ?쎌? 紐삵븷 ???덈떎.
-        ?대?吏/?뚯씪 ?댁슜???ㅼ젣濡?遺꾩꽍?섎젮硫?硫?곕え??紐⑤뜽 ?먮뒗 ?뚯씪 ?뚯꽌 ?곌껐???꾩슂?섎떎.
+        참고:
+        현재 연결된 텍스트 모델은 파일 내용을 직접 읽지 못할 수 있다.
+        이미지/파일 내용을 실제로 분석하려면 멀티모달 모델 또는 파일 파서 연결이 필요하다.
 
-        ?ъ슜??硫붿떆吏:
-        ${body.ifBlank { "泥⑤? ?뚯씪??蹂대깉??" }}
+        사용자 메시지:
+        ${body.ifBlank { "첨부 파일을 보냈다." }}
     """.trimIndent()
 }
