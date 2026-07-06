@@ -238,7 +238,7 @@ object FusionWebSearch {
         var bestQuality = currentBestQuality
         var debug: String? = null
 
-        val firstAlternate = plan.alternateQueries.firstOrNull()
+        val firstAlternate = plan.alternateQueries.take(MaxAutoAlternateQueriesPerProvider).firstOrNull()
         if (firstAlternate != null) {
             val freeAlt = searchFreeDefault(firstAlternate, plan.intent)
             val freeAltQuality = evaluateResultQuality(freeAlt.results, firstAlternate, plan.intent, freeAlt.traces.lastOrNull())
@@ -248,13 +248,17 @@ object FusionWebSearch {
                     fallbackReason = if (freeAltQuality.shouldTryFallback) freeAltQuality.reasons.joinToString("; ") else "free alternate query"
                 )
             }
+            if (freeAltQuality.isUsable) {
+                return SearchSelection(
+                    results = freeAlt.results,
+                    quality = freeAltQuality,
+                    debugMessage = "무료 기본 검색에서 대체 검색어를 사용했습니다."
+                )
+            }
             if (freeAltQuality.score > bestQuality.score) {
                 bestResults = freeAlt.results
                 bestQuality = freeAltQuality
                 debug = "무료 기본 검색에서 대체 검색어를 사용했습니다."
-            }
-            if (freeAltQuality.isUsable) {
-                return SearchSelection(bestResults, bestQuality, debug)
             }
         }
 
@@ -276,13 +280,17 @@ object FusionWebSearch {
                     fallbackReason = if (apiPrimaryQuality.shouldTryFallback) apiPrimaryQuality.reasons.joinToString("; ") else "api primary query"
                 )
             }
+            if (apiPrimaryQuality.isUsable) {
+                return SearchSelection(
+                    results = apiPrimary.results,
+                    quality = apiPrimaryQuality,
+                    debugMessage = "자동 모드에서 ${provider.displayName} 제공자를 사용했습니다."
+                )
+            }
             if (apiPrimaryQuality.score > bestQuality.score) {
                 bestResults = apiPrimary.results
                 bestQuality = apiPrimaryQuality
                 debug = "자동 모드에서 ${provider.displayName} 제공자를 사용했습니다."
-            }
-            if (apiPrimaryQuality.isUsable) {
-                return SearchSelection(bestResults, bestQuality, debug)
             }
 
             if (firstAlternate != null) {
@@ -294,13 +302,17 @@ object FusionWebSearch {
                         fallbackReason = if (apiAltQuality.shouldTryFallback) apiAltQuality.reasons.joinToString("; ") else "api alternate query"
                     )
                 }
+                if (apiAltQuality.isUsable) {
+                    return SearchSelection(
+                        results = apiAlt.results,
+                        quality = apiAltQuality,
+                        debugMessage = "자동 모드에서 ${provider.displayName} 제공자와 대체 검색어를 사용했습니다."
+                    )
+                }
                 if (apiAltQuality.score > bestQuality.score) {
                     bestResults = apiAlt.results
                     bestQuality = apiAltQuality
                     debug = "자동 모드에서 ${provider.displayName} 제공자와 대체 검색어를 사용했습니다."
-                }
-                if (apiAltQuality.isUsable) {
-                    return SearchSelection(bestResults, bestQuality, debug)
                 }
             }
         }
