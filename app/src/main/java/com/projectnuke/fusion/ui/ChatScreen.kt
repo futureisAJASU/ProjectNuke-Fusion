@@ -144,6 +144,7 @@ import com.projectnuke.fusion.util.collectFusionSocInfo
 import com.projectnuke.fusion.util.fusionNpuCandidateLabel
 import com.projectnuke.fusion.util.fusionNpuNoteText
 import com.projectnuke.fusion.util.fusionNpuNoteTitle
+import com.projectnuke.fusion.util.FusionMemoryManager
 import java.io.File
 import java.net.URL
 import java.net.URLEncoder
@@ -734,12 +735,19 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val engine = remember { FusionRuntimeManager.sharedEngine(context) }
     DisposableEffect(engine) {
-        val unregister = FusionRuntimeLock.registerChatEngineUnloadCallback {
+        val unregisterExclusive = FusionRuntimeLock.registerChatEngineUnloadCallback {
             Log.i("FusionEngine", "Unloading chat engine for exclusive benchmark mode")
             FusionRuntimeManager.unloadSharedEngineAfterExclusive("exclusive_prepare")
         }
+        val unregisterIdle = FusionMemoryManager.registerIdleEngineUnloader {
+            Log.i("FusionMemory", "Requesting idle shared engine unload from chat screen")
+            scope.launch {
+                FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("chat_memory_pressure")
+            }
+        }
         onDispose {
-            unregister()
+            unregisterExclusive()
+            unregisterIdle()
         }
     }
 

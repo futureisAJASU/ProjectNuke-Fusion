@@ -24,6 +24,39 @@ fun buildFusionDeveloperLogSnapshot(
     benchmarkResults: List<BenchmarkResultEntity>,
     events: List<FusionDeveloperLogEvent>
 ): FusionDeveloperLogSnapshot {
+    val abTestHistory = ModelAbTestHistoryStore.load(context)
+    return buildFusionDeveloperLogSnapshotFromHistory(
+        context = context,
+        prefs = prefs,
+        benchmarkResults = benchmarkResults,
+        events = events,
+        abTestHistory = abTestHistory
+    )
+}
+
+suspend fun buildFusionDeveloperLogSnapshotAsync(
+    context: Context,
+    prefs: SharedPreferences,
+    benchmarkResults: List<BenchmarkResultEntity>,
+    events: List<FusionDeveloperLogEvent>
+): FusionDeveloperLogSnapshot {
+    val abTestHistory = ModelAbTestHistoryStore.loadAsync(context)
+    return buildFusionDeveloperLogSnapshotFromHistory(
+        context = context,
+        prefs = prefs,
+        benchmarkResults = benchmarkResults,
+        events = events,
+        abTestHistory = abTestHistory
+    )
+}
+
+fun buildFusionDeveloperLogSnapshotFromHistory(
+    context: Context,
+    prefs: SharedPreferences,
+    benchmarkResults: List<BenchmarkResultEntity>,
+    events: List<FusionDeveloperLogEvent>,
+    abTestHistory: List<StoredAbTestSession>
+): FusionDeveloperLogSnapshot {
     val selectedModel = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
     val selectedModelPath = prefs.getString("selected_model_path", null)
     val accelerator = prefs.getString("accelerator", "GPU") ?: "GPU"
@@ -47,7 +80,6 @@ fun buildFusionDeveloperLogSnapshot(
     val savedMemories = loadAllConversationMemoryCandidates(context)
     val savedSummaries = loadAllConversationSummaries(context)
     val memoryContext = buildSavedMemoryContext(context, prefs, currentConversationId = null)
-    val abTestHistory = ModelAbTestHistoryStore.load(context)
     val latestAbTest = abTestHistory.firstOrNull()
     val abTestStatus = buildString {
         appendLine("A/B 테스트 기록 수: ${abTestHistory.size}개")

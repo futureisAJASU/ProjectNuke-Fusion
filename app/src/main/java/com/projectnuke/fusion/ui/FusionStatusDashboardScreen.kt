@@ -17,6 +17,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipboardManager
@@ -55,8 +59,18 @@ fun FusionStatusDashboardDialog(
     benchmarkResults: List<BenchmarkResultEntity>,
     onDismiss: () -> Unit
 ) {
-    val snapshot = remember(context, benchmarkResults) {
-        buildFusionStatusDashboardSnapshot(context, prefs, benchmarkResults)
+    var abHistoryState by remember { mutableStateOf<List<StoredAbTestSession>?>(null) }
+    LaunchedEffect(context) {
+        abHistoryState = ModelAbTestHistoryStore.loadAsync(context)
+    }
+
+    val abHistory = abHistoryState
+    val snapshot = remember(context, benchmarkResults, abHistory) {
+        if (abHistory != null) {
+            buildFusionStatusDashboardSnapshot(context, prefs, benchmarkResults, abHistory)
+        } else {
+            null
+        }
     }
 
     AlertDialog(
@@ -70,23 +84,32 @@ fun FusionStatusDashboardDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 StatusCard("상태 대시보드", "Fusion의 현재 실행 상태를 요약합니다.")
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    item { StatusCard("현재 모델", snapshot.modelText) }
-                    item { StatusCard("메모리", snapshot.memoryText) }
-                    item { StatusCard("성능", snapshot.performanceText) }
-                    item { StatusCard("기기", snapshot.deviceText) }
-                    item { StatusCard("앱", snapshot.appText) }
+                if (snapshot == null) {
+                    StatusCard("상태 정보", "상태 정보를 불러오는 중입니다.")
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        item { StatusCard("현재 모델", snapshot.modelText) }
+                        item { StatusCard("메모리", snapshot.memoryText) }
+                        item { StatusCard("성능", snapshot.performanceText) }
+                        item { StatusCard("기기", snapshot.deviceText) }
+                        item { StatusCard("앱", snapshot.appText) }
+                    }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                clipboard.setText(AnnotatedString(snapshot.copyText))
-                Toast.makeText(context, "상태 정보를 복사했습니다.", Toast.LENGTH_SHORT).show()
-            }) { Text("상태 복사", color = StatusAccentBlue) }
+            TextButton(
+                enabled = snapshot != null,
+                onClick = {
+                    snapshot?.let {
+                        clipboard.setText(AnnotatedString(it.copyText))
+                        Toast.makeText(context, "상태 정보를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            ) { Text("상태 복사", color = if (snapshot != null) StatusAccentBlue else StatusTextSecondary) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("닫기", color = StatusTextSecondary) }
@@ -125,7 +148,8 @@ private fun StatusCard(title: String, body: String) {
 private fun buildFusionStatusDashboardSnapshot(
     context: Context,
     prefs: SharedPreferences,
-    benchmarkResults: List<BenchmarkResultEntity>
+    benchmarkResults: List<BenchmarkResultEntity>,
+    abHistory: List<StoredAbTestSession>
 ): FusionStatusDashboardSnapshot {
     val selectedModel = prefs.getString("selected_model", null)
     val selectedModelPath = prefs.getString("selected_model_path", null)
@@ -143,7 +167,7 @@ private fun buildFusionStatusDashboardSnapshot(
     val memoryContext = buildSavedMemoryContext(context, prefs, currentConversationId = null, globalPreviewOnly = true)
     val benchmarkHistory = benchmarkResults.sortedByDescending { it.createdAt }
     val latestBenchmark = benchmarkHistory.firstOrNull()
-    val abHistory = ModelAbTestHistoryStore.load(context)
+
     val latestAb = abHistory.firstOrNull()
     val socInfo = collectFusionSocInfo()
     val memorySnapshot = FusionMemoryManager.getMemorySnapshot(context)

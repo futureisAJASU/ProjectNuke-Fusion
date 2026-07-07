@@ -19,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,14 +48,16 @@ fun DeveloperLogDialog(
     var refreshKey by remember { mutableStateOf(0) }
     var showClearConfirm by remember { mutableStateOf(false) }
     val events = remember(refreshKey) { FusionDeveloperLogStore.load(context) }
-    val snapshot = remember(refreshKey, benchmarkResults) {
-        buildFusionDeveloperLogSnapshot(
+    var snapshotState by remember { mutableStateOf<FusionDeveloperLogSnapshot?>(null) }
+    LaunchedEffect(refreshKey, benchmarkResults, events) {
+        snapshotState = buildFusionDeveloperLogSnapshotAsync(
             context = context,
             prefs = prefs,
             benchmarkResults = benchmarkResults,
             events = events
         )
     }
+    val snapshot = snapshotState
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -66,30 +69,38 @@ fun DeveloperLogDialog(
                     .heightIn(max = 620.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    item { DeveloperSectionCard("현재 상태", snapshot.fullLogText, 0, 7) }
-                    item { DeveloperSectionCard("모델", snapshot.fullLogText, 8, 13) }
-                    item { DeveloperSectionCard("메모리", snapshot.fullLogText, 14, 18) }
-                    item { DeveloperPlainCard("저장된 메모리", snapshot.memoryStatusText) }
-                    item { DeveloperPlainCard("A/B 테스트", snapshot.abTestStatusText) }
-                    item { DeveloperSectionCard("최근 오류", snapshot.fullLogText, 36, 56) }
-                    item { DeveloperSectionCard("벤치마크", snapshot.fullLogText, 19, 23) }
-                    item { DeveloperSectionCard("설정", snapshot.fullLogText, 24, 27) }
+                if (snapshot == null) {
+                    DeveloperPlainCard("개발자 로그", "로그 정보를 불러오는 중입니다...")
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        item { DeveloperSectionCard("현재 상태", snapshot.fullLogText, 0, 7) }
+                        item { DeveloperSectionCard("모델", snapshot.fullLogText, 8, 13) }
+                        item { DeveloperSectionCard("메모리", snapshot.fullLogText, 14, 18) }
+                        item { DeveloperPlainCard("저장된 메모리", snapshot.memoryStatusText) }
+                        item { DeveloperPlainCard("A/B 테스트", snapshot.abTestStatusText) }
+                        item { DeveloperSectionCard("최근 오류", snapshot.fullLogText, 36, 56) }
+                        item { DeveloperSectionCard("벤치마크", snapshot.fullLogText, 19, 23) }
+                        item { DeveloperSectionCard("설정", snapshot.fullLogText, 24, 27) }
+                    }
                 }
 
                 DeveloperLogActionFooter(
                     onCopyLog = {
-                        clipboard.setText(AnnotatedString(snapshot.fullLogText))
-                        Toast.makeText(context, "개발자 로그를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                        snapshot?.let {
+                            clipboard.setText(AnnotatedString(it.fullLogText))
+                            Toast.makeText(context, "개발자 로그를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onCopyErrorReport = {
-                        clipboard.setText(AnnotatedString(snapshot.errorReportText))
-                        Toast.makeText(context, "오류 보고서를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                        snapshot?.let {
+                            clipboard.setText(AnnotatedString(it.errorReportText))
+                            Toast.makeText(context, "오류 보고서를 복사했습니다.", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     onClear = { showClearConfirm = true },
                     onDismiss = onDismiss
