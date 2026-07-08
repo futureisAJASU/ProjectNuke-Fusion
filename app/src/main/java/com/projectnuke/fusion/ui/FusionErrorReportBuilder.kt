@@ -18,22 +18,6 @@ data class FusionDeveloperLogSnapshot(
     val abTestStatusText: String
 )
 
-fun buildFusionDeveloperLogSnapshot(
-    context: Context,
-    prefs: SharedPreferences,
-    benchmarkResults: List<BenchmarkResultEntity>,
-    events: List<FusionDeveloperLogEvent>
-): FusionDeveloperLogSnapshot {
-    val abTestHistory = ModelAbTestHistoryStore.load(context)
-    return buildFusionDeveloperLogSnapshotFromHistory(
-        context = context,
-        prefs = prefs,
-        benchmarkResults = benchmarkResults,
-        events = events,
-        abTestHistory = abTestHistory
-    )
-}
-
 suspend fun buildFusionDeveloperLogSnapshotAsync(
     context: Context,
     prefs: SharedPreferences,
