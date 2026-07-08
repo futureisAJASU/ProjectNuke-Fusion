@@ -14,6 +14,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,7 +44,8 @@ internal fun GenerationModeSelector(
     externalProviders: List<AiProviderConfig>,
     enabled: Boolean,
     onModeSelected: (ChatGenerationMode) -> Unit,
-    onExternalProviderSelected: (String) -> Unit
+    onExternalProviderSelected: (String) -> Unit,
+    onOpenApiSettings: () -> Unit
 ) {
     var providerExpanded by remember { mutableStateOf(false) }
     val runnableProviders = externalProviders.filter(::isRunnableExternalProvider)
@@ -88,23 +90,65 @@ internal fun GenerationModeSelector(
                     shape = RoundedCornerShape(8.dp),
                     color = SelectorPanelBg
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = providerLabel,
-                            color = if (runnableProviders.isEmpty()) SelectorTextSecondary else SelectorTextPrimary,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Text(
-                            text = if (runnableProviders.isEmpty()) "설정 필요" else "변경",
-                            color = SelectorTextSecondary,
-                            fontSize = 12.sp
-                        )
+                    if (runnableProviders.isEmpty()) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Text(
+                                    text = providerLabel,
+                                    color = SelectorTextPrimary,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "사용할 외부 AI 제공자를 설정해 주세요.",
+                                    color = SelectorTextSecondary,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            TextButton(
+                                enabled = enabled,
+                                onClick = onOpenApiSettings,
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                    horizontal = 10.dp,
+                                    vertical = 4.dp
+                                )
+                            ) {
+                                Text(
+                                    text = "API 설정",
+                                    fontSize = 12.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = providerLabel,
+                                color = SelectorTextPrimary,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "변경",
+                                color = SelectorTextSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
 
@@ -113,37 +157,24 @@ internal fun GenerationModeSelector(
                     onDismissRequest = { providerExpanded = false },
                     containerColor = SelectorMenuBg
                 ) {
-                    if (runnableProviders.isEmpty()) {
+                    runnableProviders.forEach { provider ->
+                        val selected = provider.id == selectedProviderId
                         DropdownMenuItem(
                             text = {
                                 Text(
-                                    text = "사용 가능한 외부 AI API 제공자가 없습니다.",
-                                    color = SelectorTextSecondary
+                                    text = buildString {
+                                        if (selected) append("선택됨 · ")
+                                        append("API: ")
+                                        append(provider.displayName)
+                                    },
+                                    color = if (selected) SelectorTextPrimary else SelectorTextSecondary
                                 )
                             },
-                            onClick = {},
-                            enabled = false
+                            onClick = {
+                                providerExpanded = false
+                                onExternalProviderSelected(provider.id)
+                            }
                         )
-                    } else {
-                        runnableProviders.forEach { provider ->
-                            val selected = provider.id == selectedProviderId
-                            DropdownMenuItem(
-                                text = {
-                                    Text(
-                                        text = buildString {
-                                            if (selected) append("선택됨 · ")
-                                            append("API: ")
-                                            append(provider.displayName)
-                                        },
-                                        color = if (selected) SelectorTextPrimary else SelectorTextSecondary
-                                    )
-                                },
-                                onClick = {
-                                    providerExpanded = false
-                                    onExternalProviderSelected(provider.id)
-                                }
-                            )
-                        }
                     }
                 }
             }

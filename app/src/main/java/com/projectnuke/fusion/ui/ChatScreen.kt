@@ -1563,6 +1563,9 @@ fun ChatScreen(
                         selectedProviderId = selectedExternalProviderId,
                         externalProviders = externalProviders,
                         enabled = !isGenerating,
+                        onOpenApiSettings = {
+                            showAdvancedSettingsDialog = true
+                        },
                         onModeSelected = { mode ->
                             generationMode = mode
                             settingsPrefs.edit().putString(PrefGenerationMode, mode.name).apply()
