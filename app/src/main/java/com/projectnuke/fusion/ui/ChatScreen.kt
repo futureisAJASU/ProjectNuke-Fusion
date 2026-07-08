@@ -118,6 +118,7 @@ import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibility
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
+import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryRiskLevel
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
@@ -1593,6 +1594,7 @@ fun ChatScreen(
                     isGenerating = isGenerating,
                     pendingAttachments = pendingAttachments,
                     onRemoveAttachment = { attachment ->
+                        AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
                         pendingAttachments.remove(attachment)
                     },
                     onAppendQuickPrompt = { preset ->
@@ -1647,6 +1649,7 @@ fun ChatScreen(
 
                             scope.launch {
                                 var activeConversationId = conversationId
+                                var userMessageInserted = false
 
                                 try {
                                     val now = System.currentTimeMillis()
@@ -1673,6 +1676,10 @@ fun ChatScreen(
                                             createdAt = now
                                         )
                                     )
+                                    userMessageInserted = true
+                                    attachmentsToSend.forEach { attachment ->
+                                        AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
+                                    }
 
                                     dao.updateConversationTime(activeConversationId, now)
 
@@ -2064,6 +2071,23 @@ fun ChatScreen(
                                     )
                                     pendingAttachments.clear()
                                 } catch (e: Exception) {
+                                    if (!userMessageInserted && attachmentsToSend.isNotEmpty()) {
+                                        attachmentsToSend.forEach { attachment ->
+                                            val deleted = AttachmentStorageManager.deletePendingAttachmentFile(
+                                                context = context,
+                                                path = attachment.localPath
+                                            )
+                                            if (!deleted) {
+                                                AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
+                                            }
+                                        }
+                                        DeveloperLogStore.record(
+                                            context,
+                                            "attachment",
+                                            "첨부 파일 저장 롤백",
+                                            "count=${attachmentsToSend.size}, error=${e::class.java.simpleName}"
+                                        )
+                                    }
                                     Log.e("FusionEngine", "Chat generation failed", e)
                                     if (e is BenchmarkRunningException) {
                                         Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
@@ -2586,7 +2610,7 @@ fun ChatScreen(
                                 dao.deleteConversation(conversationId)
                             }
                             input = ""
-                            pendingAttachments.clear()
+                            clearPendingAttachmentDrafts(pendingAttachments)
                             streamingAssistantText = null
                             streamingMetricsLine = null
                             generationStatus = null
@@ -9044,9 +9068,7 @@ Do not output hidden reasoning.
         .joinToString("\n\n")
 }
 private fun getAttachmentDirectory(context: Context): File {
-    return (context.getExternalFilesDir("attachments") ?: File(context.filesDir, "attachments")).apply {
-        if (!exists()) mkdirs()
-    }
+    return AttachmentStorageManager.getAttachmentDirectory(context)
 }
 
 private suspend fun copyUriToAttachmentFile(
@@ -9072,6 +9094,7 @@ private suspend fun copyUriToAttachmentFile(
             } ?: return@withContext null
 
             if (outputFile.exists() && outputFile.length() > 0L) {
+                AttachmentStorageManager.registerPendingAttachment(outputFile)
                 outputFile
             } else {
                 null
@@ -9080,6 +9103,13 @@ private suspend fun copyUriToAttachmentFile(
             null
         }
     }
+}
+
+private fun clearPendingAttachmentDrafts(pendingAttachments: MutableList<LocalAttachment>) {
+    pendingAttachments.forEach { attachment ->
+        AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
+    }
+    pendingAttachments.clear()
 }
 
 private fun buildMessageContentWithAttachments(
