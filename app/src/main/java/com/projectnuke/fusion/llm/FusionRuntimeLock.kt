@@ -5,18 +5,15 @@ import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
 
-/**
- * Authoritative runtime ownership model. Chat and benchmark can never both
- * own the runtime; a queued or active chat operation must not transiently
- * appear idle; a failed acquisition must not clear another operation's state;
- * cancellation/exceptions always release only the matching owner.
- */
 object FusionRuntimeLock {
     private val mutex = Mutex()
+    private val stateLock = Any()
 
-    private val ownerLock = Any()
-    private var owner: RuntimeOwner = RuntimeOwner.Idle
-    private var pendingChatCount: Int = 0
+    private var chatReservationCount: Int = 0
+    private var activeChatRequestId: String? = null
+    private var benchmarkReservation: BenchmarkReservation? = null
+
+    private class BenchmarkReservation(val runId: String, var isActive: Boolean = false)
 
     private val unloadCallbacks = CopyOnWriteArraySet<ChatEngineUnloadCallback>()
 
@@ -24,40 +21,36 @@ object FusionRuntimeLock {
         fun onUnloadRequested()
     }
 
-    /** UI-observable state derived from the authoritative owner only. */
     sealed interface RuntimeOwnerState {
         data object Idle : RuntimeOwnerState
         data class Chat(val requestId: String) : RuntimeOwnerState
+        data class ChatQueued(val count: Int) : RuntimeOwnerState
         data class Benchmark(val runId: String) : RuntimeOwnerState
-    }
-
-    private sealed interface RuntimeOwner {
-        data object Idle : RuntimeOwner
-        data class Chat(val requestId: String) : RuntimeOwner
-        data class Benchmark(val runId: String) : RuntimeOwner
+        data class BenchmarkReserved(val runId: String) : RuntimeOwnerState
     }
 
     val isChatGenerationRunning: Boolean
-        get() = synchronized(ownerLock) { owner is RuntimeOwner.Chat }
+        get() = synchronized(stateLock) { chatReservationCount > 0 }
 
     val isBenchmarkRunning: Boolean
-        get() = synchronized(ownerLock) { owner is RuntimeOwner.Benchmark }
+        get() = synchronized(stateLock) { benchmarkReservation != null }
 
-    fun ownerSnapshot(): RuntimeOwnerState = synchronized(ownerLock) {
-        when (val current = owner) {
-            RuntimeOwner.Idle -> RuntimeOwnerState.Idle
-            is RuntimeOwner.Chat -> RuntimeOwnerState.Chat(current.requestId)
-            is RuntimeOwner.Benchmark -> RuntimeOwnerState.Benchmark(current.runId)
+    fun ownerSnapshot(): RuntimeOwnerState = synchronized(stateLock) {
+        val bm = benchmarkReservation
+        if (bm != null) {
+            return@synchronized if (bm.isActive) RuntimeOwnerState.Benchmark(bm.runId)
+            else RuntimeOwnerState.BenchmarkReserved(bm.runId)
         }
+        val active = activeChatRequestId
+        if (active != null) {
+            return@synchronized RuntimeOwnerState.Chat(active)
+        }
+        if (chatReservationCount > 0) {
+            return@synchronized RuntimeOwnerState.ChatQueued(chatReservationCount)
+        }
+        RuntimeOwnerState.Idle
     }
 
-    fun pendingChatRequests(): Int = synchronized(ownerLock) { pendingChatCount }
-
-    /**
-     * Registers [callback] and returns an unregister handle. Multiple
-     * observers are supported; registering a second observer no longer
-     * discards the first.
-     */
     fun registerChatEngineUnloadCallback(callback: () -> Unit): () -> Unit {
         val wrapper = ChatEngineUnloadCallback { callback() }
         unloadCallbacks += wrapper
@@ -75,55 +68,32 @@ object FusionRuntimeLock {
 
     suspend fun <T> withLock(block: suspend () -> T): T = mutex.withLock { block() }
 
-    private fun markChatRequested(requestId: String) {
-        synchronized(ownerLock) {
-            if (owner is RuntimeOwner.Benchmark) {
-                throw BenchmarkRunningException()
-            }
-            pendingChatCount += 1
-        }
-    }
-
-    private fun promoteChatOwner(requestId: String): Boolean {
-        synchronized(ownerLock) {
-            if (owner is RuntimeOwner.Benchmark) {
-                return false
-            }
-            if (owner is RuntimeOwner.Chat &&
-                (owner as RuntimeOwner.Chat).requestId != requestId
-            ) {
-                return false
-            }
-            owner = RuntimeOwner.Chat(requestId)
-            return true
-        }
-    }
-
-    private fun releaseChatOwner(requestId: String) {
-        synchronized(ownerLock) {
-            if (owner is RuntimeOwner.Chat &&
-                (owner as RuntimeOwner.Chat).requestId == requestId
-            ) {
-                owner = RuntimeOwner.Idle
-            }
-            pendingChatCount = (pendingChatCount - 1).coerceAtLeast(0)
-        }
-    }
-
     suspend fun <T> withChatGeneration(block: suspend (String) -> T): T {
         val requestId = "chat-${UUID.randomUUID()}"
-        markChatRequested(requestId)
-        var acquired = false
+        synchronized(stateLock) {
+            if (benchmarkReservation != null) throw BenchmarkRunningException()
+            chatReservationCount++
+        }
         try {
-            mutex.withLock {
-                if (!promoteChatOwner(requestId)) {
-                    throw BenchmarkRunningException()
+            return mutex.withLock {
+                synchronized(stateLock) {
+                    if (benchmarkReservation != null) throw BenchmarkRunningException()
+                    activeChatRequestId = requestId
                 }
-                acquired = true
-                return block(requestId)
+                try {
+                    block(requestId)
+                } finally {
+                    synchronized(stateLock) {
+                        if (activeChatRequestId == requestId) {
+                            activeChatRequestId = null
+                        }
+                    }
+                }
             }
         } finally {
-            releaseChatOwner(requestId)
+            synchronized(stateLock) {
+                chatReservationCount--
+            }
         }
     }
 
@@ -132,41 +102,39 @@ object FusionRuntimeLock {
         block: suspend () -> T
     ): T {
         val runId = "benchmark-${UUID.randomUUID()}"
-        synchronized(ownerLock) {
-            if (owner is RuntimeOwner.Chat || pendingChatCount > 0) {
-                throw ChatGenerationRunningException()
-            }
-            if (owner is RuntimeOwner.Benchmark &&
-                (owner as RuntimeOwner.Benchmark).runId != runId
-            ) {
-                throw BenchmarkRunningException()
-            }
-            owner = RuntimeOwner.Benchmark(runId)
+        synchronized(stateLock) {
+            if (chatReservationCount > 0) throw ChatGenerationRunningException()
+            if (benchmarkReservation != null) throw BenchmarkRunningException()
+            benchmarkReservation = BenchmarkReservation(runId)
         }
-        var acquired = false
         try {
-            mutex.withLock {
-                synchronized(ownerLock) {
-                    if (owner is RuntimeOwner.Chat) {
+            return mutex.withLock {
+                synchronized(stateLock) {
+                    if (chatReservationCount > 0) {
+                        benchmarkReservation = null
                         throw ChatGenerationRunningException()
                     }
-                    if (owner is RuntimeOwner.Benchmark &&
-                        (owner as RuntimeOwner.Benchmark).runId != runId
-                    ) {
+                    if (benchmarkReservation?.runId != runId) {
+                        benchmarkReservation = null
                         throw BenchmarkRunningException()
                     }
-                    owner = RuntimeOwner.Benchmark(runId)
-                    acquired = true
+                    benchmarkReservation!!.isActive = true
                 }
-                onPrepareExclusiveMode()
-                return block()
+                try {
+                    onPrepareExclusiveMode()
+                    block()
+                } finally {
+                    synchronized(stateLock) {
+                        if (benchmarkReservation?.runId == runId) {
+                            benchmarkReservation = null
+                        }
+                    }
+                }
             }
         } finally {
-            synchronized(ownerLock) {
-                if (acquired && owner is RuntimeOwner.Benchmark &&
-                    (owner as RuntimeOwner.Benchmark).runId == runId
-                ) {
-                    owner = RuntimeOwner.Idle
+            synchronized(stateLock) {
+                if (benchmarkReservation?.runId == runId) {
+                    benchmarkReservation = null
                 }
             }
         }

@@ -16,6 +16,7 @@ app/build/
 *.safetensors
 *.onnx
 *.tflite
+*.bundle
 
 models/
 

@@ -728,6 +728,7 @@ fun ChatScreen(
         }
     }
 
+    val scope = rememberCoroutineScope()
     BackHandler(
         enabled = showModelDialog || showAdvancedSettingsDialog || showDeleteChatDialog || inChatSearchMode || isGenerating
     ) {
@@ -746,8 +747,6 @@ fun ChatScreen(
             }
         }
     }
-
-    val scope = rememberCoroutineScope()
     val engine = remember { FusionRuntimeManager.sharedEngine(context) }
     DisposableEffect(engine) {
         val unregisterExclusive = FusionRuntimeLock.registerChatEngineUnloadCallback {
