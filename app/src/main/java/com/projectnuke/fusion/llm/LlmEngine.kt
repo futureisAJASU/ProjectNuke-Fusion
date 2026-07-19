@@ -8,20 +8,22 @@ interface LlmEngine {
         messages: List<ChatMessage>,
         modelPath: String,
         settings: GenerationSettings
-    ): String
+    ): GenerationOutcome
 
     suspend fun generateStreaming(
         messages: List<ChatMessage>,
         modelPath: String,
         settings: GenerationSettings,
         onToken: (String) -> Unit
-    ): String {
+    ): GenerationOutcome {
         val output = generate(
             messages = messages,
             modelPath = modelPath,
             settings = settings
         )
-        onToken(output)
+        if (output is GenerationOutcome.Success) {
+            onToken(output.text)
+        }
         return output
     }
 
@@ -31,8 +33,16 @@ interface LlmEngine {
         settings: GenerationSettings,
         imagePaths: List<String>,
         onToken: (String) -> Unit
-    ): String {
-        return "이미지 입력 처리 실패: 현재 LiteRT-LM 엔진이 이미지 입력을 지원하지 않습니다."
+    ): GenerationOutcome {
+        val outcome = generate(
+            messages = messages,
+            modelPath = modelPath,
+            settings = settings
+        )
+        if (outcome is GenerationOutcome.Success) {
+            onToken(outcome.text)
+        }
+        return outcome
     }
 
     fun unload()

@@ -21,6 +21,7 @@ object FusionRuntimeManager {
             if (FusionRuntimeLock.isChatGenerationRunning || FusionRuntimeLock.isBenchmarkRunning) return
             runCatching {
                 sharedEngine?.unload()
+                sharedEngine = null
             }.onFailure {
                 Log.e("FusionEngine", "Failed to unload shared engine while idle: $reason", it)
             }
@@ -34,6 +35,7 @@ object FusionRuntimeManager {
             synchronized(lock) {
                 runCatching {
                     sharedEngine?.unload()
+                    sharedEngine = null
                 }.onFailure {
                     Log.e("FusionEngine", "Failed to unload shared engine while runtime idle: $reason", it)
                 }
@@ -45,6 +47,7 @@ object FusionRuntimeManager {
         synchronized(lock) {
             runCatching {
                 sharedEngine?.unload()
+                sharedEngine = null
             }.onFailure {
                 Log.e("FusionEngine", "Failed to unload shared engine after exclusive run: $reason", it)
             }
@@ -55,6 +58,7 @@ object FusionRuntimeManager {
         synchronized(lock) {
             runCatching {
                 sharedEngine?.unload()
+                sharedEngine = null
             }.onFailure {
                 Log.e("FusionEngine", "Failed to unload shared engine for active owner: $reason", it)
             }

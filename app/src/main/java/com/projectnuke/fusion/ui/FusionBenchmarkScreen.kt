@@ -39,6 +39,7 @@ import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.llm.ChatGenerationRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
+import com.projectnuke.fusion.llm.GenerationOutcome
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
@@ -280,7 +281,7 @@ private suspend fun runBenchmark(
             var firstTokenMs: Long? = null
             val output = StringBuilder()
             onStatus("응답을 생성하는 중입니다.")
-            engine.generateStreaming(
+            val outcome = engine.generateStreaming(
                 messages = listOf(ChatMessage("user", FusionBenchmarkPrompt)),
                 modelPath = snapshot.modelPath.orEmpty(),
                 settings = snapshot.settings,
@@ -293,11 +294,25 @@ private suspend fun runBenchmark(
             )
 
             val totalMs = SystemClock.elapsedRealtime() - start
-            val text = output.toString().replace(Regex("""</?fusion_(thinking|answer|metrics)>"""), "").trim()
-            output.clear()
-            if (looksLikeBenchmarkLiteRtFailure(text)) {
-                throw IllegalStateException("Benchmark LiteRT generation failed")
+            when (outcome) {
+                is GenerationOutcome.Cancelled, GenerationOutcome.Empty, is GenerationOutcome.Failure -> {
+                    val reason = when (outcome) {
+                        is GenerationOutcome.Failure -> "generation failed: ${outcome.kind}"
+                        is GenerationOutcome.Cancelled -> "generation cancelled"
+                        GenerationOutcome.Empty -> "generation empty"
+                        is GenerationOutcome.Success -> ""
+                    }
+                    throw IllegalStateException("Benchmark LiteRT generation failed: $reason")
+                }
+                is GenerationOutcome.Success -> {
+                    /* continue with success path below */
+                }
             }
+            @Suppress("UNUSED_VARIABLE") val success = outcome as GenerationOutcome.Success
+            val text = success.text
+                .replace(Regex("""</?fusion_(thinking|answer|metrics)>"""), "")
+                .trim()
+            output.clear()
             val estimatedTokens = estimateBenchmarkTokens(text)
             val totalTps = if (totalMs > 0) estimatedTokens * 1000.0 / totalMs else 0.0
             val decodeMs = firstTokenMs?.let { totalMs - it }?.takeIf { it > 0 }
@@ -354,13 +369,14 @@ private suspend fun runBenchmark(
                 onStatus("벤치마크가 완료되었습니다.")
             } finally {
                 FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_after_run")
-                System.gc()
             }
         }
     } catch (e: ChatGenerationRunningException) {
         Log.i("FusionBenchmark", "Benchmark blocked because chat generation is running")
         onStatus(null)
         Toast.makeText(context, "현재 응답을 생성하는 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
     } catch (e: Exception) {
         Log.e("FusionBenchmark", "Benchmark generation failed", e)
         Log.e("FusionEngine", "모델 설정을 적용할 수 없습니다.", e)
@@ -389,7 +405,6 @@ private suspend fun runBenchmark(
         }
     } finally {
         FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("benchmark_final_cleanup")
-        System.gc()
         onFinished()
     }
 }
@@ -440,11 +455,7 @@ private suspend fun saveBenchmarkResult(
     )
 }
 
-private fun looksLikeBenchmarkLiteRtFailure(text: String): Boolean {
-    return text.contains("Failed to create engine", ignoreCase = true) ||
-        text.contains("litert_compiled_model", ignoreCase = true) ||
-        text.contains("LiteRT-LM", ignoreCase = true) && text.contains("INTERNAL", ignoreCase = true)
-}
+private fun looksLikeBenchmarkLiteRtFailure(@Suppress("UNUSED_PARAMETER") text: String): Boolean = false
 
 private fun buildAppliedBenchmarkSettingsLine(
     snapshot: BenchmarkSnapshot,

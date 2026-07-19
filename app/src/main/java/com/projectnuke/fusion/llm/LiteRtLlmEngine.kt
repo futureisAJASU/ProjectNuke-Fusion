@@ -16,10 +16,12 @@ import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 
 @OptIn(ExperimentalApi::class)
 class LiteRtLlmEngine(
@@ -36,7 +38,7 @@ class LiteRtLlmEngine(
         messages: List<ChatMessage>,
         modelPath: String,
         settings: GenerationSettings
-    ): String {
+    ): GenerationOutcome {
         return generateStreaming(
             messages = messages,
             modelPath = modelPath,
@@ -50,20 +52,48 @@ class LiteRtLlmEngine(
         modelPath: String,
         settings: GenerationSettings,
         onToken: (String) -> Unit
-    ): String {
+    ): GenerationOutcome {
         return withContext(Dispatchers.IO) {
             val modelFile = File(modelPath)
-
             if (!modelFile.exists()) {
                 Log.e("FusionEngine", "Selected model file does not exist: $modelPath")
-                return@withContext "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_NOT_FOUND,
+                    message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                )
             }
 
-            val engine = getOrCreateEngine(
-                modelPath = modelFile.absolutePath,
-                settings = settings,
-                enableVisionBackend = false
-            )
+            val engine = try {
+                getOrCreateEngine(
+                    modelPath = modelFile.absolutePath,
+                    settings = settings,
+                    enableVisionBackend = false
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                lastMtpStatus = MtpRuntimeStatus.OFF
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "메모리가 부족하여 모델을 불러올 수 없어요."
+                )
+            } catch (e: VirtualMachineError) {
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                )
+            } catch (e: LinkageError) {
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                )
+            } catch (e: Exception) {
+                Log.e("FusionEngine", "LiteRT-LM engine init failed", e)
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                )
+            }
             logGenerationSettings(
                 modelPath = modelFile.absolutePath,
                 settings = settings,
@@ -85,14 +115,12 @@ class LiteRtLlmEngine(
             )
 
             val output = StringBuilder()
-
             try {
                 engine.createConversation(conversationConfig).use { conversation ->
                     conversation
                         .sendMessageAsync(promptText)
                         .catch { throwable ->
                             Log.e("FusionEngine", "LiteRT-LM generation stream failed", throwable)
-                            output.append("\n\n모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.")
                         }
                         .collect { chunk ->
                             val token = chunk.toString()
@@ -100,13 +128,38 @@ class LiteRtLlmEngine(
                             onToken(token)
                         }
                 }
-
-                promptAdapter.sanitizeOutput(output.toString()).ifBlank {
-                    "모델 응답이 비어 있습니다."
-                }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM generation failed", e)
-                "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                val sanitized = promptAdapter.sanitizeOutput(output.toString())
+                return@withContext when {
+                    isIrrecoverableLoadException(e) -> GenerationOutcome.Failure(
+                        kind = FailureKind.MODEL_LOAD_FAILED,
+                        message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                    )
+                    e is IOException -> GenerationOutcome.Failure(
+                        kind = FailureKind.GENERATION_IO,
+                        message = "모델 응답 중 입출력 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+                    )
+                    else -> GenerationOutcome.Failure(
+                        kind = FailureKind.GENERATION_INTERRUPTED,
+                        message = "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                    )
+                }.let { outcome ->
+                    if (sanitized.isBlank()) outcome
+                    else GenerationOutcome.Failure(
+                        kind = (outcome as GenerationOutcome.Failure).kind,
+                        message = outcome.message
+                    )
+                }
+            }
+
+            val sanitized = promptAdapter.sanitizeOutput(output.toString())
+            if (sanitized.isBlank()) {
+                GenerationOutcome.Empty
+            } else {
+                GenerationOutcome.Success(text = sanitized, actualBackend = null)
             }
         }
     }
@@ -117,61 +170,96 @@ class LiteRtLlmEngine(
         settings: GenerationSettings,
         imagePaths: List<String>,
         onToken: (String) -> Unit
-    ): String {
+    ): GenerationOutcome {
         return withContext(Dispatchers.IO) {
             val modelFile = File(modelPath)
-
             if (!modelFile.exists()) {
                 Log.e("FusionEngine", "Selected model file does not exist for multimodal request: $modelPath")
-                return@withContext "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_NOT_FOUND,
+                    message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                )
             }
 
             val missingImage = imagePaths.firstOrNull { !File(it).exists() }
             if (missingImage != null) {
-                return@withContext "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n$missingImage"
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.IMAGE_NOT_FOUND,
+                    message = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다."
+                )
             }
 
-            try {
-                val engine = getOrCreateEngine(
+            val engine = try {
+                getOrCreateEngine(
                     modelPath = modelFile.absolutePath,
                     settings = settings,
                     enableVisionBackend = true
                 )
-                logGenerationSettings(
-                    modelPath = modelFile.absolutePath,
-                    settings = settings,
-                    enableVisionBackend = true
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                lastMtpStatus = MtpRuntimeStatus.OFF
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "메모리가 부족하여 모델을 불러올 수 없어요."
                 )
-
-                val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
-                val adaptedMessages = promptAdapter.buildMessages(messages)
-                val systemText = buildSystemInstruction(adaptedMessages, settings)
-                val promptText = buildPrompt(adaptedMessages)
-
-                val conversationConfig = ConversationConfig(
-                    systemInstruction = Contents.of(systemText),
-                    samplerConfig = SamplerConfig(
-                        topK = settings.topK.coerceAtLeast(1),
-                        topP = settings.topP.coerceIn(0f, 1f).toDouble(),
-                        temperature = settings.temperature.coerceAtLeast(0f).toDouble()
+            } catch (e: VirtualMachineError) {
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                )
+            } catch (e: LinkageError) {
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                )
+            } catch (e: Exception) {
+                if (isVisionBackendUnsupported(e)) {
+                    return@withContext GenerationOutcome.Failure(
+                        kind = FailureKind.MODEL_MULTIMODAL_UNSUPPORTED,
+                        message = "이 모델은 이미지 입력을 지원하지 않습니다."
                     )
-                )
-
-                val contentParts = buildList<Content> {
-                    imagePaths.forEach { imagePath ->
-                        add(Content.ImageFile(imagePath))
-                    }
-                    add(Content.Text(promptText))
                 }
+                Log.e("FusionEngine", "LiteRT-LM multimodal engine init failed", e)
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                )
+            }
+            logGenerationSettings(
+                modelPath = modelFile.absolutePath,
+                settings = settings,
+                enableVisionBackend = true
+            )
 
-                val output = StringBuilder()
+            val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
+            val adaptedMessages = promptAdapter.buildMessages(messages)
+            val systemText = buildSystemInstruction(adaptedMessages, settings)
+            val promptText = buildPrompt(adaptedMessages)
 
+            val conversationConfig = ConversationConfig(
+                systemInstruction = Contents.of(systemText),
+                samplerConfig = SamplerConfig(
+                    topK = settings.topK.coerceAtLeast(1),
+                    topP = settings.topP.coerceIn(0f, 1f).toDouble(),
+                    temperature = settings.temperature.coerceAtLeast(0f).toDouble()
+                )
+            )
+
+            val contentParts = buildList<Content> {
+                imagePaths.forEach { imagePath ->
+                    add(Content.ImageFile(imagePath))
+                }
+                add(Content.Text(promptText))
+            }
+
+            val output = StringBuilder()
+            try {
                 engine.createConversation(conversationConfig).use { conversation ->
                     conversation
                         .sendMessageAsync(Contents.of(contentParts))
                         .catch { throwable ->
                             Log.e("FusionEngine", "LiteRT-LM multimodal generation stream failed", throwable)
-                            output.append("\n\n이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요.")
                         }
                         .collect { chunk ->
                             val token = chunk.toString()
@@ -179,15 +267,37 @@ class LiteRtLlmEngine(
                             onToken(token)
                         }
                 }
-
-                promptAdapter.sanitizeOutput(output.toString()).ifBlank {
-                    "이미지 입력 처리 실패: 모델 응답이 비어 있습니다."
-                }
-            } catch (e: Throwable) {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM multimodal generation failed", e)
-                "이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                return@withContext GenerationOutcome.Failure(
+                    kind = if (isVisionBackendUnsupported(e)) FailureKind.MODEL_MULTIMODAL_UNSUPPORTED else FailureKind.GENERATION_INTERRUPTED,
+                    message = "이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                )
+            }
+
+            val sanitized = promptAdapter.sanitizeOutput(output.toString())
+            if (sanitized.isBlank()) {
+                GenerationOutcome.Empty
+            } else {
+                GenerationOutcome.Success(text = sanitized, actualBackend = null)
             }
         }
+    }
+
+    private fun isIrrecoverableLoadException(error: Throwable): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("Failed to create engine", ignoreCase = true) ||
+            message.contains("litert_compiled_model", ignoreCase = true) ||
+            message.contains("INTERNAL", ignoreCase = true)
+    }
+
+    private fun isVisionBackendUnsupported(error: Throwable): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("vision", ignoreCase = true) ||
+            message.contains("image", ignoreCase = true) ||
+            message.contains("multimodal", ignoreCase = true)
     }
 
     private fun getOrCreateEngine(
@@ -226,7 +336,7 @@ class LiteRtLlmEngine(
             Log.i("FusionLiteRT", "MTP status: $lastMtpStatus")
             Log.i("FusionLiteRT", "Backend: $backendName")
             Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
-            Log.i("FusionLiteRT", "Model path: $modelPath")
+            Log.i("FusionLiteRT", "Model path: ${File(modelPath).name}")
             return currentEngine
         }
 
@@ -242,7 +352,7 @@ class LiteRtLlmEngine(
         Log.i("FusionLiteRT", "MTP requested: $mtpRequested")
         Log.i("FusionLiteRT", "Backend: $backendName")
         Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
-        Log.i("FusionLiteRT", "Model path: $modelPath")
+        Log.i("FusionLiteRT", "Model path: ${File(modelPath).name}")
         if (mtpRequested && !mtpSupported) {
             lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
             Log.i("FusionLiteRT", "MTP unsupported model/runtime")
@@ -311,6 +421,9 @@ class LiteRtLlmEngine(
             }
         }
 
+        if (mtpEnabledForRuntime && mtpFlagApplied) {
+            lastMtpStatus = MtpRuntimeStatus.APPLIED
+        }
         engine = newEngine
         loadedKey = key
 
@@ -377,7 +490,7 @@ class LiteRtLlmEngine(
             "FusionLiteRT",
             buildString {
                 appendLine("Generation settings before request")
-                appendLine("modelPath=$modelPath")
+                appendLine("modelPath=${File(modelPath).name}")
                 appendLine("accelerator=${settings.accelerator.name} (runtime EngineConfig.backend)")
                 appendLine("maxTokens=${settings.maxTokens} (runtime EngineConfig.maxNumTokens)")
                 appendLine("topK=${settings.topK} (runtime SamplerConfig.topK)")
@@ -427,6 +540,9 @@ class LiteRtLlmEngine(
 
         engine = null
         loadedKey = null
+        runCatching {
+            configureSpeculativeDecodingFlag(false)
+        }
     }
 
     private fun isSpeculativeDecodingSupportedModel(modelPath: String): Boolean {

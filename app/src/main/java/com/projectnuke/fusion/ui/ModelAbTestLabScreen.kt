@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.llm.ChatGenerationRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.FusionRuntimeManager
+import com.projectnuke.fusion.llm.GenerationOutcome
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
@@ -488,7 +489,6 @@ private suspend fun runAbTests(
             onStatus("$label 실행 중...")
             runCatching {
                 FusionRuntimeManager.unloadSharedEngineAfterExclusive("ab_test_target_prepare")
-                System.gc()
                 delay(250L)
                 runSingleAbTarget(context, engine, prefs, prompt, label, target)
             }.onSuccess { result ->
@@ -501,6 +501,9 @@ private suspend fun runAbTests(
                     "target=$label, model=${target.model.spec.displayName}, totalMs=${result.totalGenerationMs}"
                 )
             }.onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) {
+                    throw error
+                }
                 Log.e("FusionAbTest", "Target $label failed", error)
                 val failedResult = AbResult(
                         targetLabel = label,
@@ -549,7 +552,7 @@ private suspend fun runSingleAbTarget(
     val output = StringBuilder()
     val startedAt = SystemClock.elapsedRealtime()
     var firstTokenLatencyMs: Long? = null
-    engine.generateStreaming(
+    val outcome = engine.generateStreaming(
         messages = listOf(ChatMessage("user", input)),
         modelPath = target.model.path,
         settings = target.settings,
@@ -561,7 +564,12 @@ private suspend fun runSingleAbTarget(
         }
     )
     val totalMs = SystemClock.elapsedRealtime() - startedAt
-    val answer = sanitizeAbAnswer(output.toString())
+    val answer = when (outcome) {
+        is GenerationOutcome.Success -> sanitizeAbAnswer(outcome.text)
+        is GenerationOutcome.Cancelled -> error("generation cancelled")
+        GenerationOutcome.Empty -> error("empty model response")
+        is GenerationOutcome.Failure -> error(if (outcome.message.isNotBlank()) outcome.message else "model generation failed")
+    }
     if (answer.isBlank()) error("empty model response")
     val estimatedTokens = estimateAbTokens(answer)
     val totalTps = if (totalMs > 0) estimatedTokens * 1000.0 / totalMs else 0.0

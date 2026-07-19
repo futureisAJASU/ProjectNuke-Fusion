@@ -65,6 +65,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -111,6 +112,8 @@ import com.projectnuke.fusion.data.MessageEntity
 import com.projectnuke.fusion.llm.BenchmarkRunningException
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.FusionRuntimeManager
+import com.projectnuke.fusion.llm.GenerationOutcome
+import com.projectnuke.fusion.llm.FailureKind
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
@@ -168,6 +171,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.core.content.FileProvider
+import com.projectnuke.fusion.util.FusionFileProvider
 import java.net.HttpURLConnection
 private val BlackBg = Color(0xFF000000)
 private val PanelBg = Color(0xFF171717)
@@ -571,6 +575,12 @@ fun ChatScreen(
             client = OpenAiCompatibleClient(aiSecretStore)
         )
     }
+    val chatViewModel = remember { com.projectnuke.fusion.chat.ChatViewModel() }
+    val conversationState = remember(chatViewModel) { mutableStateMapOf<Long, com.projectnuke.fusion.chat.ConversationGenerationState>() }
+    var pickerOriginConversationId by remember { mutableStateOf<Long?>(null) }
+    DisposableEffect(chatViewModel) {
+        onDispose { chatViewModel.dispose() }
+    }
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
     var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }
@@ -729,7 +739,11 @@ fun ChatScreen(
                 inChatSearchMode = false
                 inChatSearchQuery = ""
             }
-            isGenerating -> Unit
+            isGenerating -> {
+                scope.launch {
+                    chatViewModel.cancelGeneration(conversationId)
+                }
+            }
         }
     }
 
@@ -793,6 +807,41 @@ fun ChatScreen(
     }
     LaunchedEffect(conversationId) {
         memoryCandidateText = ""
+        // Isolate generation state per conversation. Restore the saved session
+        // state (if any) for this conversation; clear the in-memory stream so a
+        // switch does not show the previous conversation's tokens.
+        val saved = conversationState[conversationId]
+            ?: com.projectnuke.fusion.chat.ConversationGenerationState()
+        isGenerating = saved.isGenerating
+        streamingAssistantText = saved.streamingText
+        streamingMetricsLine = saved.streamingMetricsLine
+        generationStatus = saved.generationStatus
+        regeneratingMessageId = saved.regeneratingMessageId
+        extractingMemoryCandidates = saved.extractingMemoryCandidates
+        // If a generation is still running for another conversation but this
+        // conversation is now visible, do not show partial stream for it. This
+        // makes streams conversation-specific without blocking background runs.
+        if (!chatViewModel.registry.isActive(conversationId, saved.activeRequestId ?: "")) {
+            streamingAssistantText = null
+            streamingMetricsLine = null
+            generationStatus = null
+            isGenerating = false
+            regeneratingMessageId = null
+            extractingMemoryCandidates = false
+        }
+    }
+
+    fun persistCurrentGenerationState(forConversationId: Long) {
+        conversationState[forConversationId] = com.projectnuke.fusion.chat.ConversationGenerationState(
+            isGenerating = isGenerating,
+            activeRequestId = conversationState[forConversationId]?.activeRequestId,
+            streamingText = streamingAssistantText,
+            streamingMetricsLine = streamingMetricsLine,
+            generationStatus = generationStatus,
+            regeneratingMessageId = regeneratingMessageId,
+            extractingMemoryCandidates = extractingMemoryCandidates,
+            actualWebSearchUsed = conversationState[forConversationId]?.actualWebSearchUsed ?: false,
+        )
     }
 
     val messages = activeMessageEntities.map {
@@ -1110,7 +1159,7 @@ fun ChatScreen(
                 }
 
                 val generationStartMs = SystemClock.elapsedRealtime()
-                val rawReply = FusionRuntimeLock.withChatGeneration {
+                val rawOutcome = FusionRuntimeLock.withChatGeneration {
                     generateWithLiteRtRecovery(
                         engine = engine,
                         onBeforeRetry = {
@@ -1134,6 +1183,23 @@ fun ChatScreen(
                             }
                         }
                     )
+                }
+                val rawReply = when (rawOutcome) {
+                    is GenerationOutcome.Success -> rawOutcome.text
+                    is GenerationOutcome.Cancelled -> {
+                        DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 취소", "cancelled")
+                        return@launch
+                    }
+                    GenerationOutcome.Empty -> {
+                        DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", "empty")
+                        Toast.makeText(context, "모델 응답이 비어 있습니다.", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    is GenerationOutcome.Failure -> {
+                        DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", rawOutcome.kind.name)
+                        Toast.makeText(context, rawOutcome.message, Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
                 }
                 val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
                 val metricsLine = buildFusionMetricsLine(
@@ -1193,6 +1259,7 @@ fun ChatScreen(
                 DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 성공", "versions=$versionCount")
                 Toast.makeText(context, "답변을 다시 생성했습니다.", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 Log.e("FusionEngine", "Response regeneration failed", e)
                 DeveloperLogStore.record(context, "regeneration", "답변 다시 생성 실패", e::class.java.simpleName)
                 Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
@@ -1357,7 +1424,7 @@ fun ChatScreen(
 
         scope.launch {
             try {
-                val rawReply = FusionRuntimeLock.withChatGeneration {
+                val rawOutcome = FusionRuntimeLock.withChatGeneration {
                     generateWithLiteRtRecovery(
                         engine = engine,
                         onBeforeRetry = {
@@ -1372,6 +1439,20 @@ fun ChatScreen(
                         }
                     )
                 }
+                val rawReply = when (rawOutcome) {
+                    is GenerationOutcome.Success -> rawOutcome.text
+                    is GenerationOutcome.Cancelled -> {
+                        return@launch
+                    }
+                    GenerationOutcome.Empty -> {
+                        Toast.makeText(context, "모델 응답이 비어 있습니다.", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    is GenerationOutcome.Failure -> {
+                        Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                }
                 memoryCandidateText = rawReply.trim()
                 DeveloperLogStore.record(
                     context,
@@ -1380,6 +1461,7 @@ fun ChatScreen(
                     "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
                 )
             } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
                 Log.e("FusionMemory", "Memory candidate extraction failed", e)
                 DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", e::class.java.simpleName)
                 Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
@@ -1464,9 +1546,28 @@ fun ChatScreen(
     ) { uris: List<Uri> ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
 
+        val originConversationId = pickerOriginConversationId
+        if (originConversationId != conversationId) {
+            // Conversation switched between launch and result. Refuse to append
+            // to a different conversation. Clean up the (possibly pending) URI
+            // grants we no longer intend to keep.
+            uris.forEach { uri ->
+                runCatching {
+                    context.contentResolver.releasePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                }
+            }
+            Toast.makeText(context, "대화가 바뀌어 첨부를 취소했어요.", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+
         Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
 
         scope.launch {
+            var success = 0
+            var failed = 0
             uris.take(5).forEach { uri ->
                 try {
                     context.contentResolver.takePersistableUriPermission(
@@ -1486,6 +1587,12 @@ fun ChatScreen(
                     displayName = displayName
                 )
 
+                if (conversationId != originConversationId) {
+                    // Conversation switched during copy; delete the orphan.
+                    copiedFile?.delete()
+                    return@launch
+                }
+
                 if (copiedFile != null) {
                     pendingAttachments.add(
                         LocalAttachment(
@@ -1494,10 +1601,17 @@ fun ChatScreen(
                             localPath = copiedFile.absolutePath
                         )
                     )
+                    success++
+                } else {
+                    failed++
                 }
             }
 
-            Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
+            when {
+                success > 0 && failed == 0 -> Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
+                success > 0 && failed > 0 -> Toast.makeText(context, "첨부 일부 실패 ($success 성공, $failed 실패)", Toast.LENGTH_SHORT).show()
+                else -> Toast.makeText(context, "첨부 실패", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -1601,6 +1715,7 @@ fun ChatScreen(
                         input = appendQuickPrompt(input, preset)
                     },
                     onPlusClick = {
+                        pickerOriginConversationId = conversationId
                         attachmentPickerLauncher.launch(
                             arrayOf(
                                 "image/*",
@@ -1615,6 +1730,12 @@ fun ChatScreen(
                     },
                     onVoiceModeClick = {
                         Toast.makeText(context, "보이스 모드는 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
+                    },
+                    onStopClick = {
+                        val targetConversationId = conversationId
+                        scope.launch {
+                            chatViewModel.cancelGeneration(targetConversationId, reason = "user-stop")
+                        }
                     },
                     onSendClick = sendClick@ {
                         val userInput = input.trim()
@@ -1961,7 +2082,7 @@ fun ChatScreen(
                                     val generationStartMs = SystemClock.elapsedRealtime()
                                     var firstTokenLatencyMs: Long? = null
 
-                                    val rawReply = FusionRuntimeLock.withChatGeneration {
+                                    val rawOutcome = FusionRuntimeLock.withChatGeneration {
                                         generateWithLiteRtRecovery(
                                             engine = engine,
                                             onBeforeRetry = {
@@ -1970,67 +2091,83 @@ fun ChatScreen(
                                             },
                                             generateOnce = {
                                                 if (useMultimodalImages) {
-                                        generationStatus = "이미지 분석 준비 중..."
-                                        val streamedOutput = StringBuilder()
-                                        if (!reasoningEnabled) {
-                                            streamingAssistantText = ""
-                                        }
-                                        generationStatus = "이미지 분석 중..."
+                                                    generationStatus = "이미지 분석 준비 중..."
+                                                    val streamedOutput = StringBuilder()
+                                                    if (!reasoningEnabled) {
+                                                        streamingAssistantText = ""
+                                                    }
+                                                    generationStatus = "이미지 분석 중..."
 
-                                        engine.generateMultimodalStreaming(
-                                            messages = currentMessages,
-                                            modelPath = activeModelPath!!,
-                                            settings = requestSettings,
-                                            imagePaths = imageAttachments.map { it.localPath },
-                                            onToken = { token ->
-                                                if (firstTokenLatencyMs == null && token.isNotEmpty()) {
-                                                    firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
-                                                }
-                                                streamedOutput.append(token)
-                                                if (!reasoningEnabled) {
-                                                    val visibleText = streamedOutput.toString()
-                                                    scope.launch {
-                                                        if (isGenerating) {
-                                                            streamingAssistantText = visibleText
+                                                    engine.generateMultimodalStreaming(
+                                                        messages = currentMessages,
+                                                        modelPath = activeModelPath!!,
+                                                        settings = requestSettings,
+                                                        imagePaths = imageAttachments.map { it.localPath },
+                                                        onToken = { token ->
+                                                            if (firstTokenLatencyMs == null && token.isNotEmpty()) {
+                                                                firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                                                            }
+                                                            streamedOutput.append(token)
+                                                            if (!reasoningEnabled) {
+                                                                val visibleText = streamedOutput.toString()
+                                                                scope.launch {
+                                                                    if (isGenerating) {
+                                                                        streamingAssistantText = visibleText
+                                                                    }
+                                                                }
+                                                            }
                                                         }
-                                                    }
-                                                }
-                                            }
-                                        )
-                                    } else if (reasoningEnabled) {
-                                        generationStatus = "더 깊게 생각하는 중..."
-                                        engine.generate(
-                                            messages = currentMessages,
-                                            modelPath = activeModelPath!!,
-                                            settings = requestSettings
-                                        )
-                                    } else {
-                                        val streamedOutput = StringBuilder()
-                                        streamingAssistantText = ""
-                                        generationStatus = "답변 생성 중..."
+                                                    )
+                                                } else if (reasoningEnabled) {
+                                                    generationStatus = "더 깊게 생각하는 중..."
+                                                    engine.generate(
+                                                        messages = currentMessages,
+                                                        modelPath = activeModelPath!!,
+                                                        settings = requestSettings
+                                                    )
+                                                } else {
+                                                    val streamedOutput = StringBuilder()
+                                                    streamingAssistantText = ""
+                                                    generationStatus = "답변 생성 중..."
 
-                                        engine.generateStreaming(
-                                            messages = currentMessages,
-                                            modelPath = activeModelPath!!,
-                                            settings = requestSettings,
-                                            onToken = { token ->
-                                                if (firstTokenLatencyMs == null && token.isNotEmpty()) {
-                                                    firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
-                                                }
-                                                streamedOutput.append(token)
-                                                val visibleText = streamedOutput.toString()
-                                                scope.launch {
-                                                    if (isGenerating) {
-                                                        streamingAssistantText = visibleText
-                                                    }
-                                                }
-                                            }
-                                        )
+                                                    engine.generateStreaming(
+                                                        messages = currentMessages,
+                                                        modelPath = activeModelPath!!,
+                                                        settings = requestSettings,
+                                                        onToken = { token ->
+                                                            if (firstTokenLatencyMs == null && token.isNotEmpty()) {
+                                                                firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                                                            }
+                                                            streamedOutput.append(token)
+                                                            val visibleText = streamedOutput.toString()
+                                                            scope.launch {
+                                                                if (isGenerating) {
+                                                                    streamingAssistantText = visibleText
+                                                                }
+                                                            }
+                                                        }
+                                                    )
                                                 }
                                             }
                                         )
                                     }
 
+                                    val rawReply = when (rawOutcome) {
+                                        is GenerationOutcome.Success -> rawOutcome.text
+                                        is GenerationOutcome.Cancelled -> {
+                                            DeveloperLogStore.record(context, "chat", "답변 생성 취소", "cancelled")
+                                            return@launch
+                                        }
+                                        GenerationOutcome.Empty -> {
+                                            DeveloperLogStore.record(context, "chat", "답변 생성 실패", "empty")
+                                            return@launch
+                                        }
+                                        is GenerationOutcome.Failure -> {
+                                            DeveloperLogStore.record(context, "chat", "답변 생성 실패", rawOutcome.kind.name)
+                                            Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
+                                            return@launch
+                                        }
+                                    }
                                     val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
                                     val metricsLine = buildFusionMetricsLine(
                                         modelName = shortModelName(selectedModel),
@@ -2093,20 +2230,14 @@ fun ChatScreen(
                                         Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                         return@launch
                                     }
-                                    if (activeConversationId != 0L) {
-                                        dao.insertMessage(
-                                            MessageEntity(
-                                                conversationId = activeConversationId,
-                                                role = "assistant",
-                                                content = if (isLiteRtModelLoadException(e)) {
-                                                    "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
-                                                } else {
-                                                    "오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-                                                },
-                                                createdAt = System.currentTimeMillis()
-                                            )
-                                        )
+                                    if (e is kotlinx.coroutines.CancellationException) {
+                                        throw e
                                     }
+                                    Toast.makeText(
+                                        context,
+                                        if (isLiteRtModelLoadException(e)) "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요." else "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
                                 } finally {
                                     generationStatus = null
                                     isGenerating = false
@@ -2606,8 +2737,14 @@ fun ChatScreen(
                     onClick = {
                         showDeleteChatDialog = false
                         scope.launch {
-                            if (conversationId != 0L) {
-                                dao.deleteConversation(conversationId)
+                            val targetId = conversationId
+                            if (targetId != 0L) {
+                                chatViewModel.cancelAndAwait(targetId, reason = "delete-conversation")
+                                conversationState.remove(targetId)
+                                // Re-check existence: a race could have removed it.
+                                if (dao.getConversationById(targetId) != null) {
+                                    dao.deleteConversation(targetId)
+                                }
                             }
                             input = ""
                             clearPendingAttachmentDrafts(pendingAttachments)
@@ -3816,6 +3953,7 @@ private fun ChatInputBar(
     onMicClick: () -> Unit,
     onVoiceModeClick: () -> Unit,
     onSendClick: () -> Unit,
+    onStopClick: () -> Unit,
     pendingAttachments: List<LocalAttachment>,
     onRemoveAttachment: (LocalAttachment) -> Unit,
     onAppendQuickPrompt: (String) -> Unit,
@@ -3947,25 +4085,47 @@ private fun ChatInputBar(
                                 }
                             }
                         } else {
-                            Surface(
-                                modifier = Modifier.size(42.dp),
-                                shape = CircleShape,
-                                color = Color.White
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clickable(enabled = !isGenerating) {
-                                            onSendClick()
-                                        },
-                                    contentAlignment = Alignment.Center
+                            if (isGenerating) {
+                                Surface(
+                                    modifier = Modifier.size(42.dp),
+                                    shape = CircleShape,
+                                    color = DangerRed
                                 ) {
-                                    Text(
-                                        text = if (isGenerating) "…" else "↑",
-                                        color = Color.Black,
-                                        fontSize = 20.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clickable { onStopClick() },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "■",
+                                            color = Color.White,
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+                            } else {
+                                Surface(
+                                    modifier = Modifier.size(42.dp),
+                                    shape = CircleShape,
+                                    color = Color.White
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clickable(enabled = !isGenerating) {
+                                                onSendClick()
+                                            },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (isGenerating) "…" else "↑",
+                                            color = Color.Black,
+                                            fontSize = 20.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -7352,7 +7512,7 @@ private fun openModelUri(context: Context, uriString: String?) {
 
 private fun openModelFile(context: Context, file: File) {
     try {
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
+        val uri = FusionFileProvider.uriFor(context, file)
         context.startActivity(Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/octet-stream")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -8145,10 +8305,15 @@ private fun parseAssistantOutput(
 private suspend fun generateWithLiteRtRecovery(
     engine: LiteRtLlmEngine,
     onBeforeRetry: () -> Unit,
-    generateOnce: suspend () -> String
-): String {
+    generateOnce: suspend () -> GenerationOutcome
+): GenerationOutcome {
     val firstResult = generateOnce()
-    if (!looksLikeLiteRtEngineFailure(firstResult)) {
+    if (firstResult is GenerationOutcome.Success || firstResult is GenerationOutcome.Empty) {
+        return firstResult
+    }
+
+    val firstFailure = firstResult as? GenerationOutcome.Failure
+    if (firstFailure != null && firstFailure.kind != FailureKind.MODEL_LOAD_FAILED) {
         return firstResult
     }
 
@@ -8157,27 +8322,18 @@ private suspend fun generateWithLiteRtRecovery(
     onBeforeRetry()
 
     val retryResult = generateOnce()
-    if (!looksLikeLiteRtEngineFailure(retryResult)) {
+    if (retryResult is GenerationOutcome.Success || retryResult is GenerationOutcome.Empty) {
         return retryResult
     }
 
     Log.e("FusionEngine", "LiteRT generation retry failed: $retryResult")
     FusionRuntimeManager.unloadSharedEngineForActiveOwner("chat_retry_failed")
-    throw IllegalStateException("모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.")
-}
-
-private fun looksLikeLiteRtEngineFailure(text: String): Boolean {
-    return text.contains("Failed to create engine", ignoreCase = true) ||
-        text.contains("litert_compiled_model", ignoreCase = true) ||
-        text.contains("모델을 불러올 수 없습니다") ||
-        text.contains("LiteRT-LM 실행 실패", ignoreCase = true) ||
-        text.contains("LiteRT-LM", ignoreCase = true) && text.contains("INTERNAL", ignoreCase = true)
+    return retryResult
 }
 
 private fun isLiteRtModelLoadException(error: Throwable): Boolean {
     val message = error.message.orEmpty()
-    return message.contains("모델을 불러올 수 없습니다") ||
-        message.contains("Failed to create engine", ignoreCase = true) ||
+    return message.contains("Failed to create engine", ignoreCase = true) ||
         message.contains("litert_compiled_model", ignoreCase = true) ||
         message.contains("INTERNAL", ignoreCase = true)
 }
@@ -8702,11 +8858,7 @@ private fun openAttachmentFile(
     }
 
     try {
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file
-        )
+        val uri = FusionFileProvider.uriFor(context, file)
 
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, attachment.mimeType)
