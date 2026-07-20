@@ -18,7 +18,6 @@ import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -119,9 +118,6 @@ class LiteRtLlmEngine(
                 engine.createConversation(conversationConfig).use { conversation ->
                     conversation
                         .sendMessageAsync(promptText)
-                        .catch { throwable ->
-                            Log.e("FusionEngine", "LiteRT-LM generation stream failed", throwable)
-                        }
                         .collect { chunk ->
                             val token = chunk.toString()
                             output.append(token)
@@ -132,27 +128,7 @@ class LiteRtLlmEngine(
                 throw e
             } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM generation failed", e)
-                val sanitized = promptAdapter.sanitizeOutput(output.toString())
-                return@withContext when {
-                    isIrrecoverableLoadException(e) -> GenerationOutcome.Failure(
-                        kind = FailureKind.MODEL_LOAD_FAILED,
-                        message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
-                    )
-                    e is IOException -> GenerationOutcome.Failure(
-                        kind = FailureKind.GENERATION_IO,
-                        message = "모델 응답 중 입출력 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-                    )
-                    else -> GenerationOutcome.Failure(
-                        kind = FailureKind.GENERATION_INTERRUPTED,
-                        message = "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.",
-                    )
-                }.let { outcome ->
-                    if (sanitized.isBlank()) outcome
-                    else GenerationOutcome.Failure(
-                        kind = (outcome as GenerationOutcome.Failure).kind,
-                        message = outcome.message
-                    )
-                }
+                return@withContext classifyGenerationException(e, isMultimodal = false)
             }
 
             val sanitized = promptAdapter.sanitizeOutput(output.toString())
@@ -258,9 +234,6 @@ class LiteRtLlmEngine(
                 engine.createConversation(conversationConfig).use { conversation ->
                     conversation
                         .sendMessageAsync(Contents.of(contentParts))
-                        .catch { throwable ->
-                            Log.e("FusionEngine", "LiteRT-LM multimodal generation stream failed", throwable)
-                        }
                         .collect { chunk ->
                             val token = chunk.toString()
                             output.append(token)
@@ -271,10 +244,7 @@ class LiteRtLlmEngine(
                 throw e
             } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM multimodal generation failed", e)
-                return@withContext GenerationOutcome.Failure(
-                    kind = if (isVisionBackendUnsupported(e)) FailureKind.MODEL_MULTIMODAL_UNSUPPORTED else FailureKind.GENERATION_INTERRUPTED,
-                    message = "이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요."
-                )
+                return@withContext classifyGenerationException(e, isMultimodal = true)
             }
 
             val sanitized = promptAdapter.sanitizeOutput(output.toString())
@@ -298,6 +268,26 @@ class LiteRtLlmEngine(
         return message.contains("vision", ignoreCase = true) ||
             message.contains("image", ignoreCase = true) ||
             message.contains("multimodal", ignoreCase = true)
+    }
+
+    private fun classifyGenerationException(
+        error: Throwable,
+        isMultimodal: Boolean
+    ): GenerationOutcome.Failure {
+        val kind = when {
+            isMultimodal && isVisionBackendUnsupported(error) -> FailureKind.MODEL_MULTIMODAL_UNSUPPORTED
+            isIrrecoverableLoadException(error) -> FailureKind.MODEL_LOAD_FAILED
+            error is IOException -> FailureKind.GENERATION_IO
+            else -> FailureKind.GENERATION_INTERRUPTED
+        }
+        val message = when (kind) {
+            FailureKind.MODEL_MULTIMODAL_UNSUPPORTED -> "이 모델은 이미지 입력을 지원하지 않습니다."
+            FailureKind.MODEL_LOAD_FAILED -> "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+            FailureKind.GENERATION_IO -> "모델 응답 중 입출력 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+            FailureKind.GENERATION_INTERRUPTED -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            else -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
+        }
+        return GenerationOutcome.Failure(kind = kind, message = message)
     }
 
     private fun getOrCreateEngine(
