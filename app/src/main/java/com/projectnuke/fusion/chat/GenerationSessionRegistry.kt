@@ -52,12 +52,10 @@ class GenerationSessionRegistry {
             sessions[conversationId] = gs
 
             gs.job.invokeOnCompletion {
-                clearMatching(conversationId, requestId)
+                sessions.remove(conversationId, gs)
             }
 
-            gs.job.start()
-
-            if (!gs.job.isActive) {
+            if (!gs.job.start()) {
                 sessions.remove(conversationId, gs)
                 throw CancellationException(
                     "Scope cancelled before session could start for conversation $conversationId"
@@ -92,14 +90,6 @@ class GenerationSessionRegistry {
             session.job.join()
             true
         }
-    }
-
-    fun clearMatching(conversationId: Long, requestId: String): Boolean {
-        val session = sessions[conversationId] ?: return false
-        if (session.requestId == requestId && session.job.isCompleted) {
-            return sessions.remove(conversationId, session)
-        }
-        return false
     }
 
     fun hasActiveSession(conversationId: Long): Boolean =
