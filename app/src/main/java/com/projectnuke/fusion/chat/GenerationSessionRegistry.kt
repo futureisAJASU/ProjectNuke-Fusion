@@ -1,12 +1,12 @@
 package com.projectnuke.fusion.chat
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
-import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 
 class GenerationSession(
@@ -17,36 +17,55 @@ class GenerationSession(
 
 class GenerationSessionRegistry {
     private val sessions = ConcurrentHashMap<Long, GenerationSession>()
+    private val lockStripes = Array(16) { Mutex() }
+
+    private fun stripeFor(conversationId: Long): Mutex =
+        lockStripes[(conversationId and 15L).toInt()]
 
     suspend fun start(
         scope: CoroutineScope,
         snapshot: GenerationRequestSnapshot,
         block: suspend (GenerationSession) -> Unit
     ): GenerationSession {
-        cancelAndJoin(snapshot.conversationId, "superseded-by-${snapshot.requestId}")
-
         val conversationId = snapshot.conversationId
         val requestId = snapshot.requestId
-        val deferred = CompletableDeferred<GenerationSession>()
+        val lock = stripeFor(conversationId)
 
-        scope.launch(start = CoroutineStart.DEFAULT) {
-            val job = coroutineContext[Job] ?: error("No Job in coroutine context")
-            val gs = GenerationSession(
+        return lock.withLock {
+            val previous = sessions[conversationId]
+            if (previous != null && !previous.job.isCompleted) {
+                previous.job.cancel(CancellationException("superseded-by-${requestId}"))
+                previous.job.join()
+            }
+
+            lateinit var gs: GenerationSession
+
+            val coroutineJob = scope.launch(start = CoroutineStart.LAZY) {
+                block(gs)
+            }
+
+            gs = GenerationSession(
                 conversationId = conversationId,
                 requestId = requestId,
-                job = job,
+                job = coroutineJob,
             )
             sessions[conversationId] = gs
-            deferred.complete(gs)
 
-            job.invokeOnCompletion {
+            gs.job.invokeOnCompletion {
                 clearMatching(conversationId, requestId)
             }
 
-            block(gs)
-        }
+            gs.job.start()
 
-        return deferred.await()
+            if (!gs.job.isActive) {
+                sessions.remove(conversationId, gs)
+                throw CancellationException(
+                    "Scope cancelled before session could start for conversation $conversationId"
+                )
+            }
+
+            gs
+        }
     }
 
     fun activeSession(conversationId: Long): GenerationSession? =
@@ -65,16 +84,19 @@ class GenerationSessionRegistry {
     }
 
     suspend fun cancelAndJoin(conversationId: Long, reason: String): Boolean {
-        val session = sessions[conversationId] ?: return false
-        if (!session.job.isActive) return false
-        session.job.cancel(CancellationException(reason))
-        session.job.join()
-        return true
+        val lock = stripeFor(conversationId)
+        return lock.withLock {
+            val session = sessions[conversationId] ?: return@withLock false
+            if (session.job.isCompleted) return@withLock false
+            session.job.cancel(CancellationException(reason))
+            session.job.join()
+            true
+        }
     }
 
     fun clearMatching(conversationId: Long, requestId: String): Boolean {
         val session = sessions[conversationId] ?: return false
-        if (session.requestId == requestId && !session.job.isActive) {
+        if (session.requestId == requestId && session.job.isCompleted) {
             return sessions.remove(conversationId, session)
         }
         return false
