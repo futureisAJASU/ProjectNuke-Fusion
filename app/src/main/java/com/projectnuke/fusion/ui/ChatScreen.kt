@@ -73,6 +73,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -732,6 +733,7 @@ fun ChatScreen(
     }
 
     val scope = rememberCoroutineScope()
+    val currentConversationId by rememberUpdatedState(conversationId)
     BackHandler(
         enabled = showModelDialog || showAdvancedSettingsDialog || showDeleteChatDialog || inChatSearchMode || isGenerating
     ) {
@@ -1757,6 +1759,11 @@ fun ChatScreen(
                                 return@sendClick
                             }
 
+                            val userMessageContent = buildMessageContentWithAttachments(
+                                body = userInput,
+                                attachments = attachmentsToSend
+                            )
+
                             input = ""
                             pendingAttachments.clear()
 
@@ -1764,27 +1771,6 @@ fun ChatScreen(
                             streamingAssistantText = null
                             streamingMetricsLine = null
                             generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
-
-                            val requestId = UUID.randomUUID().toString()
-                            val snapshot = GenerationRequestSnapshot(
-                                requestId = requestId,
-                                conversationId = conversationId,
-                                generationModeKey = generationMode.name,
-                                selectedModelId = selectedModel,
-                                selectedModelPath = selectedModelPath,
-                                settings = generationSettings,
-                                reasoningEnabled = reasoningEnabled,
-                                webSearchPolicy = if (shouldUseWebSearch) GenerationRequestSnapshot.WebSearchPolicy.ENABLED else GenerationRequestSnapshot.WebSearchPolicy.DISABLED,
-                                attachmentIds = attachmentsToSend.map { it.localPath },
-                                multimodalImagePaths = imageAttachments.map { it.localPath },
-                                promptText = userInstruction,
-                                createdAt = System.currentTimeMillis()
-                            )
-
-                            val userMessageContent = buildMessageContentWithAttachments(
-                                body = userInput,
-                                attachments = attachmentsToSend
-                            )
 
                             scope.launch {
                                 var activeConversationId = conversationId
@@ -2022,9 +2008,30 @@ fun ChatScreen(
                                         return@launch
                                     }
 
+                                    val requestId = UUID.randomUUID().toString()
+                                    val snapshot = GenerationRequestSnapshot(
+                                        requestId = requestId,
+                                        conversationId = activeConversationId,
+                                        generationModeKey = generationMode.name,
+                                        selectedModelId = selectedModel,
+                                        selectedModelPath = selectedModelPath,
+                                        settings = generationSettings,
+                                        reasoningEnabled = reasoningEnabled,
+                                        webSearchPolicy = when {
+                                            webSearchEnabled -> GenerationRequestSnapshot.WebSearchPolicy.ENABLED
+                                            shouldAutoUseWebSearch(userInput) -> GenerationRequestSnapshot.WebSearchPolicy.AUTO
+                                            else -> GenerationRequestSnapshot.WebSearchPolicy.DISABLED
+                                        },
+                                        attachmentIds = attachmentsToSend.map { it.localPath },
+                                        multimodalImagePaths = imageAttachments.map { it.localPath },
+                                        promptText = userInstruction,
+                                        createdAt = System.currentTimeMillis()
+                                    )
                                     val registryConversationId = activeConversationId
+                                    chatViewModel.update(activeConversationId) { it.copy(activeRequestId = requestId) }
                                     val session = chatViewModel.registry.start(scope, snapshot) { s ->
                                         if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+                                        val capturedMessages = messages
                                         try {
                                             var activeModelPath = snapshot.selectedModelPath?.takeIf { File(it).exists() }
                                                 ?: builtInModels
@@ -2090,14 +2097,13 @@ fun ChatScreen(
                                                                     if (!snapshot.reasoningEnabled) {
                                                                         val visibleText = streamedOutput.toString()
                                                                         scope.launch {
-                                                                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                                            if (currentConversationId == s.conversationId && chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
                                                                                 streamingAssistantText = visibleText
                                                                             }
                                                                         }
                                                                     }
-                                                                }
-                                                            )
-                                                        } else if (snapshot.reasoningEnabled) {
+                                                                )
+                                                            } else if (snapshot.reasoningEnabled) {
                                                             generationStatus = "더 깊게 생각하는 중..."
                                                             engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
                                                         } else {
@@ -2112,13 +2118,14 @@ fun ChatScreen(
                                                                     if (firstTokenLatencyMs == null && token.isNotEmpty()) firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
                                                                     streamedOutput.append(token)
                                                                     val visibleText = streamedOutput.toString()
-                                                                    scope.launch {
-                                                                        if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                                            streamingAssistantText = visibleText
+                                                                        scope.launch {
+                                                                            if (currentConversationId == s.conversationId && chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                                                streamingAssistantText = visibleText
+                                                                            }
                                                                         }
                                                                     }
-                                                                }
-                                                            )
+                                                                )
+                                                            }
                                                         }
                                                     }
                                                 )
