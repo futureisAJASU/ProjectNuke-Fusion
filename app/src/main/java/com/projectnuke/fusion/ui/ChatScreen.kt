@@ -155,6 +155,9 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
+import com.projectnuke.fusion.chat.GenerationRequestSnapshot
+import com.projectnuke.fusion.chat.GenerationSession
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.roundToInt
@@ -1762,6 +1765,22 @@ fun ChatScreen(
                             streamingMetricsLine = null
                             generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
 
+                            val requestId = UUID.randomUUID().toString()
+                            val snapshot = GenerationRequestSnapshot(
+                                requestId = requestId,
+                                conversationId = conversationId,
+                                generationModeKey = generationMode.name,
+                                selectedModelId = selectedModel,
+                                selectedModelPath = selectedModelPath,
+                                settings = generationSettings,
+                                reasoningEnabled = reasoningEnabled,
+                                webSearchPolicy = if (shouldUseWebSearch) GenerationRequestSnapshot.WebSearchPolicy.ENABLED else GenerationRequestSnapshot.WebSearchPolicy.DISABLED,
+                                attachmentIds = attachmentsToSend.map { it.localPath },
+                                multimodalImagePaths = imageAttachments.map { it.localPath },
+                                promptText = userInstruction,
+                                createdAt = System.currentTimeMillis()
+                            )
+
                             val userMessageContent = buildMessageContentWithAttachments(
                                 body = userInput,
                                 attachments = attachmentsToSend
@@ -1770,6 +1789,7 @@ fun ChatScreen(
                             scope.launch {
                                 var activeConversationId = conversationId
                                 var userMessageInserted = false
+                                val wasSuperseded = java.util.concurrent.atomic.AtomicBoolean(false)
 
                                 try {
                                     val now = System.currentTimeMillis()
@@ -2002,210 +2022,159 @@ fun ChatScreen(
                                         return@launch
                                     }
 
-                                    val activeModelPath = selectedModelPath?.takeIf { File(it).exists() }
-                                        ?: builtInModels
-                                            .firstOrNull {
-                                                it.name == selectedModel && isModelDownloaded(
-                                                    context,
-                                                    it
-                                                )
-                                            }
-                                            ?.let { getModelFile(context, it).absolutePath }
-
-                                    if (activeModelPath == null) {
-                                        selectedModelPath?.takeIf { it.isNotBlank() }?.let {
-                                            android.util.Log.e("FusionEngine", "Selected model file missing: $it")
-                                        }
-                                        dao.insertMessage(
-                                            MessageEntity(
-                                                conversationId = activeConversationId,
-                                                role = "assistant",
-                                                content = if (!selectedModelPath.isNullOrBlank()) {
-                                                    "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
-                                                } else {
-                                                    "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요."
-                                                },
-                                                createdAt = System.currentTimeMillis()
-                                            )
-                                        )
-
-                                        dao.updateConversationTime(
-                                            activeConversationId,
-                                            System.currentTimeMillis()
-                                        )
-
-                                        return@launch
-                                    }
-
-                                    val missingImage = imageAttachments.firstOrNull { !File(it.localPath).exists() }
-                                    if (missingImage != null) {
-                                        Toast.makeText(
-                                            context,
-                                            "이미지 파일을 찾을 수 없습니다: ${missingImage.localPath}",
-                                            Toast.LENGTH_LONG
-                                        ).show()
-                                        dao.insertMessage(
-                                            MessageEntity(
-                                                conversationId = activeConversationId,
-                                                role = "assistant",
-                                                content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n${missingImage.localPath}",
-                                                createdAt = System.currentTimeMillis()
-                                            )
-                                        )
-                                        dao.updateConversationTime(
-                                            activeConversationId,
-                                            System.currentTimeMillis()
-                                        )
-                                        return@launch
-                                    }
-
-                                    val useMultimodalImages = imageAttachments.isNotEmpty()
-                                    if (useMultimodalImages && !isMultimodalCapableModel(selectedModel, activeModelPath!!)) {
-                                        dao.insertMessage(
-                                            MessageEntity(
-                                                conversationId = activeConversationId,
-                                                role = "assistant",
-                                                content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.",
-                                                createdAt = System.currentTimeMillis()
-                                            )
-                                        )
-                                        dao.updateConversationTime(
-                                            activeConversationId,
-                                            System.currentTimeMillis()
-                                        )
-                                        return@launch
-                                    }
-
-                                    generationStatus = "모델 로딩 중..."
-
-                                    val generationStartMs = SystemClock.elapsedRealtime()
-                                    var firstTokenLatencyMs: Long? = null
-
-                                    val rawOutcome = FusionRuntimeLock.withChatGeneration {
-                                        generateWithLiteRtRecovery(
-                                            engine = engine,
-                                            onBeforeRetry = {
-                                                generationStatus = "모델 로딩 중..."
-                                                streamingAssistantText = null
-                                            },
-                                            generateOnce = {
-                                                if (useMultimodalImages) {
-                                                    generationStatus = "이미지 분석 준비 중..."
-                                                    val streamedOutput = StringBuilder()
-                                                    if (!reasoningEnabled) {
-                                                        streamingAssistantText = ""
+                                    val registryConversationId = activeConversationId
+                                    val session = chatViewModel.registry.start(scope, snapshot) { s ->
+                                        if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+                                        try {
+                                            var activeModelPath = snapshot.selectedModelPath?.takeIf { File(it).exists() }
+                                                ?: builtInModels
+                                                    .firstOrNull {
+                                                        it.name == (snapshot.selectedModelId ?: selectedModel) && isModelDownloaded(
+                                                            context,
+                                                            it
+                                                        )
                                                     }
-                                                    generationStatus = "이미지 분석 중..."
+                                                    ?.let { getModelFile(context, it).absolutePath }
 
-                                                    engine.generateMultimodalStreaming(
-                                                        messages = currentMessages,
-                                                        modelPath = activeModelPath!!,
-                                                        settings = requestSettings,
-                                                        imagePaths = imageAttachments.map { it.localPath },
-                                                        onToken = { token ->
-                                                            if (firstTokenLatencyMs == null && token.isNotEmpty()) {
-                                                                firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
-                                                            }
-                                                            streamedOutput.append(token)
-                                                            if (!reasoningEnabled) {
-                                                                val visibleText = streamedOutput.toString()
-                                                                scope.launch {
-                                                                    if (isGenerating) {
-                                                                        streamingAssistantText = visibleText
+                                            if (activeModelPath == null) {
+                                                snapshot.selectedModelPath?.takeIf { it.isNotBlank() }?.let {
+                                                    android.util.Log.e("FusionEngine", "Selected model file missing: $it")
+                                                }
+                                                dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = if (!snapshot.selectedModelPath.isNullOrBlank()) "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요." else "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.", createdAt = System.currentTimeMillis()))
+                                                dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
+                                                return@start
+                                            }
+
+                                            val missingImage = snapshot.multimodalImagePaths.firstOrNull { !File(it).exists() }
+                                            if (missingImage != null) {
+                                                Toast.makeText(context, "이미지 파일을 찾을 수 없습니다: $missingImage", Toast.LENGTH_LONG).show()
+                                                dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n$missingImage", createdAt = System.currentTimeMillis()))
+                                                dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
+                                                return@start
+                                            }
+
+                                            if (snapshot.multimodalImagePaths.isNotEmpty() && !isMultimodalCapableModel(snapshot.selectedModelId ?: selectedModel, activeModelPath!!)) {
+                                                dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.", createdAt = System.currentTimeMillis()))
+                                                dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
+                                                return@start
+                                            }
+
+                                            if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+
+                                            generationStatus = "모델 로딩 중..."
+
+                                            val generationStartMs = SystemClock.elapsedRealtime()
+                                            var firstTokenLatencyMs: Long? = null
+
+                                            val rawOutcome = FusionRuntimeLock.withChatGeneration {
+                                                generateWithLiteRtRecovery(
+                                                    engine = engine,
+                                                    onBeforeRetry = {
+                                                        generationStatus = "모델 로딩 중..."
+                                                        streamingAssistantText = null
+                                                    },
+                                                    generateOnce = {
+                                                        if (snapshot.multimodalImagePaths.isNotEmpty()) {
+                                                            generationStatus = "이미지 분석 준비 중..."
+                                                            val streamedOutput = StringBuilder()
+                                                            if (!snapshot.reasoningEnabled) streamingAssistantText = ""
+                                                            generationStatus = "이미지 분석 중..."
+                                                            engine.generateMultimodalStreaming(
+                                                                messages = currentMessages,
+                                                                modelPath = activeModelPath!!,
+                                                                settings = requestSettings,
+                                                                imagePaths = snapshot.multimodalImagePaths,
+                                                                onToken = { token ->
+                                                                    if (firstTokenLatencyMs == null && token.isNotEmpty()) firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                                                                    streamedOutput.append(token)
+                                                                    if (!snapshot.reasoningEnabled) {
+                                                                        val visibleText = streamedOutput.toString()
+                                                                        scope.launch {
+                                                                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                                                streamingAssistantText = visibleText
+                                                                            }
+                                                                        }
                                                                     }
                                                                 }
-                                                            }
-                                                        }
-                                                    )
-                                                } else if (reasoningEnabled) {
-                                                    generationStatus = "더 깊게 생각하는 중..."
-                                                    engine.generate(
-                                                        messages = currentMessages,
-                                                        modelPath = activeModelPath!!,
-                                                        settings = requestSettings
-                                                    )
-                                                } else {
-                                                    val streamedOutput = StringBuilder()
-                                                    streamingAssistantText = ""
-                                                    generationStatus = "답변 생성 중..."
-
-                                                    engine.generateStreaming(
-                                                        messages = currentMessages,
-                                                        modelPath = activeModelPath!!,
-                                                        settings = requestSettings,
-                                                        onToken = { token ->
-                                                            if (firstTokenLatencyMs == null && token.isNotEmpty()) {
-                                                                firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
-                                                            }
-                                                            streamedOutput.append(token)
-                                                            val visibleText = streamedOutput.toString()
-                                                            scope.launch {
-                                                                if (isGenerating) {
-                                                                    streamingAssistantText = visibleText
+                                                            )
+                                                        } else if (snapshot.reasoningEnabled) {
+                                                            generationStatus = "더 깊게 생각하는 중..."
+                                                            engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
+                                                        } else {
+                                                            val streamedOutput = StringBuilder()
+                                                            streamingAssistantText = ""
+                                                            generationStatus = "답변 생성 중..."
+                                                            engine.generateStreaming(
+                                                                messages = currentMessages,
+                                                                modelPath = activeModelPath!!,
+                                                                settings = requestSettings,
+                                                                onToken = { token ->
+                                                                    if (firstTokenLatencyMs == null && token.isNotEmpty()) firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                                                                    streamedOutput.append(token)
+                                                                    val visibleText = streamedOutput.toString()
+                                                                    scope.launch {
+                                                                        if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                                            streamingAssistantText = visibleText
+                                                                        }
+                                                                    }
                                                                 }
-                                                            }
+                                                            )
                                                         }
-                                                    )
+                                                    }
+                                                )
+                                            }
+
+                                            if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+
+                                            val rawReply = when (rawOutcome) {
+                                                is GenerationOutcome.Success -> rawOutcome.text
+                                                is GenerationOutcome.Cancelled -> {
+                                                    DeveloperLogStore.record(context, "chat", "답변 생성 취소", "cancelled")
+                                                    return@start
+                                                }
+                                                GenerationOutcome.Empty -> {
+                                                    DeveloperLogStore.record(context, "chat", "답변 생성 실패", "empty")
+                                                    return@start
+                                                }
+                                                is GenerationOutcome.Failure -> {
+                                                    DeveloperLogStore.record(context, "chat", "답변 생성 실패", rawOutcome.kind.name)
+                                                    Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
+                                                    return@start
                                                 }
                                             }
-                                        )
-                                    }
 
-                                    val rawReply = when (rawOutcome) {
-                                        is GenerationOutcome.Success -> rawOutcome.text
-                                        is GenerationOutcome.Cancelled -> {
-                                            DeveloperLogStore.record(context, "chat", "답변 생성 취소", "cancelled")
-                                            return@launch
-                                        }
-                                        GenerationOutcome.Empty -> {
-                                            DeveloperLogStore.record(context, "chat", "답변 생성 실패", "empty")
-                                            return@launch
-                                        }
-                                        is GenerationOutcome.Failure -> {
-                                            DeveloperLogStore.record(context, "chat", "답변 생성 실패", rawOutcome.kind.name)
-                                            Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
-                                            return@launch
-                                        }
-                                    }
-                                    val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
-                                    val metricsLine = buildFusionMetricsLine(
-                                        modelName = shortModelName(selectedModel),
-                                        acceleratorName = buildAcceleratorLabel(
-                                            acceleratorName = requestSettings.accelerator.name,
-                                            speculativeDecodingEnabled = mtpEnabledForRequest
-                                        ),
-                                        generatedText = rawReply,
-                                        totalGenerationMs = totalGenerationMs,
-                                        firstTokenLatencyMs = firstTokenLatencyMs,
-                                        settingsLine = buildEffectiveSettingsLine(
-                                            buildEffectiveRuntimeSettings(
-                                                modelName = selectedModel,
-                                                modelPath = activeModelPath!!,
-                                                settings = requestSettings,
-                                                reasoningEnabled = reasoningEnabled,
-                                                webSearchEnabled = webSearchEnabled,
-                                                mtpStatus = engine.lastMtpStatus
+                                            if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+
+                                            val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
+                                            val metricsLine = buildFusionMetricsLine(
+                                                modelName = shortModelName(snapshot.selectedModelId ?: selectedModel),
+                                                acceleratorName = buildAcceleratorLabel(acceleratorName = requestSettings.accelerator.name, speculativeDecodingEnabled = mtpEnabledForRequest),
+                                                generatedText = rawReply,
+                                                totalGenerationMs = totalGenerationMs,
+                                                firstTokenLatencyMs = firstTokenLatencyMs,
+                                                settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId ?: selectedModel, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED, mtpStatus = engine.lastMtpStatus))
                                             )
-                                        )
-                                    )
-                                    streamingMetricsLine = metricsLine
-
-                                    generationStatus = "답변 저장 중..."
-
-                                    dao.insertMessage(
-                                        MessageEntity(
-                                            conversationId = activeConversationId,
-                                            role = "assistant",
-                                            content = appendSearchSourcesMetadata(appendFusionMetrics(rawReply, metricsLine), webSearchResponse?.sources.orEmpty()),
-                                            createdAt = System.currentTimeMillis()
-                                        )
-                                    )
-
-                                    dao.updateConversationTime(
-                                        activeConversationId,
-                                        System.currentTimeMillis()
-                                    )
-                                    pendingAttachments.clear()
+                                            streamingMetricsLine = metricsLine
+                                            generationStatus = "답변 저장 중..."
+                                            dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(rawReply, metricsLine), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
+                                            dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
+                                            pendingAttachments.clear()
+                                        } catch (e: Exception) {
+                                            Log.e("FusionEngine", "Chat generation failed", e)
+                                            if (e is BenchmarkRunningException) {
+                                                Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                                                return@start
+                                            }
+                                            if (e is kotlinx.coroutines.CancellationException) {
+                                                if (e.message?.contains("superseded") == true) wasSuperseded.set(true)
+                                                throw e
+                                            }
+                                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                Toast.makeText(context, if (isLiteRtModelLoadException(e)) "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요." else "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                    session.job.join()
                                 } catch (e: Exception) {
                                     if (!userMessageInserted && attachmentsToSend.isNotEmpty()) {
                                         attachmentsToSend.forEach { attachment ->
@@ -2238,10 +2207,12 @@ fun ChatScreen(
                                         Toast.LENGTH_SHORT
                                     ).show()
                                 } finally {
-                                    generationStatus = null
-                                    isGenerating = false
-                                    streamingAssistantText = null
-                                    streamingMetricsLine = null
+                                    if (!wasSuperseded.get()) {
+                                        generationStatus = null
+                                        isGenerating = false
+                                        streamingAssistantText = null
+                                        streamingMetricsLine = null
+                                    }
                                 }
                             }
                         }
