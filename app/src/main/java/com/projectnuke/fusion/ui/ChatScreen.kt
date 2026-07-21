@@ -65,7 +65,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -158,7 +157,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import com.projectnuke.fusion.chat.GenerationRequestSnapshot
-import com.projectnuke.fusion.chat.GenerationSession
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.roundToInt
@@ -580,7 +578,6 @@ fun ChatScreen(
         )
     }
     val chatViewModel = remember { com.projectnuke.fusion.chat.ChatViewModel() }
-    val conversationState = remember(chatViewModel) { mutableStateMapOf<Long, com.projectnuke.fusion.chat.ConversationGenerationState>() }
     var pickerOriginConversationId by remember { mutableStateOf<Long?>(null) }
     DisposableEffect(chatViewModel) {
         onDispose { chatViewModel.dispose() }
@@ -814,8 +811,7 @@ fun ChatScreen(
         // Isolate generation state per conversation. Restore the saved session
         // state (if any) for this conversation; clear the in-memory stream so a
         // switch does not show the previous conversation's tokens.
-        val saved = conversationState[conversationId]
-            ?: com.projectnuke.fusion.chat.ConversationGenerationState()
+        val saved = chatViewModel.state(conversationId)
         isGenerating = saved.isGenerating
         streamingAssistantText = saved.streamingText
         streamingMetricsLine = saved.streamingMetricsLine
@@ -834,18 +830,18 @@ fun ChatScreen(
             extractingMemoryCandidates = false
         }
     }
-
-    fun persistCurrentGenerationState(forConversationId: Long) {
-        conversationState[forConversationId] = com.projectnuke.fusion.chat.ConversationGenerationState(
-            isGenerating = isGenerating,
-            activeRequestId = conversationState[forConversationId]?.activeRequestId,
-            streamingText = streamingAssistantText,
-            streamingMetricsLine = streamingMetricsLine,
-            generationStatus = generationStatus,
-            regeneratingMessageId = regeneratingMessageId,
-            extractingMemoryCandidates = extractingMemoryCandidates,
-            actualWebSearchUsed = conversationState[forConversationId]?.actualWebSearchUsed ?: false,
-        )
+    LaunchedEffect(chatViewModel.states) {
+        chatViewModel.states.collect { states ->
+            val cur = states[conversationId] ?: return@collect
+            if (currentConversationId == conversationId) {
+                isGenerating = cur.isGenerating
+                streamingAssistantText = cur.streamingText
+                streamingMetricsLine = cur.streamingMetricsLine
+                generationStatus = cur.generationStatus
+                regeneratingMessageId = cur.regeneratingMessageId
+                extractingMemoryCandidates = cur.extractingMemoryCandidates
+            }
+        }
     }
 
     val messages = activeMessageEntities.map {
@@ -1752,6 +1748,14 @@ fun ChatScreen(
                             userInput
                         }
                         val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
+                        val capturedMessages = messages
+                        val capturedGenerationMode = generationMode
+                        val capturedSelectedModel = selectedModel
+                        val capturedSelectedModelPath = selectedModelPath
+                        val capturedReasoningEnabled = reasoningEnabled
+                        val capturedWebSearchEnabled = webSearchEnabled
+                        val capturedGenerationSettings = generationSettings
+                        val capturedPromptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
 
                         if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
                             if (FusionRuntimeLock.isBenchmarkRunning) {
@@ -1774,8 +1778,6 @@ fun ChatScreen(
 
                             scope.launch {
                                 var activeConversationId = conversationId
-                                var userMessageInserted = false
-                                val wasSuperseded = java.util.concurrent.atomic.AtomicBoolean(false)
 
                                 try {
                                     val now = System.currentTimeMillis()
@@ -1802,82 +1804,116 @@ fun ChatScreen(
                                             createdAt = now
                                         )
                                     )
-                                    userMessageInserted = true
                                     attachmentsToSend.forEach { attachment ->
                                         AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
                                     }
 
                                     dao.updateConversationTime(activeConversationId, now)
 
-                                    if (generationMode == ChatGenerationMode.EXTERNAL_AI_API && attachmentsToSend.isNotEmpty()) {
-                                        val message = "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다."
-                                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                                        dao.insertMessage(
-                                            MessageEntity(
-                                                conversationId = activeConversationId,
-                                                role = "assistant",
-                                                content = message,
-                                                createdAt = System.currentTimeMillis()
-                                            )
+                                    val requestId = UUID.randomUUID().toString()
+                                    val snapshot = GenerationRequestSnapshot(
+                                        requestId = requestId,
+                                        conversationId = activeConversationId,
+                                        generationModeKey = capturedGenerationMode.name,
+                                        selectedModelId = capturedSelectedModel,
+                                        selectedModelPath = capturedSelectedModelPath,
+                                        settings = capturedGenerationSettings,
+                                        reasoningEnabled = capturedReasoningEnabled,
+                                        webSearchPolicy = when {
+                                            capturedWebSearchEnabled -> GenerationRequestSnapshot.WebSearchPolicy.ENABLED
+                                            shouldAutoUseWebSearch(userInput) -> GenerationRequestSnapshot.WebSearchPolicy.AUTO
+                                            else -> GenerationRequestSnapshot.WebSearchPolicy.DISABLED
+                                        },
+                                        attachmentIds = attachmentsToSend.map { it.localPath },
+                                        multimodalImagePaths = imageAttachments.map { it.localPath },
+                                        promptText = userInstruction,
+                                        createdAt = System.currentTimeMillis(),
+                                        history = capturedMessages,
+                                        promptLabInstruction = capturedPromptLabInstruction,
+                                    )
+
+                                    chatViewModel.update(activeConversationId) {
+                                        com.projectnuke.fusion.chat.ConversationGenerationState(
+                                            isGenerating = true,
+                                            activeRequestId = requestId,
+                                            streamingText = null,
+                                            streamingMetricsLine = null,
+                                            generationStatus = if (snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) "인터넷 검색 중..." else "모델 로딩 중...",
+                                            actualWebSearchUsed = false,
                                         )
-                                        dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
-                                        return@launch
                                     }
 
-                                    val previousUserMessage = messages
-                                        .asReversed()
-                                        .firstOrNull { it.role == "user" }
-                                        ?.content
-                                        ?.let { parseMessageAttachments(it).body }
-                                        ?.trim()
-                                        .orEmpty()
-
-                                    val webSearchResponse = if (shouldUseWebSearch) {
-                                        generationStatus = "인터넷 검색 중..."
-                                        val searchIntent = FusionWebSearch.detectIntent(userInput)
-                                        generationStatus = when (searchIntent) {
-                                            SearchIntent.NEWS -> "뉴스 검색 중..."
-                                            else -> "인터넷 검색 중..."
+                                    if (capturedGenerationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+                                        if (attachmentsToSend.isNotEmpty()) {
+                                            val message = "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다."
+                                            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                                            dao.insertMessage(
+                                                MessageEntity(
+                                                    conversationId = activeConversationId,
+                                                    role = "assistant",
+                                                    content = message,
+                                                    createdAt = System.currentTimeMillis()
+                                                )
+                                            )
+                                            dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            return@launch
                                         }
 
-                                        val response = FusionWebSearch.search(
-                                            userInput = userInput,
-                                            previousUserMessage = previousUserMessage,
-                                            providerRepository = webSearchProviderRepository
+                                        val previousUserMessage = snapshot.history
+                                            .asReversed()
+                                            .firstOrNull { it.role == "user" }
+                                            ?.content
+                                            ?.let { parseMessageAttachments(it).body }
+                                            ?.trim()
+                                            .orEmpty()
+
+                                        val webSearchResponse = if (snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) {
+                                            chatViewModel.update(activeConversationId) { it.copy(generationStatus = "인터넷 검색 중...") }
+                                            val searchIntent = FusionWebSearch.detectIntent(userInput)
+                                            chatViewModel.update(activeConversationId) { it.copy(generationStatus = when (searchIntent) {
+                                                SearchIntent.NEWS -> "뉴스 검색 중..."
+                                                else -> "인터넷 검색 중..."
+                                            }) }
+
+                                            val response = FusionWebSearch.search(
+                                                userInput = userInput,
+                                                previousUserMessage = previousUserMessage,
+                                                providerRepository = webSearchProviderRepository
+                                            )
+
+                                            chatViewModel.update(activeConversationId) { it.copy(generationStatus = "검색 결과 정리 중...") }
+                                            response
+                                        } else {
+                                            null
+                                        }
+                                        chatViewModel.update(activeConversationId) { it.copy(actualWebSearchUsed = webSearchResponse != null) }
+                                        val webSearchResult = webSearchResponse?.toStructuredContext()
+                                        recordWebSearchDiagnostics(context, webSearchResponse)
+
+                                        if (webSearchResponse != null) {
+                                            chatViewModel.update(activeConversationId) { it.copy(generationStatus = if (snapshot.reasoningEnabled) "더 깊게 생각하는 중..." else "답변 생성 중...") }
+                                        }
+
+                                        val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
+                                            modelName = snapshot.selectedModelId ?: capturedSelectedModel,
+                                            settings = snapshot.settings
+                                        )
+                                        val requestSettings = snapshot.settings.copy(
+                                            speculativeDecodingEnabled = mtpEnabledForRequest
                                         )
 
-                                        generationStatus = "검색 결과 정리 중..."
-                                        response
-                                    } else {
-                                        null
-                                    }
-                                    val webSearchResult = webSearchResponse?.toStructuredContext()
-                                    recordWebSearchDiagnostics(context, webSearchResponse)
+                                        val fusionSystemPrompt = buildFusionSystemPrompt(
+                                            reasoningEnabled = snapshot.reasoningEnabled,
+                                            webSearchEnabled = webSearchResponse != null,
+                                            webContext = webSearchResult,
+                                            promptLabInstruction = snapshot.promptLabInstruction
+                                        )
 
-                                    if (shouldUseWebSearch) {
-                                        generationStatus = if (reasoningEnabled) "더 깊게 생각하는 중..." else "답변 생성 중..."
-                                    }
-
-                                    val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
-                                        modelName = selectedModel,
-                                        settings = generationSettings
-                                    )
-                                    val requestSettings = generationSettings.copy(
-                                        speculativeDecodingEnabled = mtpEnabledForRequest
-                                    )
-
-                                    val fusionSystemPrompt = buildFusionSystemPrompt(
-                                        reasoningEnabled = reasoningEnabled,
-                                        webSearchEnabled = shouldUseWebSearch,
-                                        webContext = webSearchResult,
-                                        promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
-                                    )
-
-                                    val currentMessages = buildList<ChatMessage> {
-                                        add(
-                                            ChatMessage(
-                                                role = "system",
-                                                content = """
+                                        val currentMessages = buildList<ChatMessage> {
+                                            add(
+                                                ChatMessage(
+                                                    role = "system",
+                                                    content = """
                 FUSION_GENERATION_SETTINGS
                 maxTokens=${requestSettings.maxTokens}
                 topK=${requestSettings.topK}
@@ -1887,18 +1923,17 @@ fun ChatScreen(
                 reasoningBudgetTokens=${requestSettings.reasoningBudgetTokens}
                 speculativeDecoding=${requestSettings.speculativeDecodingEnabled == true}
             """.trimIndent()
+                                                )
                                             )
-                                        )
 
-                                        add(
-                                            ChatMessage(
-                                                role = "system",
-                                                content = fusionSystemPrompt
+                                            add(
+                                                ChatMessage(
+                                                    role = "system",
+                                                    content = fusionSystemPrompt
+                                                )
                                             )
-                                        )
 
-                                        if (generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
-                                            selectedModelPath?.let { modelPath ->
+                                            snapshot.selectedModelPath?.let { modelPath ->
                                                 add(
                                                     ChatMessage(
                                                         role = "system",
@@ -1906,42 +1941,40 @@ fun ChatScreen(
                                                     )
                                                 )
                                             }
-                                        }
 
-                                        add(
-                                            ChatMessage(
-                                                role = "system",
-                                                content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, selectedModel).name}"
+                                            add(
+                                                ChatMessage(
+                                                    role = "system",
+                                                    content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, snapshot.selectedModelId ?: capturedSelectedModel).name}"
+                                                )
                                             )
-                                        )
 
-                                        buildSavedMemoryContext(context, settingsPrefs, activeConversationId, selectedModel).text?.let { memoryContext ->
-                                            add(ChatMessage(role = "system", content = memoryContext))
-                                        }
+                                            buildSavedMemoryContext(context, settingsPrefs, activeConversationId, snapshot.selectedModelId ?: capturedSelectedModel).text?.let { memoryContext ->
+                                                add(ChatMessage(role = "system", content = memoryContext))
+                                            }
 
-                                        buildConversationSummaryContextText(loadConversationSummary(context, activeConversationId))?.let { summaryContext ->
-                                            add(ChatMessage(role = "system", content = summaryContext))
-                                        }
+                                            buildConversationSummaryContextText(loadConversationSummary(context, activeConversationId))?.let { summaryContext ->
+                                                add(ChatMessage(role = "system", content = summaryContext))
+                                            }
 
-                                        addAll(messages.map { message -> ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content) })
+                                            addAll(snapshot.history.map { message -> ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content) })
 
-                                        val finalUserContent = buildFinalUserContent(
-                                            body = userInstruction,
-                                            attachments = if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend,
-                                            webSearchEnabled = shouldUseWebSearch,
-                                            webSearchResult = webSearchResult
-                                        )
-
-                                        add(
-                                            ChatMessage(
-                                                role = "user",
-                                                content = finalUserContent
+                                            val finalUserContent = buildFinalUserContent(
+                                                body = snapshot.promptText,
+                                                attachments = if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend,
+                                                webSearchEnabled = webSearchResponse != null,
+                                                webSearchResult = webSearchResult
                                             )
-                                        )
-                                    }
 
-                                    if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
-                                        generationStatus = "외부 AI API 응답을 기다리는 중..."
+                                            add(
+                                                ChatMessage(
+                                                    role = "user",
+                                                    content = finalUserContent
+                                                )
+                                            )
+                                        }
+
+                                        chatViewModel.update(activeConversationId) { it.copy(generationStatus = "외부 AI API 응답을 기다리는 중...") }
 
                                         when (
                                             val result = runExternalAiRequest(
@@ -1951,7 +1984,7 @@ fun ChatScreen(
                                         ) {
                                             is ExternalAiChatResult.Success -> {
                                                 refreshExternalProviderState()
-                                                generationStatus = "답변 저장 중..."
+                                                chatViewModel.update(activeConversationId) { it.copy(generationStatus = "답변 저장 중...") }
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -1965,7 +1998,7 @@ fun ChatScreen(
 
                                             is ExternalAiChatResult.BlockedAttachment -> {
                                                 Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                                                generationStatus = "답변 저장 중..."
+                                                chatViewModel.update(activeConversationId) { it.copy(generationStatus = "답변 저장 중...") }
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -1979,7 +2012,7 @@ fun ChatScreen(
 
                                             is ExternalAiChatResult.NoProvider -> {
                                                 refreshExternalProviderState()
-                                                generationStatus = "답변 저장 중..."
+                                                chatViewModel.update(activeConversationId) { it.copy(generationStatus = "답변 저장 중...") }
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -1993,7 +2026,7 @@ fun ChatScreen(
 
                                             is ExternalAiChatResult.Error -> {
                                                 Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
-                                                generationStatus = "답변 저장 중..."
+                                                chatViewModel.update(activeConversationId) { it.copy(generationStatus = "답변 저장 중...") }
                                                 dao.insertMessage(
                                                     MessageEntity(
                                                         conversationId = activeConversationId,
@@ -2005,38 +2038,50 @@ fun ChatScreen(
                                                 dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
                                             }
                                         }
+                                        chatViewModel.update(activeConversationId) { it.copy(isGenerating = false, activeRequestId = null, streamingText = null, streamingMetricsLine = null, generationStatus = null) }
                                         return@launch
                                     }
 
-                                    val requestId = UUID.randomUUID().toString()
-                                    val snapshot = GenerationRequestSnapshot(
-                                        requestId = requestId,
-                                        conversationId = activeConversationId,
-                                        generationModeKey = generationMode.name,
-                                        selectedModelId = selectedModel,
-                                        selectedModelPath = selectedModelPath,
-                                        settings = generationSettings,
-                                        reasoningEnabled = reasoningEnabled,
-                                        webSearchPolicy = when {
-                                            webSearchEnabled -> GenerationRequestSnapshot.WebSearchPolicy.ENABLED
-                                            shouldAutoUseWebSearch(userInput) -> GenerationRequestSnapshot.WebSearchPolicy.AUTO
-                                            else -> GenerationRequestSnapshot.WebSearchPolicy.DISABLED
-                                        },
-                                        attachmentIds = attachmentsToSend.map { it.localPath },
-                                        multimodalImagePaths = imageAttachments.map { it.localPath },
-                                        promptText = userInstruction,
-                                        createdAt = System.currentTimeMillis()
-                                    )
-                                    val registryConversationId = activeConversationId
-                                    chatViewModel.update(activeConversationId) { it.copy(activeRequestId = requestId) }
-                                    val session = chatViewModel.registry.start(scope, snapshot) { s ->
+                                    chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
                                         if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
-                                        val capturedMessages = messages
                                         try {
+                                            // === WEB SEARCH ===
+                                            val previousUserMessage = snapshot.history
+                                                .asReversed()
+                                                .firstOrNull { it.role == "user" }
+                                                ?.content
+                                                ?.let { parseMessageAttachments(it).body }
+                                                ?.trim()
+                                                .orEmpty()
+
+                                            val webSearchResponse = if (snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) {
+                                                chatViewModel.update(s.conversationId) { it.copy(generationStatus = "인터넷 검색 중...") }
+                                                val searchIntent = FusionWebSearch.detectIntent(snapshot.promptText)
+                                                chatViewModel.update(s.conversationId) { it.copy(generationStatus = when (searchIntent) {
+                                                    SearchIntent.NEWS -> "뉴스 검색 중..."
+                                                    else -> "인터넷 검색 중..."
+                                                }) }
+                                                val response = FusionWebSearch.search(
+                                                    userInput = snapshot.promptText,
+                                                    previousUserMessage = previousUserMessage,
+                                                    providerRepository = webSearchProviderRepository
+                                                )
+                                                chatViewModel.update(s.conversationId) { it.copy(generationStatus = "검색 결과 정리 중...") }
+                                                response
+                                            } else null
+                                            chatViewModel.update(s.conversationId) { it.copy(actualWebSearchUsed = webSearchResponse != null) }
+                                            val webSearchResult = webSearchResponse?.toStructuredContext()
+                                            recordWebSearchDiagnostics(context, webSearchResponse)
+
+                                            if (webSearchResponse != null) {
+                                                chatViewModel.update(s.conversationId) { it.copy(generationStatus = if (snapshot.reasoningEnabled) "더 깊게 생각하는 중..." else "답변 생성 중...") }
+                                            }
+
+                                            // === MODEL PATH VALIDATION ===
                                             var activeModelPath = snapshot.selectedModelPath?.takeIf { File(it).exists() }
                                                 ?: builtInModels
                                                     .firstOrNull {
-                                                        it.name == (snapshot.selectedModelId ?: selectedModel) && isModelDownloaded(
+                                                        it.name == snapshot.selectedModelId && isModelDownloaded(
                                                             context,
                                                             it
                                                         )
@@ -2047,29 +2092,89 @@ fun ChatScreen(
                                                 snapshot.selectedModelPath?.takeIf { it.isNotBlank() }?.let {
                                                     android.util.Log.e("FusionEngine", "Selected model file missing: $it")
                                                 }
-                                                dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = if (!snapshot.selectedModelPath.isNullOrBlank()) "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요." else "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.", createdAt = System.currentTimeMillis()))
-                                                dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
+                                                if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = if (!snapshot.selectedModelPath.isNullOrBlank()) "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요." else "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.", createdAt = System.currentTimeMillis()))
+                                                    dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                }
                                                 return@start
                                             }
 
                                             val missingImage = snapshot.multimodalImagePaths.firstOrNull { !File(it).exists() }
                                             if (missingImage != null) {
-                                                Toast.makeText(context, "이미지 파일을 찾을 수 없습니다: $missingImage", Toast.LENGTH_LONG).show()
-                                                dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n$missingImage", createdAt = System.currentTimeMillis()))
-                                                dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
+                                                if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                    Toast.makeText(context, "이미지 파일을 찾을 수 없습니다: $missingImage", Toast.LENGTH_LONG).show()
+                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n$missingImage", createdAt = System.currentTimeMillis()))
+                                                    dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                }
                                                 return@start
                                             }
 
-                                            if (snapshot.multimodalImagePaths.isNotEmpty() && !isMultimodalCapableModel(snapshot.selectedModelId ?: selectedModel, activeModelPath!!)) {
-                                                dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.", createdAt = System.currentTimeMillis()))
-                                                dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
+                                            if (snapshot.multimodalImagePaths.isNotEmpty() && !isMultimodalCapableModel(snapshot.selectedModelId ?: capturedSelectedModel, activeModelPath!!)) {
+                                                if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.", createdAt = System.currentTimeMillis()))
+                                                    dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                }
                                                 return@start
                                             }
 
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
 
-                                            generationStatus = "모델 로딩 중..."
+                                            // === PROMPT CONSTRUCTION ===
+                                            val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
+                                                modelName = snapshot.selectedModelId ?: capturedSelectedModel,
+                                                settings = snapshot.settings
+                                            )
+                                            val requestSettings = snapshot.settings.copy(
+                                                speculativeDecodingEnabled = mtpEnabledForRequest
+                                            )
+                                            val fusionSystemPrompt = buildFusionSystemPrompt(
+                                                reasoningEnabled = snapshot.reasoningEnabled,
+                                                webSearchEnabled = webSearchResponse != null,
+                                                webContext = webSearchResult,
+                                                promptLabInstruction = snapshot.promptLabInstruction
+                                            )
+                                            val currentMessages = buildList<ChatMessage> {
+                                                add(
+                                                    ChatMessage(
+                                                        role = "system",
+                                                        content = """
+                FUSION_GENERATION_SETTINGS
+                maxTokens=${requestSettings.maxTokens}
+                topK=${requestSettings.topK}
+                topP=${requestSettings.topP}
+                temperature=${requestSettings.temperature}
+                accelerator=${requestSettings.accelerator.name}
+                reasoningBudgetTokens=${requestSettings.reasoningBudgetTokens}
+                speculativeDecoding=${requestSettings.speculativeDecodingEnabled == true}
+            """.trimIndent()
+                                                    )
+                                                )
+                                                add(ChatMessage(role = "system", content = fusionSystemPrompt))
+                                                snapshot.selectedModelPath?.let { modelPath ->
+                                                    add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+                                                }
+                                                add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, snapshot.selectedModelId ?: capturedSelectedModel).name}"))
+                                                buildSavedMemoryContext(context, settingsPrefs, s.conversationId, snapshot.selectedModelId ?: capturedSelectedModel).text?.let { memoryContext ->
+                                                    add(ChatMessage(role = "system", content = memoryContext))
+                                                }
+                                                buildConversationSummaryContextText(loadConversationSummary(context, s.conversationId))?.let { summaryContext ->
+                                                    add(ChatMessage(role = "system", content = summaryContext))
+                                                }
+                                                addAll(snapshot.history.map { message ->
+                                                    ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content)
+                                                })
+                                                val finalUserContent = buildFinalUserContent(
+                                                    body = snapshot.promptText,
+                                                    attachments = if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend,
+                                                    webSearchEnabled = webSearchResponse != null,
+                                                    webSearchResult = webSearchResult
+                                                )
+                                                add(ChatMessage(role = "user", content = finalUserContent))
+                                            }
 
+                                            chatViewModel.update(s.conversationId) { it.copy(generationStatus = "모델 로딩 중...") }
+
+                                            // === GENERATION ===
                                             val generationStartMs = SystemClock.elapsedRealtime()
                                             var firstTokenLatencyMs: Long? = null
 
@@ -2077,15 +2182,14 @@ fun ChatScreen(
                                                 generateWithLiteRtRecovery(
                                                     engine = engine,
                                                     onBeforeRetry = {
-                                                        generationStatus = "모델 로딩 중..."
-                                                        streamingAssistantText = null
+                                                        chatViewModel.update(s.conversationId) { it.copy(generationStatus = "모델 로딩 중...", streamingText = null) }
                                                     },
                                                     generateOnce = {
                                                         if (snapshot.multimodalImagePaths.isNotEmpty()) {
-                                                            generationStatus = "이미지 분석 준비 중..."
+                                                            chatViewModel.update(s.conversationId) { it.copy(generationStatus = "이미지 분석 준비 중...") }
                                                             val streamedOutput = StringBuilder()
-                                                            if (!snapshot.reasoningEnabled) streamingAssistantText = ""
-                                                            generationStatus = "이미지 분석 중..."
+                                                            if (!snapshot.reasoningEnabled) chatViewModel.update(s.conversationId) { it.copy(streamingText = "") }
+                                                            chatViewModel.update(s.conversationId) { it.copy(generationStatus = "이미지 분석 중...") }
                                                             engine.generateMultimodalStreaming(
                                                                 messages = currentMessages,
                                                                 modelPath = activeModelPath!!,
@@ -2098,18 +2202,19 @@ fun ChatScreen(
                                                                         val visibleText = streamedOutput.toString()
                                                                         scope.launch {
                                                                             if (currentConversationId == s.conversationId && chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                                                streamingAssistantText = visibleText
+                                                                                chatViewModel.update(s.conversationId) { it.copy(streamingText = visibleText) }
                                                                             }
                                                                         }
                                                                     }
-                                                                )
-                                                            } else if (snapshot.reasoningEnabled) {
-                                                            generationStatus = "더 깊게 생각하는 중..."
+                                                                }
+                                                            )
+                                                        } else if (snapshot.reasoningEnabled) {
+                                                            chatViewModel.update(s.conversationId) { it.copy(generationStatus = "더 깊게 생각하는 중...") }
                                                             engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
                                                         } else {
                                                             val streamedOutput = StringBuilder()
-                                                            streamingAssistantText = ""
-                                                            generationStatus = "답변 생성 중..."
+                                                            chatViewModel.update(s.conversationId) { it.copy(streamingText = "") }
+                                                            chatViewModel.update(s.conversationId) { it.copy(generationStatus = "답변 생성 중...") }
                                                             engine.generateStreaming(
                                                                 messages = currentMessages,
                                                                 modelPath = activeModelPath!!,
@@ -2118,19 +2223,18 @@ fun ChatScreen(
                                                                     if (firstTokenLatencyMs == null && token.isNotEmpty()) firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
                                                                     streamedOutput.append(token)
                                                                     val visibleText = streamedOutput.toString()
-                                                                        scope.launch {
-                                                                            if (currentConversationId == s.conversationId && chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                                                streamingAssistantText = visibleText
-                                                                            }
+                                                                    scope.launch {
+                                                                        if (currentConversationId == s.conversationId && chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                                            chatViewModel.update(s.conversationId) { it.copy(streamingText = visibleText) }
                                                                         }
                                                                     }
-                                                                )
-                                                            }
+                                                                }
+                                                            )
                                                         }
                                                     }
                                                 )
                                             }
-
+                                            
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
 
                                             val rawReply = when (rawOutcome) {
@@ -2145,7 +2249,9 @@ fun ChatScreen(
                                                 }
                                                 is GenerationOutcome.Failure -> {
                                                     DeveloperLogStore.record(context, "chat", "답변 생성 실패", rawOutcome.kind.name)
-                                                    Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
+                                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                        Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
+                                                    }
                                                     return@start
                                                 }
                                             }
@@ -2154,72 +2260,29 @@ fun ChatScreen(
 
                                             val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
                                             val metricsLine = buildFusionMetricsLine(
-                                                modelName = shortModelName(snapshot.selectedModelId ?: selectedModel),
+                                                modelName = shortModelName(snapshot.selectedModelId ?: capturedSelectedModel),
                                                 acceleratorName = buildAcceleratorLabel(acceleratorName = requestSettings.accelerator.name, speculativeDecodingEnabled = mtpEnabledForRequest),
                                                 generatedText = rawReply,
                                                 totalGenerationMs = totalGenerationMs,
                                                 firstTokenLatencyMs = firstTokenLatencyMs,
-                                                settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId ?: selectedModel, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED, mtpStatus = engine.lastMtpStatus))
+                                                settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId ?: capturedSelectedModel, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED, mtpStatus = engine.lastMtpStatus))
                                             )
-                                            streamingMetricsLine = metricsLine
-                                            generationStatus = "답변 저장 중..."
-                                            dao.insertMessage(MessageEntity(conversationId = registryConversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(rawReply, metricsLine), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
-                                            dao.updateConversationTime(registryConversationId, System.currentTimeMillis())
-                                            pendingAttachments.clear()
+                                            chatViewModel.update(s.conversationId) { it.copy(streamingMetricsLine = metricsLine, generationStatus = "답변 저장 중...") }
+                                            if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+                                            dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(rawReply, metricsLine), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
+                                            dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
                                         } catch (e: Exception) {
                                             Log.e("FusionEngine", "Chat generation failed", e)
-                                            if (e is BenchmarkRunningException) {
-                                                Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
-                                                return@start
-                                            }
-                                            if (e is kotlinx.coroutines.CancellationException) {
-                                                if (e.message?.contains("superseded") == true) wasSuperseded.set(true)
-                                                throw e
-                                            }
+                                            if (e is BenchmarkRunningException) return@start
+                                            if (e is kotlinx.coroutines.CancellationException) throw e
                                             if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
                                                 Toast.makeText(context, if (isLiteRtModelLoadException(e)) "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요." else "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                             }
                                         }
                                     }
-                                    session.job.join()
                                 } catch (e: Exception) {
-                                    if (!userMessageInserted && attachmentsToSend.isNotEmpty()) {
-                                        attachmentsToSend.forEach { attachment ->
-                                            val deleted = AttachmentStorageManager.deletePendingAttachmentFile(
-                                                context = context,
-                                                path = attachment.localPath
-                                            )
-                                            if (!deleted) {
-                                                AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
-                                            }
-                                        }
-                                        DeveloperLogStore.record(
-                                            context,
-                                            "attachment",
-                                            "첨부 파일 저장 롤백",
-                                            "count=${attachmentsToSend.size}, error=${e::class.java.simpleName}"
-                                        )
-                                    }
                                     Log.e("FusionEngine", "Chat generation failed", e)
-                                    if (e is BenchmarkRunningException) {
-                                        Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
-                                        return@launch
-                                    }
-                                    if (e is kotlinx.coroutines.CancellationException) {
-                                        throw e
-                                    }
-                                    Toast.makeText(
-                                        context,
-                                        if (isLiteRtModelLoadException(e)) "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요." else "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                } finally {
-                                    if (!wasSuperseded.get()) {
-                                        generationStatus = null
-                                        isGenerating = false
-                                        streamingAssistantText = null
-                                        streamingMetricsLine = null
-                                    }
+                                    if (e is kotlinx.coroutines.CancellationException) throw e
                                 }
                             }
                         }
@@ -2717,7 +2780,6 @@ fun ChatScreen(
                             val targetId = conversationId
                             if (targetId != 0L) {
                                 chatViewModel.cancelAndAwait(targetId, reason = "delete-conversation")
-                                conversationState.remove(targetId)
                                 // Re-check existence: a race could have removed it.
                                 if (dao.getConversationById(targetId) != null) {
                                     dao.deleteConversation(targetId)

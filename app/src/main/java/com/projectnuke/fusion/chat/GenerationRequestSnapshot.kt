@@ -1,5 +1,6 @@
 package com.projectnuke.fusion.chat
 
+import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
 
 /**
@@ -24,6 +25,8 @@ data class GenerationRequestSnapshot(
     val multimodalImagePaths: List<String>,
     val promptText: String,
     val createdAt: Long,
+    val history: List<ChatMessage> = emptyList(),
+    val promptLabInstruction: String = "",
 ) {
     enum class WebSearchPolicy { DISABLED, ENABLED, AUTO }
 }
