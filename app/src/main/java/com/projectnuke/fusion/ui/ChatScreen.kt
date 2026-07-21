@@ -2107,17 +2107,7 @@ fun ChatScreen(
 
                                             // === GENERATION ===
                                             val generationStartMs = SystemClock.elapsedRealtime()
-                                            val firstTokenLatencyLock = Any()
-                                            var firstTokenLatencyMs: Long? = null
-                                            fun recordFirstToken(token: String) {
-                                                if (token.isNotEmpty() && firstTokenLatencyMs == null) {
-                                                    synchronized(firstTokenLatencyLock) {
-                                                        if (firstTokenLatencyMs == null) {
-                                                            firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
-                                                        }
-                                                    }
-                                                }
-                                            }
+                                            val firstTokenLatency = java.util.concurrent.atomic.AtomicLong(-1L)
 
                                             val rawOutcome = FusionRuntimeLock.withChatGeneration {
                                                 generateWithLiteRtRecovery(
@@ -2126,10 +2116,11 @@ fun ChatScreen(
                                                         chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "모델 로딩 중...", streamingText = null) }
                                                     },
                                                     generateOnce = {
+                                                        val requestScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.currentCoroutineContext())
                                                         if (snapshot.multimodalImagePaths.isNotEmpty() && !snapshot.reasoningEnabled) {
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 준비 중...") }
                                                             val coalescer = TokenCoalescer(
-                                                                scope = chatViewModel.scope,
+                                                                scope = requestScope,
                                                                 shouldPublish = { chatViewModel.registry.isActive(s.conversationId, snapshot.requestId) },
                                                                 onPublish = { text ->
                                                                     chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = text) }
@@ -2144,7 +2135,7 @@ fun ChatScreen(
                                                                     settings = requestSettings,
                                                                     imagePaths = snapshot.multimodalImagePaths,
                                                                     onToken = { token ->
-                                                                        recordFirstToken(token)
+                                                                        if (token.isNotEmpty()) firstTokenLatency.compareAndSet(-1L, SystemClock.elapsedRealtime() - generationStartMs)
                                                                         coalescer.append(token)
                                                                     }
                                                                 )
@@ -2157,9 +2148,6 @@ fun ChatScreen(
                                                                 coalescer.abort()
                                                                 throw e
                                                             }
-                                                        } else if (snapshot.reasoningEnabled) {
-                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "더 깊게 생각하는 중...") }
-                                                            engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
                                                         } else if (snapshot.multimodalImagePaths.isNotEmpty()) {
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 준비 중...") }
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 중...") }
@@ -2169,12 +2157,15 @@ fun ChatScreen(
                                                                 settings = requestSettings,
                                                                 imagePaths = snapshot.multimodalImagePaths,
                                                                 onToken = { token ->
-                                                                    recordFirstToken(token)
+                                                                    if (token.isNotEmpty()) firstTokenLatency.compareAndSet(-1L, SystemClock.elapsedRealtime() - generationStartMs)
                                                                 }
                                                             )
+                                                        } else if (snapshot.reasoningEnabled) {
+                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "더 깊게 생각하는 중...") }
+                                                            engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
                                                         } else {
                                                             val coalescer = TokenCoalescer(
-                                                                scope = chatViewModel.scope,
+                                                                scope = requestScope,
                                                                 shouldPublish = { chatViewModel.registry.isActive(s.conversationId, snapshot.requestId) },
                                                                 onPublish = { text ->
                                                                     chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = text) }
@@ -2188,7 +2179,7 @@ fun ChatScreen(
                                                                     modelPath = activeModelPath!!,
                                                                     settings = requestSettings,
                                                                     onToken = { token ->
-                                                                        recordFirstToken(token)
+                                                                        if (token.isNotEmpty()) firstTokenLatency.compareAndSet(-1L, SystemClock.elapsedRealtime() - generationStartMs)
                                                                         coalescer.append(token)
                                                                     }
                                                                 )
@@ -2206,6 +2197,8 @@ fun ChatScreen(
                                                 )
                                             }
                                             
+                                            val firstTokenLatencyMs = firstTokenLatency.get().let { if (it < 0L) null else it }
+
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
 
                                             val rawReply = when (rawOutcome) {

@@ -451,9 +451,10 @@ class LiteRtLlmEngine(
             .joinToString("\n\n") { it.content }
 
         return buildString {
-            appendLine("너는 Fusion이라는 온디바이스 AI 어시스턴트야.")
-            appendLine("답변은 한국어로 자연스럽게 하고, 모르면 모른다고 말해.")
-            appendLine("추론이나 추정은 추론이라고 명시해.")
+            appendLine("당신은 기기 내에서 실행되는 AI 비서 Fusion입니다.")
+            appendLine("한국어로 자연스럽게 답변하며 일관되게 존댓말을 사용합니다.")
+            appendLine("모르는 내용은 모른다고 명확히 밝힙니다.")
+            appendLine("추론이나 추정은 그 사실을 명확히 구분합니다.")
             appendLine()
             appendLine("GENERATION_SETTINGS")
             appendLine("maxTokens=${settings.maxTokens}")
