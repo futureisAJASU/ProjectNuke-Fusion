@@ -24,6 +24,7 @@ data class GenerationRequestSnapshot(
     val attachmentIds: List<String>,
     val multimodalImagePaths: List<String>,
     val promptText: String,
+    val rawUserText: String,
     val createdAt: Long,
     val history: List<ChatMessage> = emptyList(),
     val promptLabInstruction: String = "",

@@ -53,6 +53,40 @@ class ChatViewModel {
         }
     }
 
+    /**
+     * Update state only when [requestId] still matches the stored
+     * [activeRequestId]. If [requireActiveSession] is true, also verify the
+     * [GenerationSessionRegistry] session for this conversation is still
+     * active and matches [requestId].
+     */
+    fun updateRequestState(
+        conversationId: Long,
+        requestId: String,
+        requireActiveSession: Boolean = false,
+        transform: (ConversationGenerationState) -> ConversationGenerationState
+    ) {
+        _states.update { current ->
+            val existing = current[conversationId] ?: return@update current
+            if (existing.activeRequestId != requestId) return@update current
+            if (requireActiveSession && !registry.isActive(conversationId, requestId)) return@update current
+            current + (conversationId to transform(existing))
+        }
+    }
+
+    /**
+     * Clear the per-conversation generation state only when [requestId]
+     * still matches [activeRequestId]. Unlike [updateRequestState], this
+     * does NOT require an active session — a cancelling/non-active Job must
+     * still be able to clean up its state.
+     */
+    fun finishRequestState(conversationId: Long, requestId: String) {
+        _states.update { current ->
+            val existing = current[conversationId] ?: return@update current
+            if (existing.activeRequestId != requestId) return@update current
+            current + (conversationId to ConversationGenerationState())
+        }
+    }
+
     fun clear(conversationId: Long) {
         _states.update { it - conversationId }
     }
