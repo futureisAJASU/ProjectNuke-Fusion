@@ -289,7 +289,7 @@ private fun AbHistoryDetail(
                     }) { Text(if (result.rating == AbResultRating.PREFERRED) "선호 취소" else "선호", color = AbHistoryAccent) }
                     TextButton(onClick = {
                         onRating(result.targetLabel, if (result.rating == AbResultRating.DISLIKED) AbResultRating.NONE else AbResultRating.DISLIKED)
-                    }) { Text(if (result.rating == AbResultRating.DISLIKED) "평가 취소" else "별로예요", color = AbHistorySubtle) }
+                    }) { Text(if (result.rating == AbResultRating.DISLIKED) "평가 취소" else "비선호", color = AbHistorySubtle) }
                 }
             }
         }

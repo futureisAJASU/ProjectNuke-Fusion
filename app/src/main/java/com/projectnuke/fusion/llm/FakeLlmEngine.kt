@@ -23,7 +23,7 @@ class FakeLlmEngine : LlmEngine {
             ?: ""
 
         val text = buildString {
-            appendLine("FakeLlmEngine 테스트 응답이야.")
+            appendLine("FakeLlmEngine 테스트 응답입니다.")
             appendLine()
             appendLine("입력: $lastUserMessage")
             appendLine("모델 경로: $modelPath")

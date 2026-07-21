@@ -74,17 +74,17 @@ class LiteRtLlmEngine(
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "메모리가 부족하여 모델을 불러올 수 없어요."
+                    message = "메모리가 부족하여 모델을 불러올 수 없습니다."
                 )
             } catch (e: VirtualMachineError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: LinkageError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM engine init failed", e)
@@ -177,17 +177,17 @@ class LiteRtLlmEngine(
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "메모리가 부족하여 모델을 불러올 수 없어요."
+                    message = "메모리가 부족하여 모델을 불러올 수 없습니다."
                 )
             } catch (e: VirtualMachineError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: LinkageError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없어요."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: Exception) {
                 if (isVisionBackendUnsupported(e)) {

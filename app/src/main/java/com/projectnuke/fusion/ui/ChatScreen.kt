@@ -157,6 +157,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import com.projectnuke.fusion.chat.GenerationRequestSnapshot
+import com.projectnuke.fusion.chat.TokenCoalescer
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.roundToInt
@@ -1559,7 +1560,7 @@ fun ChatScreen(
                     )
                 }
             }
-            Toast.makeText(context, "대화가 바뀌어 첨부를 취소했어요.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "대화가 변경되어 첨부를 취소했습니다.", Toast.LENGTH_SHORT).show()
             return@rememberLauncherForActivityResult
         }
 
@@ -2056,7 +2057,7 @@ fun ChatScreen(
 
                                             if (snapshot.multimodalImagePaths.isNotEmpty() && !isMultimodalCapableModel(snapshot.selectedModelId!!, activeModelPath!!)) {
                                                 if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이 모델은 이미지 입력을 지원하지 않는 것 같아.", createdAt = System.currentTimeMillis()))
+                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이 모델은 이미지 입력을 지원하지 않습니다.", createdAt = System.currentTimeMillis()))
                                                     dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
                                                 }
                                                 return@start
@@ -2106,7 +2107,17 @@ fun ChatScreen(
 
                                             // === GENERATION ===
                                             val generationStartMs = SystemClock.elapsedRealtime()
+                                            val firstTokenLatencyLock = Any()
                                             var firstTokenLatencyMs: Long? = null
+                                            fun recordFirstToken(token: String) {
+                                                if (token.isNotEmpty() && firstTokenLatencyMs == null) {
+                                                    synchronized(firstTokenLatencyLock) {
+                                                        if (firstTokenLatencyMs == null) {
+                                                            firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
+                                                        }
+                                                    }
+                                                }
+                                            }
 
                                             val rawOutcome = FusionRuntimeLock.withChatGeneration {
                                                 generateWithLiteRtRecovery(
@@ -2115,10 +2126,42 @@ fun ChatScreen(
                                                         chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "모델 로딩 중...", streamingText = null) }
                                                     },
                                                     generateOnce = {
-                                                        if (snapshot.multimodalImagePaths.isNotEmpty()) {
+                                                        if (snapshot.multimodalImagePaths.isNotEmpty() && !snapshot.reasoningEnabled) {
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 준비 중...") }
-                                                            val streamedOutput = StringBuilder()
-                                                            if (!snapshot.reasoningEnabled) chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = "") }
+                                                            val coalescer = TokenCoalescer(
+                                                                scope = chatViewModel.scope,
+                                                                shouldPublish = { chatViewModel.registry.isActive(s.conversationId, snapshot.requestId) },
+                                                                onPublish = { text ->
+                                                                    chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = text) }
+                                                                }
+                                                            )
+                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = "") }
+                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 중...") }
+                                                            try {
+                                                                val outcome = engine.generateMultimodalStreaming(
+                                                                    messages = currentMessages,
+                                                                    modelPath = activeModelPath!!,
+                                                                    settings = requestSettings,
+                                                                    imagePaths = snapshot.multimodalImagePaths,
+                                                                    onToken = { token ->
+                                                                        recordFirstToken(token)
+                                                                        coalescer.append(token)
+                                                                    }
+                                                                )
+                                                                when (outcome) {
+                                                                    is GenerationOutcome.Success -> coalescer.finish()
+                                                                    else -> coalescer.abort()
+                                                                }
+                                                                outcome
+                                                            } catch (e: Exception) {
+                                                                coalescer.abort()
+                                                                throw e
+                                                            }
+                                                        } else if (snapshot.reasoningEnabled) {
+                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "더 깊게 생각하는 중...") }
+                                                            engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
+                                                        } else if (snapshot.multimodalImagePaths.isNotEmpty()) {
+                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 준비 중...") }
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 중...") }
                                                             engine.generateMultimodalStreaming(
                                                                 messages = currentMessages,
@@ -2126,40 +2169,38 @@ fun ChatScreen(
                                                                 settings = requestSettings,
                                                                 imagePaths = snapshot.multimodalImagePaths,
                                                                 onToken = { token ->
-                                                                    if (firstTokenLatencyMs == null && token.isNotEmpty()) firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
-                                                                    streamedOutput.append(token)
-                                                                    if (!snapshot.reasoningEnabled) {
-                                                                        val visibleText = streamedOutput.toString()
-                                                                        scope.launch {
-                                                                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                                                chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = visibleText) }
-                                                                            }
-                                                                        }
-                                                                    }
+                                                                    recordFirstToken(token)
                                                                 }
                                                             )
-                                                        } else if (snapshot.reasoningEnabled) {
-                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "더 깊게 생각하는 중...") }
-                                                            engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
                                                         } else {
-                                                            val streamedOutput = StringBuilder()
+                                                            val coalescer = TokenCoalescer(
+                                                                scope = chatViewModel.scope,
+                                                                shouldPublish = { chatViewModel.registry.isActive(s.conversationId, snapshot.requestId) },
+                                                                onPublish = { text ->
+                                                                    chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = text) }
+                                                                }
+                                                            )
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = "") }
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 생성 중...") }
-                                                            engine.generateStreaming(
-                                                                messages = currentMessages,
-                                                                modelPath = activeModelPath!!,
-                                                                settings = requestSettings,
-                                                                onToken = { token ->
-                                                                    if (firstTokenLatencyMs == null && token.isNotEmpty()) firstTokenLatencyMs = SystemClock.elapsedRealtime() - generationStartMs
-                                                                    streamedOutput.append(token)
-                                                                    val visibleText = streamedOutput.toString()
-                                                                    scope.launch {
-                                                                        if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                                            chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingText = visibleText) }
-                                                                        }
+                                                            try {
+                                                                val outcome = engine.generateStreaming(
+                                                                    messages = currentMessages,
+                                                                    modelPath = activeModelPath!!,
+                                                                    settings = requestSettings,
+                                                                    onToken = { token ->
+                                                                        recordFirstToken(token)
+                                                                        coalescer.append(token)
                                                                     }
+                                                                )
+                                                                when (outcome) {
+                                                                    is GenerationOutcome.Success -> coalescer.finish()
+                                                                    else -> coalescer.abort()
                                                                 }
-                                                            )
+                                                                outcome
+                                                            } catch (e: Exception) {
+                                                                coalescer.abort()
+                                                                throw e
+                                                            }
                                                         }
                                                     }
                                                 )
@@ -2627,7 +2668,7 @@ fun ChatScreen(
                 if (model.downloadUrl == null) {
                     Toast.makeText(
                         context,
-                        "아직 다운로드 URL이 등록되지 않은 모델이야",
+                        "아직 다운로드 URL이 등록되지 않은 모델입니다",
                         Toast.LENGTH_SHORT
                     ).show()
                     pendingDownloadModel = null
@@ -3279,7 +3320,7 @@ private fun EmptyChatBody(bottomPadding: androidx.compose.ui.unit.Dp) {
         Spacer(modifier = Modifier.height(12.dp))
 
         Text(
-            text = "새 채팅을 시작해보세요.",
+            text = "새 채팅을 시작해 보세요.",
             color = TextPrimary,
             fontSize = 20.sp,
             fontWeight = FontWeight.Medium
@@ -9140,17 +9181,13 @@ Do not output internal role names or labels such as thought, user, model, assist
 Avoid exaggerated headings, excessive emojis, and marketing-like expressions.
 
 한국어 지침:
-너는 Fusion이다.
-사용자와 자연스럽게 대화하는 개인 AI 친구다.
-
-기본 말투는 친근한 존댓말이다.
-기술 질문에는 정확하고 차분하게 답한다.
-일상 대화에는 부담 없이 자연스럽게 반응한다.
-모르는 내용은 모른다고 말한다.
-불확실한 내용은 추론이라고 구분한다.
-사용자의 질문을 그대로 반복하지 않는다.
-thought, user, model, assistant 같은 내부 태그나 역할명을 출력하지 않는다.
-과장된 제목, 과한 이모지, 마케팅식 표현은 피한다.
+당신은 기기 내에서 실행되는 AI 비서 Fusion입니다.
+한국어로 자연스럽게 대화하며 일관되게 존댓말을 사용합니다.
+모르는 내용은 모른다고 명확히 밝힙니다.
+불확실한 내용은 추론임을 명확히 구분합니다.
+사용자의 질문을 그대로 반복하지 않습니다.
+thought, user, model, assistant 같은 내부 태그나 역할명을 출력하지 않습니다.
+과장된 제목, 과한 이모지, 마케팅식 표현은 피합니다.
 """.trimIndent()
 
     val outputRule = if (reasoningEnabled) {
