@@ -1106,16 +1106,39 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
-                            withContext(NonCancellable) {
-                                val newId = dao.insertMessage(MessageEntity(conversationId = request.conversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(reply, metrics), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
+                            val persistedUpdatedState = withContext(NonCancellable) {
                                 val previousVersionState = loadResponseVersionState(context, request.conversationId)
-                                val groupId = previousUser.id
-                                val updated = previousVersionState.copy(groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId), activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId))
-                                saveResponseVersionState(context, request.conversationId, updated)
-                                dao.updateConversationTime(request.conversationId, System.currentTimeMillis())
-                                if (currentConversationId == request.conversationId) {
-                                    responseVersionState = updated
+                                var insertedMessageId: Long? = null
+                                var versionStateSaved = false
+                                try {
+                                    val newId = dao.insertMessage(MessageEntity(conversationId = request.conversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(reply, metrics), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
+                                    insertedMessageId = newId
+                                    val groupId = previousUser.id
+                                    val updated = previousVersionState.copy(groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId), activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId))
+                                    saveResponseVersionState(context, request.conversationId, updated)
+                                    versionStateSaved = true
+                                    dao.updateConversationTime(request.conversationId, System.currentTimeMillis())
+                                    updated
+                                } catch (e: Exception) {
+                                    if (insertedMessageId != null) {
+                                        try {
+                                            dao.deleteMessageById(insertedMessageId)
+                                        } catch (rollbackException: Exception) {
+                                            e.addSuppressed(rollbackException)
+                                        }
+                                    }
+                                    if (versionStateSaved) {
+                                        try {
+                                            saveResponseVersionState(context, request.conversationId, previousVersionState)
+                                        } catch (rollbackException: Exception) {
+                                            e.addSuppressed(rollbackException)
+                                        }
+                                    }
+                                    throw e
                                 }
+                            }
+                            if (currentConversationId == request.conversationId) {
+                                responseVersionState = persistedUpdatedState
                             }
                         } catch (e: Exception) {
                             if (e is CancellationException) throw e
@@ -1127,8 +1150,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         }
                     }
                 } catch (e: Exception) {
-                    if (e is CancellationException) throw e
                     chatViewModel.finishRequestState(retrySnapshot.conversationId, retrySnapshot.requestId)
+
+                    if (e is CancellationException) throw e
+
                     if (currentConversationId == retrySnapshot.conversationId) {
                         Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                     }
