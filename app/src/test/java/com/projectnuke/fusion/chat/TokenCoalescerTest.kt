@@ -1,7 +1,9 @@
 package com.projectnuke.fusion.chat
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.CompletableDeferred
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,114 +14,246 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TokenCoalescerTest {
-    @Test fun concurrentFinishWaitsForOneTerminalOperationAndPublishesOnce() = runBlocking {
-        val entered = CompletableDeferred<Unit>()
-        val release = CompletableDeferred<Unit>()
-        val publishes = AtomicInteger()
-        val shouldCalls = AtomicInteger()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        try {
-            val coalescer = TokenCoalescer(scope, shouldPublish = { shouldCalls.incrementAndGet() > 1 }, onPublish = {
-                publishes.incrementAndGet(); entered.complete(Unit); runBlocking { release.await() }
-            })
-            coalescer.append("answer")
-            val first = launch { coalescer.finish() }
-            entered.await()
-            val second = launch { coalescer.finish() }
-            assertTrue(!second.isCompleted)
-            release.complete(Unit)
-            first.join(); second.join()
-            assertEquals(1, publishes.get())
-            assertEquals("answer", coalescer.finish())
-        } finally { scope.cancel() }
-    }
-
-    @Test fun concurrentAbortWaitsForConsumerCleanupAndIsIdempotent() = runBlocking {
-        val entered = CompletableDeferred<Unit>()
-        val release = CompletableDeferred<Unit>()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Test
+    fun concurrentFinishWaitsForOneTerminalOperationAndPublishesOnce() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val count = AtomicInteger()
+        val snapshots = mutableListOf<String>()
+        val scope = testScope()
         try {
             val coalescer = TokenCoalescer(scope, onPublish = {
-                entered.complete(Unit); runBlocking { release.await() }
+                count.incrementAndGet()
+                synchronized(snapshots) { snapshots += it }
+                entered.countDown()
+                awaitGate(release)
             })
-            coalescer.append("x"); entered.await()
-            val a = launch { coalescer.abort() }; val b = launch { coalescer.abort() }
-            assertTrue(!a.isCompleted || !b.isCompleted)
-            release.complete(Unit); withTimeout(2_000) { a.join(); b.join() }
-            coalescer.abort()
-        } finally { scope.cancel() }
+            val first = async(Dispatchers.Default) { coalescer.finish() }
+            awaitGate(entered)
+            val second = async { coalescer.finish() }
+            assertTrue("second finish returned before final callback completed", !second.isCompleted)
+            release.countDown()
+            val firstText = withTimeout(2_000) { first.await() }
+            val secondText = withTimeout(2_000) { second.await() }
+            assertEquals("", firstText)
+            assertEquals(firstText, secondText)
+            assertEquals(1, count.get())
+            assertEquals(listOf(""), synchronized(snapshots) { snapshots.toList() })
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun abortDuringFinishingSuppressesFinalPublication() = runBlocking {
-        val finishStarted = CompletableDeferred<Unit>(); val publishes = AtomicInteger()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Test
+    fun concurrentAbortCallersWaitForConsumerCleanup() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val scope = testScope()
         try {
-            val c = TokenCoalescer(scope, onPublish = { publishes.incrementAndGet(); finishStarted.complete(Unit) })
-            c.append("x"); val finish = launch { c.finish() }; finishStarted.await()
-            c.abort(); finish.join(); assertEquals(1, publishes.get())
-        } finally { scope.cancel() }
+            val coalescer = TokenCoalescer(scope, onPublish = {
+                entered.countDown()
+                awaitGate(release)
+            })
+            coalescer.append("x")
+            awaitGate(entered)
+            val first = async { coalescer.abort() }
+            val second = async { coalescer.abort() }
+            assertTrue("abort completed before consumer cleanup", !first.isCompleted || !second.isCompleted)
+            release.countDown()
+            withTimeout(2_000) { first.await(); second.await() }
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun abortWaitsForRunningIntermediatePublicationAndBlocksLaterPublication() = runBlocking {
-        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>(); val count = AtomicInteger()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Test
+    fun abortDuringFinishingSuppressesFinalPublication() = runBlocking {
+        val intermediateEntered = CountDownLatch(1)
+        val releaseIntermediate = CountDownLatch(1)
+        val snapshots = mutableListOf<String>()
+        val scope = testScope()
         try {
-            val c = TokenCoalescer(scope, publishIntervalMs = 0, onPublish = { count.incrementAndGet(); entered.complete(Unit); runBlocking { release.await() } })
-            c.append("a"); entered.await(); val abort = launch { c.abort() }
-            assertTrue(!abort.isCompleted); release.complete(Unit); abort.join(); c.append("b"); assertEquals(1, count.get())
-        } finally { scope.cancel() }
+            val coalescer = TokenCoalescer(scope, onPublish = {
+                synchronized(snapshots) { snapshots += it }
+                intermediateEntered.countDown()
+                awaitGate(releaseIntermediate)
+            })
+            coalescer.append("partial")
+            awaitGate(intermediateEntered)
+            val finish = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                coalescer.finish()
+            }
+            val abort = async { coalescer.abort() }
+            releaseIntermediate.countDown()
+            withTimeout(2_000) { finish.await(); abort.await() }
+            assertEquals(listOf("partial"), synchronized(snapshots) { snapshots.toList() })
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun appendsAfterTerminalBeginsAreIgnored() = runBlocking {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        try { val c = TokenCoalescer(scope); c.append("a"); val text = c.finish(); c.append("b"); assertEquals("a", text); c.abort() }
-        finally { scope.cancel() }
+    @Test
+    fun abortWaitsForInFlightIntermediatePublicationAndPreventsLaterPublication() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val count = AtomicInteger()
+        val scope = testScope()
+        try {
+            val coalescer = TokenCoalescer(scope, publishIntervalMs = 0, onPublish = {
+                count.incrementAndGet()
+                entered.countDown()
+                awaitGate(release)
+            })
+            coalescer.append("a")
+            awaitGate(entered)
+            val abort = async { coalescer.abort() }
+            assertTrue("abort returned while callback was in flight", !abort.isCompleted)
+            release.countDown()
+            withTimeout(2_000) { abort.await() }
+            coalescer.append("b")
+            assertEquals(1, count.get())
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun throwingShouldPublishSettlesFinishAndAbort() = runBlocking {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Test
+    fun appendDuringPublishingIsExcludedFromFinalizedText() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val scope = testScope()
+        try {
+            val coalescer = TokenCoalescer(scope, onPublish = {
+                entered.countDown()
+                awaitGate(release)
+            })
+            coalescer.append("early")
+            val finish = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { coalescer.finish() }
+            awaitGate(entered)
+            coalescer.append("late")
+            release.countDown()
+            assertEquals("early", withTimeout(2_000) { finish.await() })
+            assertEquals("early", withTimeout(2_000) { coalescer.finish() })
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun throwingShouldPublishSettlesTerminalCompletion() = runBlocking {
+        val scope = testScope()
         try {
             val failure = IllegalStateException("should")
-            val c = TokenCoalescer(scope, shouldPublish = { throw failure })
-            try { c.finish(); assertTrue(false) } catch (e: IllegalStateException) { assertSame(failure, e) }
-            withTimeout(2_000) { c.finish(); c.abort() }
-        } finally { scope.cancel() }
+            val coalescer = TokenCoalescer(scope, shouldPublish = { throw failure })
+            try {
+                withTimeout(2_000) { coalescer.finish() }
+                assertTrue("finish unexpectedly succeeded", false)
+            } catch (actual: IllegalStateException) {
+                assertEquals(failure.message, actual.message)
+            }
+            withTimeout(2_000) { coalescer.finish(); coalescer.abort() }
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun throwingOnPublishSettlesFinishAndAbort() = runBlocking {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Test
+    fun throwingOnPublishSettlesTerminalCompletion() = runBlocking {
+        val scope = testScope()
         try {
             val failure = IllegalArgumentException("publish")
-            val c = TokenCoalescer(scope, onPublish = { throw failure })
-            try { c.finish(); assertTrue(false) } catch (e: IllegalArgumentException) { assertSame(failure, e) }
-            withTimeout(2_000) { c.finish(); c.abort() }
-        } finally { scope.cancel() }
+            val coalescer = TokenCoalescer(scope, onPublish = { throw failure })
+            try {
+                withTimeout(2_000) { coalescer.finish() }
+                assertTrue("finish unexpectedly succeeded", false)
+            } catch (actual: IllegalArgumentException) {
+                assertEquals(failure.message, actual.message)
+            }
+            withTimeout(2_000) { coalescer.finish(); coalescer.abort() }
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun cancellationDuringFinishCleansUpAndPropagates() = runBlocking {
-        val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>(); val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Test
+    fun cancellationDuringFinalPublicationCleansUpAndPropagates() = runBlocking {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val active = AtomicInteger()
+        val scope = testScope()
         try {
-            val c = TokenCoalescer(scope, onPublish = { entered.complete(Unit); runBlocking { release.await() } })
-            c.append("x"); val finish = async { c.finish() }; entered.await(); finish.cancel(); release.complete(Unit)
-            try { finish.await(); assertTrue(false) } catch (_: CancellationException) { }
-            withTimeout(2_000) { c.abort() }
-        } finally { scope.cancel() }
+            val coalescer = TokenCoalescer(scope, onPublish = {
+                active.incrementAndGet()
+                entered.countDown()
+                awaitGate(release)
+                active.decrementAndGet()
+            })
+            val finish = async(Dispatchers.Default) { coalescer.finish() }
+            awaitGate(entered)
+            finish.cancel()
+            release.countDown()
+            try {
+                withTimeout(2_000) { finish.await() }
+                assertTrue("cancelled finish unexpectedly succeeded", false)
+            } catch (_: CancellationException) {
+                // Expected cancellation from the primary finisher.
+            }
+            withTimeout(2_000) { coalescer.abort() }
+            assertEquals(0, active.get())
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun repeatedFinishReturnsSameFinalizedText() = runBlocking {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        try { val c = TokenCoalescer(scope); c.append("stable"); assertEquals("stable", c.finish()); assertEquals("stable", c.finish()) }
-        finally { scope.cancel() }
+    @Test
+    fun repeatedFinishReturnsSameFinalizedText() = runBlocking {
+        val scope = testScope()
+        try {
+            val coalescer = TokenCoalescer(scope)
+            coalescer.append("stable")
+            assertEquals("stable", withTimeout(2_000) { coalescer.finish() })
+            assertEquals("stable", withTimeout(2_000) { coalescer.finish() })
+        } finally {
+            scope.cancel()
+        }
     }
 
-    @Test fun repeatedAbortDoesNotStartAnotherCleanup() = runBlocking {
-        val count = AtomicInteger(); val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        try { val c = TokenCoalescer(scope, onPublish = { count.incrementAndGet() }); c.abort(); c.abort(); c.append("ignored"); assertEquals(0, count.get()) }
-        finally { scope.cancel() }
+    @Test
+    fun repeatedAbortDoesNotStartAnotherCleanup() = runBlocking {
+        val count = AtomicInteger()
+        val scope = testScope()
+        try {
+            val coalescer = TokenCoalescer(scope, onPublish = { count.incrementAndGet() })
+            withTimeout(2_000) { coalescer.abort(); coalescer.abort() }
+            coalescer.append("ignored")
+            assertEquals(0, count.get())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun noPublicationOccursAfterAbortReturns() = runBlocking {
+        val count = AtomicInteger()
+        val scope = testScope()
+        try {
+            val coalescer = TokenCoalescer(scope, publishIntervalMs = 0, onPublish = { count.incrementAndGet() })
+            withTimeout(2_000) { coalescer.abort() }
+            coalescer.append("after")
+            withTimeout(2_000) { kotlinx.coroutines.yield() }
+            assertEquals(0, count.get())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    private fun testScope(): CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    private fun awaitGate(gate: CountDownLatch) {
+        assertTrue("synchronization gate was not reached", gate.await(2, TimeUnit.SECONDS))
     }
 }
