@@ -969,7 +969,6 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 )
             }
             chatViewModel.scope.launch {
-                val isVisibleConversation = currentConversationId == retrySnapshot.conversationId
                 try {
                     chatViewModel.registry.start(chatViewModel.scope, retrySnapshot) { session ->
                         val request = retrySnapshot
@@ -991,20 +990,20 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 ?: builtInModels.firstOrNull { it.name == request.selectedModelId && isModelDownloaded(context, it) }
                                     ?.let { getModelFile(context, it).absolutePath }
                             if (modelPath == null) {
-                                if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && isVisibleConversation) {
+                                if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && currentConversationId == request.conversationId) {
                                     Toast.makeText(context, "모델 파일을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
                                 }
                                 return@start
                             }
                             val missingImage = imageAttachments.firstOrNull { !File(it.localPath).exists() }
                             if (missingImage != null) {
-                                if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && isVisibleConversation) {
+                                if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && currentConversationId == request.conversationId) {
                                     Toast.makeText(context, "이미지 파일을 찾을 수 없습니다.", Toast.LENGTH_SHORT).show()
                                 }
                                 return@start
                             }
                             if (imageAttachments.isNotEmpty() && !isMultimodalCapableModel(request.selectedModelId.orEmpty(), modelPath)) {
-                                if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && isVisibleConversation) {
+                                if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && currentConversationId == request.conversationId) {
                                     Toast.makeText(context, "이 모델은 이미지 입력을 지원하지 않습니다.", Toast.LENGTH_SHORT).show()
                                 }
                                 return@start
@@ -1061,6 +1060,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             val coalescer = TokenCoalescer(requestScope, shouldPublish = { chatViewModel.registry.isActive(request.conversationId, request.requestId) }, onPublish = { text -> chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingText = text) } })
                                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingText = "") }
                                             try {
+                                                chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(generationStatus = "이미지 분석 중...") }
                                                 val result = engine.generateMultimodalStreaming(messagesForGeneration, modelPath, request.settings, imageAttachments.map { it.localPath }) { token ->
                                                     if (token.isNotEmpty()) firstToken.compareAndSet(-1L, SystemClock.elapsedRealtime() - started)
                                                     coalescer.append(token)
@@ -1069,6 +1069,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 result
                                             } catch (e: Exception) { coalescer.abort(); throw e }
                                         } else if (isImageGeneration) {
+                                            chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(generationStatus = "이미지 분석 중...") }
                                             engine.generateMultimodalStreaming(messagesForGeneration, modelPath, request.settings, imageAttachments.map { it.localPath }) { token ->
                                                 if (token.isNotEmpty()) firstToken.compareAndSet(-1L, SystemClock.elapsedRealtime() - started)
                                             }
@@ -1095,7 +1096,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 is GenerationOutcome.Cancelled -> return@start
                                 GenerationOutcome.Empty -> return@start
                                 is GenerationOutcome.Failure -> {
-                                    if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && isVisibleConversation) {
+                                    if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && currentConversationId == request.conversationId) {
                                         Toast.makeText(context, outcome.message, Toast.LENGTH_SHORT).show()
                                     }
                                     return@start
@@ -1107,31 +1108,18 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             withContext(NonCancellable) {
                                 val newId = dao.insertMessage(MessageEntity(conversationId = request.conversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(reply, metrics), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
-                                var versionStateSaved = false
-                                var previousVersionState: ResponseVersionState? = null
-                                try {
-                                    previousVersionState = loadResponseVersionState(context, request.conversationId)
-                                    val groupId = previousUser.id
-                                    val updated = previousVersionState!!.copy(groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId), activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId))
-                                    saveResponseVersionState(context, request.conversationId, updated)
-                                    versionStateSaved = true
-                                    if (isVisibleConversation) {
-                                        responseVersionState = updated
-                                    }
-                                    dao.updateConversationTime(request.conversationId, System.currentTimeMillis())
-                                } catch (e: Exception) {
-                                    try {
-                                        dao.deleteMessageById(newId)
-                                    } catch (_: Exception) { }
-                                    if (versionStateSaved && previousVersionState != null) {
-                                        saveResponseVersionState(context, request.conversationId, previousVersionState)
-                                    }
-                                    throw e
+                                val previousVersionState = loadResponseVersionState(context, request.conversationId)
+                                val groupId = previousUser.id
+                                val updated = previousVersionState.copy(groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId), activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId))
+                                saveResponseVersionState(context, request.conversationId, updated)
+                                dao.updateConversationTime(request.conversationId, System.currentTimeMillis())
+                                if (currentConversationId == request.conversationId) {
+                                    responseVersionState = updated
                                 }
                             }
                         } catch (e: Exception) {
                             if (e is CancellationException) throw e
-                            if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && isVisibleConversation) {
+                            if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && currentConversationId == request.conversationId) {
                                 Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                             }
                         } finally {
@@ -1140,8 +1128,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
-                    chatViewModel.update(retrySnapshot.conversationId) { it.copy(isGenerating = false, activeRequestId = null, regeneratingMessageId = null, generationStatus = null) }
-                    if (isVisibleConversation) {
+                    chatViewModel.finishRequestState(retrySnapshot.conversationId, retrySnapshot.requestId)
+                    if (currentConversationId == retrySnapshot.conversationId) {
                         Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                     }
                 }
