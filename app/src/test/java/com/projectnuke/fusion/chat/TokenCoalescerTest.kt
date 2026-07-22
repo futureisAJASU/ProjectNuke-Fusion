@@ -3,7 +3,6 @@ package com.projectnuke.fusion.chat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,7 +61,7 @@ class TokenCoalescerTest {
             awaitGate(entered)
             val first = async { coalescer.abort() }
             val second = async { coalescer.abort() }
-            assertTrue("abort completed before consumer cleanup", !first.isCompleted || !second.isCompleted)
+            assertTrue("abort completed before consumer cleanup", !first.isCompleted && !second.isCompleted)
             release.countDown()
             withTimeout(2_000) { first.await(); second.await() }
         } finally {
@@ -87,7 +86,7 @@ class TokenCoalescerTest {
             val finish = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
                 coalescer.finish()
             }
-            val abort = async { coalescer.abort() }
+            val abort = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { coalescer.abort() }
             releaseIntermediate.countDown()
             withTimeout(2_000) { finish.await(); abort.await() }
             assertEquals(listOf("partial"), synchronized(snapshots) { snapshots.toList() })
