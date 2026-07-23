@@ -5,15 +5,16 @@ import com.projectnuke.fusion.ai.model.AiChatResponse
 import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiRole
 import com.projectnuke.fusion.ai.secure.SecretStore
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.job
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -23,8 +24,10 @@ internal interface ChatClient {
 }
 
 class OpenAiCompatibleClient(
-    private val secretStore: SecretStore
+    private val secretStore: SecretStore,
+    private val connectionFactory: ((URL) -> HttpURLConnection)? = null
 ) : ChatClient {
+
     override suspend fun chatCompletion(
         config: AiProviderConfig,
         request: AiChatRequest
@@ -44,55 +47,103 @@ class OpenAiCompatibleClient(
         val endpoint = "${normalizedBaseUrl}chat/completions"
 
         return withContext(Dispatchers.IO) {
-            val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = ConnectTimeoutMillis
-                readTimeout = ReadTimeoutMillis
-                doOutput = true
-                setRequestProperty("Authorization", "Bearer $apiKey")
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "application/json")
-            }
-            val cancellationHandle = currentCoroutineContext().job.invokeOnCompletion { _ ->
-                connection.disconnect()
-            }
-            try {
-                val body = buildRequestJson(config, request).toString()
-                ensureActive()
-                connection.outputStream.use { output ->
-                    output.write(body.toByteArray(Charsets.UTF_8))
-                }
-                ensureActive()
-                val status = connection.responseCode
-                val responseText = if (status in 200..299) {
-                    readBoundedUtf8(connection.inputStream, MaxSuccessBodyBytes)
-                } else {
-                    val errorStream = connection.errorStream
-                    if (errorStream != null) {
-                        readBoundedUtf8(errorStream, MaxErrorBodyBytes)
-                    } else {
-                        ""
+            val connection = createConnection(endpoint, apiKey)
+            val ctx = coroutineContext
+            suspendCancellableCoroutine { continuation ->
+                val cancellationHandler = Runnable { connection.disconnect() }
+                continuation.invokeOnCancellation { cancellationHandler.run() }
+
+                try {
+                    ctx.ensureActive()
+
+                    val body = buildRequestJson(config, request).toString()
+                    ctx.ensureActive()
+
+                    connection.outputStream.use { output ->
+                        val bodyBytes = body.toByteArray(Charsets.UTF_8)
+                        var offset = 0
+                        while (offset < bodyBytes.size) {
+                            ctx.ensureActive()
+                            val chunkSize = minOf(WriteChunkSize, bodyBytes.size - offset)
+                            output.write(bodyBytes, offset, chunkSize)
+                            offset += chunkSize
+                        }
                     }
+
+                    ctx.ensureActive()
+                    val status = connection.responseCode
+
+                    val responseText = if (status in 200..299) {
+                        ctx.ensureActive()
+                        readBoundedBody(connection.inputStream, MaxSuccessBodyBytes, BodyKind.SUCCESS, ctx)
+                    } else {
+                        val errorStream = connection.errorStream
+                        if (errorStream != null) {
+                            ctx.ensureActive()
+                            readBoundedBody(errorStream, MaxErrorBodyBytes, BodyKind.ERROR, ctx)
+                        } else {
+                            ""
+                        }
+                    }
+
+                    ctx.ensureActive()
+                    if (status !in 200..299) {
+                        throw AiProviderClientException(buildHttpErrorMessage(status, responseText))
+                    }
+                    val response = parseResponse(responseText)
+
+                    ctx.ensureActive()
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.success(response))
+                    }
+                } catch (e: AiProviderClientException) {
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.failure(e))
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    cancellationHandler.run()
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.failure(e))
+                    }
+                } catch (e: SocketTimeoutException) {
+                    ctx.ensureActive()
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.failure(
+                            AiProviderClientException("외부 AI API 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.", e)
+                        ))
+                    }
+                } catch (e: IOException) {
+                    ctx.ensureActive()
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.failure(
+                            AiProviderClientException("네트워크 연결에 실패했습니다. 인터넷 연결과 Base URL을 확인해 주세요.", e)
+                        ))
+                    }
+                } catch (e: Exception) {
+                    ctx.ensureActive()
+                    if (continuation.isActive) {
+                        continuation.resumeWith(Result.failure(
+                            AiProviderClientException("외부 AI API 응답을 처리할 수 없습니다.", e)
+                        ))
+                    }
+                } finally {
+                    cancellationHandler.run()
                 }
-                if (status !in 200..299) {
-                    throw AiProviderClientException(buildHttpErrorMessage(status, responseText))
-                }
-                parseResponse(responseText)
-            } catch (e: AiProviderClientException) {
-                throw e
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                connection.disconnect()
-                throw e
-            } catch (_: SocketTimeoutException) {
-                throw AiProviderClientException("외부 AI API 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.")
-            } catch (_: IOException) {
-                throw AiProviderClientException("네트워크 연결에 실패했습니다. 인터넷 연결과 Base URL을 확인해 주세요.")
-            } catch (_: Exception) {
-                throw AiProviderClientException("외부 AI API 응답을 처리할 수 없습니다.")
-            } finally {
-                cancellationHandle.dispose()
-                connection.disconnect()
             }
+        }
+    }
+
+    internal fun createConnection(endpoint: String, apiKey: String): HttpURLConnection {
+        val url = URL(endpoint)
+        val conn = connectionFactory?.invoke(url) ?: (url.openConnection() as HttpURLConnection)
+        return conn.apply {
+            requestMethod = "POST"
+            connectTimeout = ConnectTimeoutMillis
+            readTimeout = ReadTimeoutMillis
+            doOutput = true
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "application/json")
         }
     }
 
@@ -166,39 +217,43 @@ class OpenAiCompatibleClient(
             ?.take(180)
     }
 
+    internal enum class BodyKind(val oversizedMessage: String) {
+        SUCCESS("외부 AI API 응답이 너무 큽니다."),
+        ERROR("외부 AI API 오류 응답이 너무 큽니다.")
+    }
+
     internal companion object {
         const val ConnectTimeoutMillis = 30_000
         const val ReadTimeoutMillis = 120_000
         const val MaxSuccessBodyBytes = 2 * 1024 * 1024
         const val MaxErrorBodyBytes = 64 * 1024
+        private const val ReadBufferSize = 8192
+        private const val WriteChunkSize = 8192
 
-        internal fun readBoundedUtf8(stream: InputStream, maxBytes: Int): String {
-            val buffer = CharArray(ReadBufferSize)
-            val builder = StringBuilder()
-            var totalCharsRead = 0
-            stream.bufferedReader(Charsets.UTF_8).use { reader ->
+        internal fun readBoundedBody(
+            stream: InputStream,
+            maxBytes: Int,
+            bodyKind: BodyKind,
+            context: CoroutineContext
+        ): String {
+            val buffer = ByteArray(ReadBufferSize)
+            val baos = ByteArrayOutputStream(maxBytes.coerceAtMost(64 * 1024))
+            var totalBytesRead = 0
+            stream.use { input ->
                 while (true) {
-                    val charsRead = reader.read(buffer)
-                    if (charsRead == -1) break
-                    builder.append(buffer, 0, charsRead)
-                    totalCharsRead += charsRead
-                    if (totalCharsRead > maxBytes) {
-                        stream.close()
-                        throw AiProviderClientException(
-                            if (maxBytes == MaxErrorBodyBytes) {
-                                "외부 AI API 오류 응답이 너무 큽니다."
-                            } else {
-                                "외부 AI API 응답이 너무 큽니다."
-                            }
-                        )
+                    context.ensureActive()
+                    val bytesRead = input.read(buffer)
+                    if (bytesRead == -1) break
+                    baos.write(buffer, 0, bytesRead)
+                    totalBytesRead += bytesRead
+                    if (totalBytesRead > maxBytes) {
+                        throw AiProviderClientException(bodyKind.oversizedMessage)
                     }
                 }
             }
-            return builder.toString()
+            return baos.toString(Charsets.UTF_8.name())
         }
-
-        private const val ReadBufferSize = 4096
     }
 }
 
-class AiProviderClientException(message: String) : Exception(message)
+class AiProviderClientException(message: String, cause: Throwable? = null) : Exception(message, cause)
