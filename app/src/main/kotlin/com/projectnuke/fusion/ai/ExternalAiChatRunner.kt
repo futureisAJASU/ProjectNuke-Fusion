@@ -1,22 +1,27 @@
 package com.projectnuke.fusion.ai
 
-import com.projectnuke.fusion.ai.data.AiProviderRepository
 import com.projectnuke.fusion.ai.model.AiChatRequest
 import com.projectnuke.fusion.ai.model.AiMessage
+import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.network.AiProviderClientException
-import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
+import com.projectnuke.fusion.ai.network.ChatClient
 import com.projectnuke.fusion.model.ChatMessage
+
+internal interface ExternalAiProviderSource {
+    suspend fun getSelectedRunnableProvider(): AiProviderConfig?
+}
 
 internal sealed interface ExternalAiChatResult {
     data class Success(val content: String, val providerDisplayName: String?) : ExternalAiChatResult
     data class BlockedAttachment(val message: String) : ExternalAiChatResult
     data class NoProvider(val message: String) : ExternalAiChatResult
+    data class Empty(val providerDisplayName: String?) : ExternalAiChatResult
     data class Error(val message: String) : ExternalAiChatResult
 }
 
 internal class ExternalAiChatRunner(
-    private val providerRepository: AiProviderRepository,
-    private val client: OpenAiCompatibleClient
+    private val providerRepository: ExternalAiProviderSource,
+    private val client: ChatClient
 ) {
     suspend fun generate(
         history: List<ChatMessage>,
@@ -60,10 +65,16 @@ internal class ExternalAiChatRunner(
                     maxTokens = provider.maxTokens
                 )
             )
-            ExternalAiChatResult.Success(
-                content = response.content.ifBlank { "외부 AI API에서 빈 응답을 받았습니다." },
-                providerDisplayName = provider.displayName
-            )
+            if (response.content.isBlank()) {
+                ExternalAiChatResult.Empty(providerDisplayName = provider.displayName)
+            } else {
+                ExternalAiChatResult.Success(
+                    content = response.content,
+                    providerDisplayName = provider.displayName
+                )
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: AiProviderClientException) {
             ExternalAiChatResult.Error(e.message ?: "외부 AI API 요청에 실패했습니다.")
         }

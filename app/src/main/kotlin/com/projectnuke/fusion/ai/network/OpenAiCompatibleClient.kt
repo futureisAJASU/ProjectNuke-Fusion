@@ -6,18 +6,26 @@ import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiRole
 import com.projectnuke.fusion.ai.secure.SecretStore
 import java.io.IOException
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.job
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+
+internal interface ChatClient {
+    suspend fun chatCompletion(config: AiProviderConfig, request: AiChatRequest): AiChatResponse
+}
 
 class OpenAiCompatibleClient(
     private val secretStore: SecretStore
-) {
-    suspend fun chatCompletion(
+) : ChatClient {
+    override suspend fun chatCompletion(
         config: AiProviderConfig,
         request: AiChatRequest
     ): AiChatResponse {
@@ -45,22 +53,35 @@ class OpenAiCompatibleClient(
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
             }
+            val cancellationHandle = currentCoroutineContext().job.invokeOnCompletion { _ ->
+                connection.disconnect()
+            }
             try {
                 val body = buildRequestJson(config, request).toString()
+                ensureActive()
                 connection.outputStream.use { output ->
                     output.write(body.toByteArray(Charsets.UTF_8))
                 }
+                ensureActive()
                 val status = connection.responseCode
                 val responseText = if (status in 200..299) {
-                    connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    readBoundedUtf8(connection.inputStream, MaxSuccessBodyBytes)
                 } else {
-                    connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                    val errorStream = connection.errorStream
+                    if (errorStream != null) {
+                        readBoundedUtf8(errorStream, MaxErrorBodyBytes)
+                    } else {
+                        ""
+                    }
                 }
                 if (status !in 200..299) {
                     throw AiProviderClientException(buildHttpErrorMessage(status, responseText))
                 }
                 parseResponse(responseText)
             } catch (e: AiProviderClientException) {
+                throw e
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                connection.disconnect()
                 throw e
             } catch (_: SocketTimeoutException) {
                 throw AiProviderClientException("외부 AI API 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.")
@@ -69,6 +90,7 @@ class OpenAiCompatibleClient(
             } catch (_: Exception) {
                 throw AiProviderClientException("외부 AI API 응답을 처리할 수 없습니다.")
             } finally {
+                cancellationHandle.dispose()
                 connection.disconnect()
             }
         }
@@ -137,14 +159,45 @@ class OpenAiCompatibleClient(
         }.getOrNull()
             ?.trim()
             ?.takeIf { it.isNotBlank() }
+            ?.replace(Regex("[\\r\\n\\t]+"), " ")
+            ?.replace(Regex("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]"), "")
             ?.replace(Regex("Bearer\\s+[A-Za-z0-9._\\-]+"), "Bearer [redacted]")
             ?.replace(Regex("(?i)authorization\\s*:\\s*[^\\s,]+"), "Authorization: [redacted]")
             ?.take(180)
     }
 
-    private companion object {
+    internal companion object {
         const val ConnectTimeoutMillis = 30_000
         const val ReadTimeoutMillis = 120_000
+        const val MaxSuccessBodyBytes = 2 * 1024 * 1024
+        const val MaxErrorBodyBytes = 64 * 1024
+
+        internal fun readBoundedUtf8(stream: InputStream, maxBytes: Int): String {
+            val buffer = CharArray(ReadBufferSize)
+            val builder = StringBuilder()
+            var totalCharsRead = 0
+            stream.bufferedReader(Charsets.UTF_8).use { reader ->
+                while (true) {
+                    val charsRead = reader.read(buffer)
+                    if (charsRead == -1) break
+                    builder.append(buffer, 0, charsRead)
+                    totalCharsRead += charsRead
+                    if (totalCharsRead > maxBytes) {
+                        stream.close()
+                        throw AiProviderClientException(
+                            if (maxBytes == MaxErrorBodyBytes) {
+                                "외부 AI API 오류 응답이 너무 큽니다."
+                            } else {
+                                "외부 AI API 응답이 너무 큽니다."
+                            }
+                        )
+                    }
+                }
+            }
+            return builder.toString()
+        }
+
+        private const val ReadBufferSize = 4096
     }
 }
 

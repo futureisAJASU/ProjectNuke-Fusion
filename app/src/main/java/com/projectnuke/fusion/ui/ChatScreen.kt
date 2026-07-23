@@ -1511,6 +1511,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
                         }
 
+                        is ExternalAiChatResult.Empty -> {
+                            Toast.makeText(context, "외부 AI API에서 빈 응답을 받았습니다.", Toast.LENGTH_SHORT).show()
+                        }
+
                         is ExternalAiChatResult.Error -> {
                             generationStatus = "답변 저장 중..."
                             Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
@@ -1790,6 +1794,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                         is ExternalAiChatResult.BlockedAttachment -> {
                             Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+                        }
+
+                        is ExternalAiChatResult.Empty -> {
+                            Toast.makeText(context, "외부 AI API에서 빈 응답을 받았습니다.", Toast.LENGTH_SHORT).show()
                         }
 
                         is ExternalAiChatResult.Error -> {
@@ -2366,6 +2374,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 generationStatus = "답변 저장 중..."
                                                 dao.insertMessage(MessageEntity(conversationId = activeConversationId, role = "assistant", content = result.message, createdAt = System.currentTimeMillis()))
                                                 dao.updateConversationTime(activeConversationId, System.currentTimeMillis())
+                                            }
+                                            is ExternalAiChatResult.Empty -> {
+                                                Toast.makeText(context, "외부 AI API에서 빈 응답을 받았습니다.", Toast.LENGTH_SHORT).show()
                                             }
                                             is ExternalAiChatResult.Error -> {
                                                 Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()

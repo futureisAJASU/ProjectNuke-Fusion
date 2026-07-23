@@ -2,6 +2,7 @@ package com.projectnuke.fusion.ai.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.projectnuke.fusion.ai.ExternalAiProviderSource
 import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiProviderType
 import com.projectnuke.fusion.ai.provider.AiProviderPresets
@@ -18,7 +19,7 @@ import kotlinx.coroutines.withContext
 class AiProviderRepository(
     context: Context,
     private val secretStore: SecretStore
-) {
+) : ExternalAiProviderSource {
     private val prefs = context.applicationContext.getSharedPreferences(PrefsName, Context.MODE_PRIVATE)
 
     suspend fun getProviders(): List<AiProviderConfig> {
@@ -68,7 +69,7 @@ class AiProviderRepository(
         return providers.firstOrNull { it.id == selectedId } ?: providers.firstOrNull()
     }
 
-    suspend fun getSelectedRunnableProvider(): AiProviderConfig? {
+    override suspend fun getSelectedRunnableProvider(): AiProviderConfig? {
         val providers = getProviders()
         val selectedId = withContext(Dispatchers.IO) { prefs.getString(KeySelectedProvider, null) }
         val runnableProviders = providers.filter(::isRunnableProvider)
