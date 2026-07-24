@@ -50,8 +50,7 @@ class OpenAiCompatibleClient(
             val connection = createConnection(endpoint, apiKey)
             val ctx = coroutineContext
             suspendCancellableCoroutine { continuation ->
-                val cancellationHandler = Runnable { connection.disconnect() }
-                continuation.invokeOnCancellation { cancellationHandler.run() }
+                continuation.invokeOnCancellation { connection.disconnect() }
 
                 try {
                     ctx.ensureActive()
@@ -93,41 +92,28 @@ class OpenAiCompatibleClient(
                     val response = parseResponse(responseText)
 
                     ctx.ensureActive()
-                    if (continuation.isActive) {
-                        continuation.resumeWith(Result.success(response))
-                    }
+                    continuation.safeResume(response)
                 } catch (e: AiProviderClientException) {
-                    if (continuation.isActive) {
-                        continuation.resumeWith(Result.failure(e))
-                    }
+                    continuation.safeFail(e)
                 } catch (e: kotlinx.coroutines.CancellationException) {
-                    cancellationHandler.run()
-                    if (continuation.isActive) {
-                        continuation.resumeWith(Result.failure(e))
-                    }
+                    throw e
                 } catch (e: SocketTimeoutException) {
                     ctx.ensureActive()
-                    if (continuation.isActive) {
-                        continuation.resumeWith(Result.failure(
-                            AiProviderClientException("외부 AI API 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.", e)
-                        ))
-                    }
+                    continuation.safeFail(
+                        AiProviderClientException("외부 AI API 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.", e)
+                    )
                 } catch (e: IOException) {
                     ctx.ensureActive()
-                    if (continuation.isActive) {
-                        continuation.resumeWith(Result.failure(
-                            AiProviderClientException("네트워크 연결에 실패했습니다. 인터넷 연결과 Base URL을 확인해 주세요.", e)
-                        ))
-                    }
+                    continuation.safeFail(
+                        AiProviderClientException("네트워크 연결에 실패했습니다. 인터넷 연결과 Base URL을 확인해 주세요.", e)
+                    )
                 } catch (e: Exception) {
                     ctx.ensureActive()
-                    if (continuation.isActive) {
-                        continuation.resumeWith(Result.failure(
-                            AiProviderClientException("외부 AI API 응답을 처리할 수 없습니다.", e)
-                        ))
-                    }
+                    continuation.safeFail(
+                        AiProviderClientException("외부 AI API 응답을 처리할 수 없습니다.", e)
+                    )
                 } finally {
-                    cancellationHandler.run()
+                    connection.disconnect()
                 }
             }
         }
@@ -236,23 +222,42 @@ class OpenAiCompatibleClient(
             bodyKind: BodyKind,
             context: CoroutineContext
         ): String {
+            require(maxBytes >= 0) { "maxBytes must be non-negative, was $maxBytes" }
             val buffer = ByteArray(ReadBufferSize)
             val baos = ByteArrayOutputStream(maxBytes.coerceAtMost(64 * 1024))
             var totalBytesRead = 0
             stream.use { input ->
                 while (true) {
                     context.ensureActive()
-                    val bytesRead = input.read(buffer)
+                    val remaining = maxBytes - totalBytesRead
+                    val readLimit = if (remaining >= buffer.size) buffer.size else remaining + 1
+                    val bytesRead = input.read(buffer, 0, readLimit)
                     if (bytesRead == -1) break
-                    baos.write(buffer, 0, bytesRead)
-                    totalBytesRead += bytesRead
-                    if (totalBytesRead > maxBytes) {
+                    if (bytesRead > remaining) {
                         throw AiProviderClientException(bodyKind.oversizedMessage)
                     }
+                    baos.write(buffer, 0, bytesRead)
+                    totalBytesRead += bytesRead
                 }
             }
             return baos.toString(Charsets.UTF_8.name())
         }
+    }
+}
+
+private fun kotlinx.coroutines.CancellableContinuation<*>.safeFail(e: Throwable) {
+    try {
+        resumeWith(Result.failure(e))
+    } catch (_: IllegalStateException) {
+        // Continuation already completed — cancellation won the race
+    }
+}
+
+private fun <T> kotlinx.coroutines.CancellableContinuation<T>.safeResume(value: T) {
+    try {
+        resumeWith(Result.success(value))
+    } catch (_: IllegalStateException) {
+        // Continuation already completed — cancellation won the race
     }
 }
 
