@@ -9,6 +9,7 @@ import com.projectnuke.fusion.model.ChatMessage
 
 internal interface ExternalAiProviderSource {
     suspend fun getSelectedRunnableProvider(): AiProviderConfig?
+    suspend fun getRunnableProviderById(id: String): AiProviderConfig?
 }
 
 internal sealed interface ExternalAiChatResult {
@@ -43,7 +44,8 @@ internal class ExternalAiChatRunner(
 
     suspend fun generateFromMessages(
         messages: List<AiMessage>,
-        hasAttachments: Boolean = false
+        hasAttachments: Boolean = false,
+        providerId: String? = null
     ): ExternalAiChatResult {
         if (hasAttachments) {
             return ExternalAiChatResult.BlockedAttachment(
@@ -51,10 +53,13 @@ internal class ExternalAiChatRunner(
             )
         }
 
-        val provider = providerRepository.getSelectedRunnableProvider()
-            ?: return ExternalAiChatResult.NoProvider(
-                "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정에서 필수 항목을 확인해 주세요."
-            )
+        val provider = if (providerId != null) {
+            providerRepository.getRunnableProviderById(providerId)
+        } else {
+            providerRepository.getSelectedRunnableProvider()
+        } ?: return ExternalAiChatResult.NoProvider(
+            "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정에서 필수 항목을 확인해 주세요."
+        )
 
         return try {
             val response = client.chatCompletion(

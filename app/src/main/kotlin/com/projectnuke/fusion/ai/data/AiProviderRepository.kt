@@ -69,6 +69,13 @@ class AiProviderRepository(
         return providers.firstOrNull { it.id == selectedId } ?: providers.firstOrNull()
     }
 
+    override suspend fun getRunnableProviderById(id: String): AiProviderConfig? {
+        val providers = getProviders()
+        val provider = providers.firstOrNull { it.id == id }
+        if (provider != null && isRunnableProvider(provider)) return provider
+        return null
+    }
+
     override suspend fun getSelectedRunnableProvider(): AiProviderConfig? {
         val providers = getProviders()
         val selectedId = withContext(Dispatchers.IO) { prefs.getString(KeySelectedProvider, null) }

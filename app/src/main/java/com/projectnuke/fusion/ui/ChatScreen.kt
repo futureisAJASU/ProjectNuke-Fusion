@@ -678,14 +678,16 @@ fun ChatScreen(
 
     suspend fun runExternalAiRequest(
         currentMessages: List<ChatMessage>,
-        hasAttachments: Boolean = false
+        hasAttachments: Boolean = false,
+        providerId: String? = null,
     ): ExternalAiChatResult {
         return externalAiChatRunner.generateFromMessages(
             messages = buildExternalAiMessages(
                 messages = currentMessages,
                 stripAttachments = { stripSearchSourcesMetadata(parseMessageAttachments(it).body) }
             ),
-            hasAttachments = hasAttachments
+            hasAttachments = hasAttachments,
+            providerId = providerId,
         )
     }
 
@@ -1346,8 +1348,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 ),
                 reasoningEnabled = reasoningEnabled,
                 webSearchPolicy = when {
-                    shouldUseWebSearch && !externalApiAttachmentBlocked -> GenerationRequestSnapshot.WebSearchPolicy.ENABLED
-                    shouldAutoUseWebSearch(previousUserText) && !externalApiAttachmentBlocked -> GenerationRequestSnapshot.WebSearchPolicy.AUTO
+                    externalApiAttachmentBlocked -> GenerationRequestSnapshot.WebSearchPolicy.DISABLED
+                    webSearchEnabled -> GenerationRequestSnapshot.WebSearchPolicy.ENABLED
+                    shouldAutoUseWebSearch(previousUserText) -> GenerationRequestSnapshot.WebSearchPolicy.AUTO
                     else -> GenerationRequestSnapshot.WebSearchPolicy.DISABLED
                 },
                 attachmentIds = attachmentsToSend.map { it.localPath },
@@ -1357,6 +1360,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 createdAt = System.currentTimeMillis(),
                 history = historyBeforeUser,
                 promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context)),
+                externalProviderId = selectedExternalProviderId ?: externalProviders.firstOrNull(::isRunnableExternalProvider)?.id,
             )
 
             chatViewModel.update(retrySnapshot.conversationId) {
@@ -1456,7 +1460,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "외부 AI API 응답을 기다리는 중...") }
 
                             // === EXTERNAL REQUEST ===
-                            when (val result = runExternalAiRequest(currentMessages = currentMessages, hasAttachments = retrySnapshot.attachmentIds.isNotEmpty())) {
+                            when (val result = runExternalAiRequest(currentMessages = currentMessages, hasAttachments = retrySnapshot.attachmentIds.isNotEmpty(), providerId = retrySnapshot.externalProviderId)) {
                                 is ExternalAiChatResult.Success -> {
                                     refreshExternalProviderState()
                                     chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 저장 중...") }
@@ -2450,6 +2454,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         createdAt = System.currentTimeMillis(),
                                         history = capturedMessages,
                                         promptLabInstruction = capturedPromptLabInstruction,
+                                        externalProviderId = selectedExternalProviderId ?: externalProviders.firstOrNull(::isRunnableExternalProvider)?.id,
                                     )
 
                                     if (capturedGenerationMode == ChatGenerationMode.EXTERNAL_AI_API) {
@@ -2549,7 +2554,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                     chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "외부 AI API 응답을 기다리는 중...") }
 
                                                     // === EXTERNAL REQUEST ===
-                                                    when (val result = runExternalAiRequest(currentMessages = currentMessages, hasAttachments = snapshot.attachmentIds.isNotEmpty())) {
+                                                    when (val result = runExternalAiRequest(currentMessages = currentMessages, hasAttachments = snapshot.attachmentIds.isNotEmpty(), providerId = snapshot.externalProviderId)) {
                                                         is ExternalAiChatResult.Success -> {
                                                             refreshExternalProviderState()
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 저장 중...") }

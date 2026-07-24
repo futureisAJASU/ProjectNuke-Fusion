@@ -28,6 +28,7 @@ data class GenerationRequestSnapshot(
     val createdAt: Long,
     val history: List<ChatMessage> = emptyList(),
     val promptLabInstruction: String = "",
+    val externalProviderId: String? = null,
 ) {
     enum class WebSearchPolicy { DISABLED, ENABLED, AUTO }
 }
