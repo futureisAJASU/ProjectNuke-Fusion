@@ -15,6 +15,7 @@ import java.util.concurrent.CountDownLatch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -142,10 +143,10 @@ class OpenAiCompatibleClientTest {
     }
 
     @Test
-    fun readBoundedBody_largeChunkInputStream_doesNotOvershoot() {
-        val readRequests = mutableListOf<Int>()
-        val largeData = "B".repeat(8192).toByteArray(Charsets.UTF_8)
+    fun readBoundedBody_largeChunkInputStream_overflowFailsWithoutWriting() {
+        val largeData = "C".repeat(8192).toByteArray(Charsets.UTF_8)
         var pos = 0
+        val readRequests = mutableListOf<Int>()
 
         val stream = object : InputStream() {
             override fun read(): Int {
@@ -163,40 +164,15 @@ class OpenAiCompatibleClientTest {
             }
         }
 
-        val result = runBlocking {
-            OpenAiCompatibleClient.readBoundedBody(stream, 100, OpenAiCompatibleClient.BodyKind.SUCCESS, ctx())
-        }
-        assertEquals(100, result.toByteArray(Charsets.UTF_8).size)
-        assertTrue("Should have made at least one read request", readRequests.isNotEmpty())
-        assertEquals("First read should request remaining+1 = 101 bytes", 101, readRequests[0])
-    }
-
-    @Test
-    fun readBoundedBody_largeChunkInputStream_overflowFailsWithoutWriting() {
-        val largeData = "C".repeat(8192).toByteArray(Charsets.UTF_8)
-        var pos = 0
-
-        val stream = object : InputStream() {
-            override fun read(): Int {
-                if (pos >= largeData.size) return -1
-                return largeData[pos++].toInt() and 0xFF
-            }
-
-            override fun read(b: ByteArray, off: Int, len: Int): Int {
-                if (pos >= largeData.size) return -1
-                val available = minOf(len, largeData.size - pos)
-                System.arraycopy(largeData, pos, b, off, available)
-                pos += available
-                return available
-            }
-        }
-
         val ex = org.junit.Assert.assertThrows(AiProviderClientException::class.java) {
             runBlocking {
                 OpenAiCompatibleClient.readBoundedBody(stream, 100, OpenAiCompatibleClient.BodyKind.SUCCESS, ctx())
             }
         }
         assertEquals("외부 AI API 응답이 너무 큽니다.", ex.message)
+        assertTrue("Should have made at least one read request", readRequests.isNotEmpty())
+        assertEquals("First read should request remaining+1 = 101 bytes", 101, readRequests[0])
+        readRequests.forEach { assertTrue("No read request should exceed 101, got $it", it <= 101) }
     }
 
     @Test
@@ -261,7 +237,7 @@ class OpenAiCompatibleClientTest {
             assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
             workJob.cancel()
             assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
-            workJob.join()
+            withTimeout(5_000) { workJob.join() }
             assertTrue("Job cancelled", workJob.isCancelled)
         } finally {
             fakeConn.releaseAll()
@@ -285,7 +261,7 @@ class OpenAiCompatibleClientTest {
             assertTrue("Write should have started", fakeConn.awaitWriteStarted(5_000))
             workJob.cancel()
             assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
-            workJob.join()
+            withTimeout(5_000) { workJob.join() }
             assertTrue("Job cancelled", workJob.isCancelled)
         } finally {
             fakeConn.releaseAll()
@@ -315,7 +291,7 @@ class OpenAiCompatibleClientTest {
             assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
             workJob.cancel()
             assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
-            workJob.join()
+            withTimeout(5_000) { workJob.join() }
             assertTrue("Job cancelled", workJob.isCancelled)
             assertFalse("Should not be AiProviderClientException", caughtException is AiProviderClientException)
         } finally {
@@ -348,7 +324,7 @@ class OpenAiCompatibleClientTest {
         try {
             assertTrue("reached gate", reachedGate.await(5_000, java.util.concurrent.TimeUnit.MILLISECONDS))
             proceedGate.countDown()
-            workJob.join()
+            withTimeout(5_000) { workJob.join() }
             assertFalse("Job should complete successfully", workJob.isCancelled)
             assertEquals("win", capturedResponse!!.content)
             assertTrue("disconnect should be called", fakeConn.disconnectCalled)
@@ -388,7 +364,7 @@ class OpenAiCompatibleClientTest {
             workJob.cancel()
             assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
             proceedGate.countDown()
-            workJob.join()
+            withTimeout(5_000) { workJob.join() }
             assertTrue("Job cancelled", workJob.isCancelled)
             assertTrue("Should be CancellationException", caughtException is kotlinx.coroutines.CancellationException)
             assertFalse("Should not be AiProviderClientException", caughtException is AiProviderClientException)
@@ -413,7 +389,7 @@ class OpenAiCompatibleClientTest {
 
         try {
             job.cancel()
-            job.join()
+            withTimeout(5_000) { job.join() }
             assertTrue("Job cancelled without IllegalStateException", job.isCancelled)
         } finally {
             fakeConn.releaseAll()
@@ -451,7 +427,7 @@ class OpenAiCompatibleClientTest {
             client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
         }
         job.cancel()
-        job.join()
+        withTimeout(5_000) { job.join() }
         assertTrue(job.isCancelled)
     }
 

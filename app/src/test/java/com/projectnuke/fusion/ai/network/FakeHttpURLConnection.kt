@@ -28,7 +28,6 @@ open class FakeHttpURLConnection(url: URL) : HttpURLConnection(url) {
     internal val writeReleaseLatch = CountDownLatch(1)
     internal val disconnectLatch = CountDownLatch(1)
 
-    private val readStarted = AtomicBoolean(false)
     private val writeStarted = AtomicBoolean(false)
 
     private val sentBytes = ByteArrayOutputStream()
