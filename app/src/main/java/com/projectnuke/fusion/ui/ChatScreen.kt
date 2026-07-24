@@ -1330,6 +1330,210 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
             return
         }
 
+        if (!isStyleRegeneration && generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+            val requestId = UUID.randomUUID().toString()
+            val retrySnapshot = GenerationRequestSnapshot(
+                requestId = requestId,
+                conversationId = previousUser.conversationId,
+                generationModeKey = generationMode.name,
+                selectedModelId = selectedModel,
+                selectedModelPath = null,
+                settings = generationSettings.copy(
+                    speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                        modelName = selectedModel,
+                        settings = generationSettings
+                    )
+                ),
+                reasoningEnabled = reasoningEnabled,
+                webSearchPolicy = when {
+                    shouldUseWebSearch && !externalApiAttachmentBlocked -> GenerationRequestSnapshot.WebSearchPolicy.ENABLED
+                    shouldAutoUseWebSearch(previousUserText) && !externalApiAttachmentBlocked -> GenerationRequestSnapshot.WebSearchPolicy.AUTO
+                    else -> GenerationRequestSnapshot.WebSearchPolicy.DISABLED
+                },
+                attachmentIds = attachmentsToSend.map { it.localPath },
+                multimodalImagePaths = imageAttachments.map { it.localPath },
+                promptText = userInstruction,
+                rawUserText = previousUserText,
+                createdAt = System.currentTimeMillis(),
+                history = historyBeforeUser,
+                promptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context)),
+            )
+
+            chatViewModel.update(retrySnapshot.conversationId) {
+                it.copy(
+                    isGenerating = true,
+                    activeRequestId = requestId,
+                    streamingText = null,
+                    streamingMetricsLine = null,
+                    generationStatus = if (retrySnapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) "인터넷 검색 중..." else "외부 AI API 응답을 기다리는 중...",
+                    regeneratingMessageId = targetMessage.id,
+                    actualWebSearchUsed = false,
+                )
+            }
+
+            chatViewModel.scope.launch {
+                try {
+                    chatViewModel.registry.start(chatViewModel.scope, retrySnapshot) { s ->
+                        if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+                        try {
+                            if (retrySnapshot.attachmentIds.isNotEmpty()) {
+                                if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == retrySnapshot.conversationId) {
+                                    Toast.makeText(context, "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다.", Toast.LENGTH_LONG).show()
+                                }
+                                return@start
+                            }
+
+                            // === WEB SEARCH ===
+                            val actualWebSearchEnabled = retrySnapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED
+                            val webSearchResponse = if (actualWebSearchEnabled) {
+                                chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "인터넷 검색 중...") }
+                                val previousUserMsg = retrySnapshot.history
+                                    .asReversed()
+                                    .firstOrNull { it.role == "user" }
+                                    ?.content
+                                    ?.let { parseMessageAttachments(it).body }
+                                    ?.trim()
+                                    .orEmpty()
+                                val searchIntent = FusionWebSearch.detectIntent(retrySnapshot.rawUserText)
+                                chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = when (searchIntent) {
+                                    SearchIntent.NEWS -> "뉴스 검색 중..."
+                                    else -> "인터넷 검색 중..."
+                                }) }
+                                val response = FusionWebSearch.search(
+                                    userInput = retrySnapshot.rawUserText,
+                                    previousUserMessage = previousUserMsg,
+                                    providerRepository = webSearchProviderRepository
+                                )
+                                chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "검색 결과 정리 중...") }
+                                response
+                            } else null
+                            val actualWebSearchUsed = webSearchResponse != null
+                            chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(actualWebSearchUsed = actualWebSearchUsed) }
+                            val webSearchResult = webSearchResponse?.toStructuredContext()
+                            recordWebSearchDiagnostics(context, webSearchResponse)
+
+                            // === PROMPT CONSTRUCTION ===
+                            val requestSettings = retrySnapshot.settings.copy(
+                                speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                                    modelName = retrySnapshot.selectedModelId ?: "",
+                                    settings = retrySnapshot.settings
+                                )
+                            )
+                            val fusionSystemPrompt = buildFusionSystemPrompt(
+                                reasoningEnabled = retrySnapshot.reasoningEnabled,
+                                webSearchEnabled = actualWebSearchUsed,
+                                webContext = webSearchResult,
+                                promptLabInstruction = retrySnapshot.promptLabInstruction
+                            )
+                            val currentMessages = buildList<ChatMessage> {
+                                add(ChatMessage(role = "system", content = """
+                    FUSION_GENERATION_SETTINGS
+                    maxTokens=${requestSettings.maxTokens}
+                    topK=${requestSettings.topK}
+                    topP=${requestSettings.topP}
+                    temperature=${requestSettings.temperature}
+                    accelerator=${requestSettings.accelerator.name}
+                    reasoningBudgetTokens=${requestSettings.reasoningBudgetTokens}
+                    speculativeDecoding=${requestSettings.speculativeDecodingEnabled == true}
+                """.trimIndent()))
+                                add(ChatMessage(role = "system", content = fusionSystemPrompt))
+                                add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, retrySnapshot.selectedModelId ?: "").name}"))
+                                buildSavedMemoryContext(context, settingsPrefs, s.conversationId, retrySnapshot.selectedModelId ?: "").text?.let { memoryContext ->
+                                    add(ChatMessage(role = "system", content = memoryContext))
+                                }
+                                buildConversationSummaryContextText(loadConversationSummary(context, s.conversationId))?.let { summaryContext ->
+                                    add(ChatMessage(role = "system", content = summaryContext))
+                                }
+                                addAll(retrySnapshot.history)
+                                add(ChatMessage(role = "user", content = buildFinalUserContent(
+                                    body = retrySnapshot.promptText,
+                                    attachments = emptyList(),
+                                    webSearchEnabled = actualWebSearchUsed,
+                                    webSearchResult = webSearchResult
+                                )))
+                            }
+
+                            chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "외부 AI API 응답을 기다리는 중...") }
+
+                            // === EXTERNAL REQUEST ===
+                            when (val result = runExternalAiRequest(currentMessages = currentMessages, hasAttachments = retrySnapshot.attachmentIds.isNotEmpty())) {
+                                is ExternalAiChatResult.Success -> {
+                                    refreshExternalProviderState()
+                                    chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 저장 중...") }
+                                    if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+                                    withContext(NonCancellable) {
+                                        val previousVersionState = loadResponseVersionState(context, retrySnapshot.conversationId)
+                                        var insertedMessageId: Long? = null
+                                        var versionStateSaved = false
+                                        try {
+                                            val newId = dao.insertMessage(MessageEntity(conversationId = retrySnapshot.conversationId, role = "assistant", content = appendSearchSourcesMetadata(result.content, webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
+                                            insertedMessageId = newId
+                                            val groupId = previousUser.id
+                                            val updated = previousVersionState.copy(
+                                                groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId),
+                                                activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId)
+                                            )
+                                            saveResponseVersionState(context, retrySnapshot.conversationId, updated)
+                                            versionStateSaved = true
+                                            dao.updateConversationTime(retrySnapshot.conversationId, System.currentTimeMillis())
+                                            updated
+                                        } catch (e: Exception) {
+                                            if (insertedMessageId != null) {
+                                                try { dao.deleteMessageById(insertedMessageId) } catch (inner: Exception) { e.addSuppressed(inner) }
+                                            }
+                                            if (versionStateSaved) {
+                                                try { saveResponseVersionState(context, retrySnapshot.conversationId, previousVersionState) } catch (inner: Exception) { e.addSuppressed(inner) }
+                                            }
+                                            throw e
+                                        }
+                                    }.let { updated ->
+                                        if (currentConversationId == retrySnapshot.conversationId) {
+                                            responseVersionState = updated
+                                        }
+                                    }
+                                }
+                                is ExternalAiChatResult.BlockedAttachment -> {
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == retrySnapshot.conversationId) {
+                                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                                is ExternalAiChatResult.NoProvider -> {
+                                    refreshExternalProviderState()
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == retrySnapshot.conversationId) {
+                                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                                is ExternalAiChatResult.Empty -> {
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == retrySnapshot.conversationId) {
+                                        Toast.makeText(context, "외부 AI API에서 빈 응답을 받았습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                is ExternalAiChatResult.Error -> {
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == retrySnapshot.conversationId) {
+                                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == retrySnapshot.conversationId) {
+                                Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                            }
+                        } finally {
+                            chatViewModel.finishRequestState(s.conversationId, retrySnapshot.requestId)
+                        }
+                    }
+                } catch (e: Exception) {
+                    chatViewModel.finishRequestState(retrySnapshot.conversationId, retrySnapshot.requestId)
+                    if (e is CancellationException) throw e
+                    if (currentConversationId == retrySnapshot.conversationId) {
+                        Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+            return
+        }
+
         isGenerating = true
         regeneratingMessageId = targetMessage.id
         streamingAssistantText = null
