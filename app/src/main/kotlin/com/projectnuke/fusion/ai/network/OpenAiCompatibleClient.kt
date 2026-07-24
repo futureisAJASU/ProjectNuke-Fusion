@@ -28,6 +28,9 @@ class OpenAiCompatibleClient(
     private val connectionFactory: ((URL) -> HttpURLConnection)? = null
 ) : ChatClient {
 
+    @Volatile
+    internal var onBeforeCompletion: () -> Unit = {}
+
     override suspend fun chatCompletion(
         config: AiProviderConfig,
         request: AiChatRequest
@@ -92,24 +95,25 @@ class OpenAiCompatibleClient(
                     val response = parseResponse(responseText)
 
                     ctx.ensureActive()
-                    continuation.safeResume(response)
+                    onBeforeCompletion()
+                    continuation.tryResumeSuccess(response)
                 } catch (e: AiProviderClientException) {
-                    continuation.safeFail(e)
+                    continuation.tryResumeFailure(e)
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: SocketTimeoutException) {
                     ctx.ensureActive()
-                    continuation.safeFail(
+                    continuation.tryResumeFailure(
                         AiProviderClientException("외부 AI API 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.", e)
                     )
                 } catch (e: IOException) {
                     ctx.ensureActive()
-                    continuation.safeFail(
+                    continuation.tryResumeFailure(
                         AiProviderClientException("네트워크 연결에 실패했습니다. 인터넷 연결과 Base URL을 확인해 주세요.", e)
                     )
                 } catch (e: Exception) {
                     ctx.ensureActive()
-                    continuation.safeFail(
+                    continuation.tryResumeFailure(
                         AiProviderClientException("외부 AI API 응답을 처리할 수 없습니다.", e)
                     )
                 } finally {
@@ -245,19 +249,19 @@ class OpenAiCompatibleClient(
     }
 }
 
-private fun kotlinx.coroutines.CancellableContinuation<*>.safeFail(e: Throwable) {
-    try {
-        resumeWith(Result.failure(e))
-    } catch (_: IllegalStateException) {
-        // Continuation already completed — cancellation won the race
+@OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
+private fun <T> kotlinx.coroutines.CancellableContinuation<T>.tryResumeSuccess(value: T) {
+    val token = tryResume(value)
+    if (token != null) {
+        completeResume(token)
     }
 }
 
-private fun <T> kotlinx.coroutines.CancellableContinuation<T>.safeResume(value: T) {
-    try {
-        resumeWith(Result.success(value))
-    } catch (_: IllegalStateException) {
-        // Continuation already completed — cancellation won the race
+@OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
+private fun kotlinx.coroutines.CancellableContinuation<*>.tryResumeFailure(e: Throwable) {
+    val token = tryResumeWithException(e)
+    if (token != null) {
+        completeResume(token)
     }
 }
 

@@ -1,6 +1,7 @@
 package com.projectnuke.fusion.ai.network
 
 import com.projectnuke.fusion.ai.model.AiChatRequest
+import com.projectnuke.fusion.ai.model.AiChatResponse
 import com.projectnuke.fusion.ai.model.AiMessage
 import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiProviderType
@@ -11,6 +12,7 @@ import java.io.IOException
 import java.io.InputStream
 import java.net.URL
 import java.util.concurrent.CountDownLatch
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -251,17 +253,19 @@ class OpenAiCompatibleClientTest {
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
 
-        val workJob = launch {
+        val workJob = launch(Dispatchers.IO) {
             client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
         }
 
-        assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
-
-        workJob.cancel()
-        workJob.join()
-
-        assertTrue("Job should be cancelled", workJob.isCancelled)
-        assertTrue("disconnect should have been called", fakeConn.disconnectCalled)
+        try {
+            assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
+            workJob.cancel()
+            assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
+            workJob.join()
+            assertTrue("Job cancelled", workJob.isCancelled)
+        } finally {
+            fakeConn.releaseAll()
+        }
     }
 
     @Test
@@ -273,30 +277,32 @@ class OpenAiCompatibleClientTest {
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
 
-        val workJob = launch {
+        val workJob = launch(Dispatchers.IO) {
             client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
         }
 
-        assertTrue("Write should have started", fakeConn.awaitWriteStarted(5_000))
-
-        workJob.cancel()
-        workJob.join()
-
-        assertTrue("Job should be cancelled", workJob.isCancelled)
-        assertTrue("disconnect should have been called", fakeConn.disconnectCalled)
+        try {
+            assertTrue("Write should have started", fakeConn.awaitWriteStarted(5_000))
+            workJob.cancel()
+            assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
+            workJob.join()
+            assertTrue("Job cancelled", workJob.isCancelled)
+        } finally {
+            fakeConn.releaseAll()
+        }
     }
 
     @Test
     fun cancellationDoesNotProduceAiProviderClientException() = runBlocking {
         val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
-        fakeConn.configure(responseCode = 200, responseBody = "delayed".repeat(10000).toByteArray(Charsets.UTF_8))
+        fakeConn.configure(responseCode = 200, responseBody = "x".repeat(1000).toByteArray(Charsets.UTF_8))
         fakeConn.blockReads = true
 
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
 
         var caughtException: Throwable? = null
-        val workJob = launch {
+        val workJob = launch(Dispatchers.IO) {
             try {
                 client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
             } catch (e: Throwable) {
@@ -305,16 +311,19 @@ class OpenAiCompatibleClientTest {
             }
         }
 
-        assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
-
-        workJob.cancel()
-        workJob.join()
-
-        assertTrue("Job should be cancelled", workJob.isCancelled)
-        assertFalse("Should not produce AiProviderClientException", caughtException is AiProviderClientException)
+        try {
+            assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
+            workJob.cancel()
+            assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
+            workJob.join()
+            assertTrue("Job cancelled", workJob.isCancelled)
+            assertFalse("Should not be AiProviderClientException", caughtException is AiProviderClientException)
+        } finally {
+            fakeConn.releaseAll()
+        }
     }
 
-    // ── Cancellation-versus-success race ──────────────────────────────
+    // ── Cancellation-versus-success race (deterministic handoff) ────
 
     @Test
     fun cancellationVersusSuccess_race_successCanWin() = runBlocking {
@@ -322,39 +331,71 @@ class OpenAiCompatibleClientTest {
         val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
         fakeConn.configure(responseCode = 200, responseBody = body.toByteArray(Charsets.UTF_8))
 
+        val reachedGate = CountDownLatch(1)
+        val proceedGate = CountDownLatch(1)
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
-
-        val workJob = launch {
-            client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
+        client.onBeforeCompletion = {
+            reachedGate.countDown()
+            proceedGate.await()
         }
 
-        workJob.join()
-        assertFalse("Job should complete successfully", workJob.isCancelled)
-        assertTrue("disconnect should be called idempotently", fakeConn.disconnectCalled)
+        var capturedResponse: AiChatResponse? = null
+        val workJob = launch(Dispatchers.IO) {
+            capturedResponse = client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
+        }
+
+        try {
+            assertTrue("reached gate", reachedGate.await(5_000, java.util.concurrent.TimeUnit.MILLISECONDS))
+            proceedGate.countDown()
+            workJob.join()
+            assertFalse("Job should complete successfully", workJob.isCancelled)
+            assertEquals("win", capturedResponse!!.content)
+            assertTrue("disconnect should be called", fakeConn.disconnectCalled)
+        } finally {
+            proceedGate.countDown()
+            fakeConn.releaseAll()
+        }
     }
 
     @Test
     fun cancellationVersusSuccess_race_cancellationCanWin() = runBlocking {
-        val gate = CountDownLatch(1)
+        val body = """{"id":"race-2","model":"test","choices":[{"message":{"content":"data"}}]}"""
         val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
-        fakeConn.configure(responseCode = 200, responseBody = """{"id":"race-2","model":"test","choices":[{"message":{"content":"data"}}]}""".toByteArray(Charsets.UTF_8))
-        fakeConn.blockReads = true
+        fakeConn.configure(responseCode = 200, responseBody = body.toByteArray(Charsets.UTF_8))
 
+        val reachedGate = CountDownLatch(1)
+        val proceedGate = CountDownLatch(1)
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
-
-        val workJob = launch {
-            client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
+        client.onBeforeCompletion = {
+            reachedGate.countDown()
+            proceedGate.await()
         }
 
-        assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
+        var caughtException: Throwable? = null
+        val workJob = launch(Dispatchers.IO) {
+            try {
+                client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
+            } catch (e: Throwable) {
+                caughtException = e
+                throw e
+            }
+        }
 
-        workJob.cancel()
-        gate.countDown()
-        workJob.join()
-
-        assertTrue("Job should be cancelled", workJob.isCancelled)
+        try {
+            assertTrue("reached gate", reachedGate.await(5_000, java.util.concurrent.TimeUnit.MILLISECONDS))
+            workJob.cancel()
+            assertTrue("disconnect observed before join", fakeConn.awaitDisconnect(5_000))
+            proceedGate.countDown()
+            workJob.join()
+            assertTrue("Job cancelled", workJob.isCancelled)
+            assertTrue("Should be CancellationException", caughtException is kotlinx.coroutines.CancellationException)
+            assertFalse("Should not be AiProviderClientException", caughtException is AiProviderClientException)
+        } finally {
+            proceedGate.countDown()
+            fakeConn.releaseAll()
+        }
     }
 
     @Test
@@ -366,14 +407,17 @@ class OpenAiCompatibleClientTest {
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
 
-        val job = launch {
+        val job = launch(Dispatchers.IO) {
             client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
         }
 
-        job.cancel()
-        job.join()
-
-        assertTrue("Job should be cancelled without IllegalStateException", job.isCancelled)
+        try {
+            job.cancel()
+            job.join()
+            assertTrue("Job cancelled without IllegalStateException", job.isCancelled)
+        } finally {
+            fakeConn.releaseAll()
+        }
     }
 
     // ── Error handling tests ──────────────────────────────────────────
@@ -403,7 +447,7 @@ class OpenAiCompatibleClientTest {
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
 
-        val job = launch {
+        val job = launch(Dispatchers.IO) {
             client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
         }
         job.cancel()
@@ -457,27 +501,6 @@ class OpenAiCompatibleClientTest {
             }
         }
         assertEquals("외부 AI API 응답을 처리할 수 없습니다.", ex.message)
-    }
-
-    @Test
-    fun disconnectCausedIOException_cancelledDoesNotMapToProviderError() = runBlocking {
-        val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
-        fakeConn.configure(responseCode = 200, responseBody = "x".repeat(200).toByteArray())
-        fakeConn.blockReads = true
-
-        val config = makeConfig()
-        val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
-
-        val workJob = launch {
-            client.chatCompletion(config, AiChatRequest(listOf(AiMessage(AiRole.USER, "hi")), temperature = 0.7, maxTokens = 100))
-        }
-
-        assertTrue("Read should have started", fakeConn.awaitReadStarted(5_000))
-
-        workJob.cancel()
-        workJob.join()
-
-        assertTrue("Job should be cancelled", workJob.isCancelled)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────

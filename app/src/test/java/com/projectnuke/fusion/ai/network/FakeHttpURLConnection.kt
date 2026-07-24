@@ -9,6 +9,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 open class FakeHttpURLConnection(url: URL) : HttpURLConnection(url) {
@@ -25,6 +26,10 @@ open class FakeHttpURLConnection(url: URL) : HttpURLConnection(url) {
     internal val readReleaseLatch = CountDownLatch(1)
     internal val writeStartedLatch = CountDownLatch(1)
     internal val writeReleaseLatch = CountDownLatch(1)
+    internal val disconnectLatch = CountDownLatch(1)
+
+    private val readStarted = AtomicBoolean(false)
+    private val writeStarted = AtomicBoolean(false)
 
     private val sentBytes = ByteArrayOutputStream()
 
@@ -57,9 +62,18 @@ open class FakeHttpURLConnection(url: URL) : HttpURLConnection(url) {
         writeReleaseLatch.countDown()
     }
 
+    fun releaseAll() {
+        readReleaseLatch.countDown()
+        writeReleaseLatch.countDown()
+    }
+
+    fun awaitDisconnect(timeoutMs: Long = 5_000): Boolean =
+        disconnectLatch.await(timeoutMs, TimeUnit.MILLISECONDS)
+
     override fun disconnect() {
         disconnectCount.incrementAndGet()
         connected = false
+        disconnectLatch.countDown()
         readReleaseLatch.countDown()
         writeReleaseLatch.countDown()
     }
@@ -72,15 +86,28 @@ open class FakeHttpURLConnection(url: URL) : HttpURLConnection(url) {
 
     override fun getOutputStream(): OutputStream {
         if (blockWrites) {
-            writeStartedLatch.countDown()
             return object : OutputStream() {
                 override fun write(b: Int) {
-                    writeReleaseLatch.await(5, TimeUnit.SECONDS)
+                    if (writeStarted.compareAndSet(false, true)) {
+                        writeStartedLatch.countDown()
+                    }
+                    try {
+                        writeReleaseLatch.await()
+                    } catch (e: InterruptedException) {
+                        throw IOException("Interrupted", e)
+                    }
                     if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
                     sentBytes.write(b)
                 }
                 override fun write(b: ByteArray, off: Int, len: Int) {
-                    writeReleaseLatch.await(5, TimeUnit.SECONDS)
+                    if (writeStarted.compareAndSet(false, true)) {
+                        writeStartedLatch.countDown()
+                    }
+                    try {
+                        writeReleaseLatch.await()
+                    } catch (e: InterruptedException) {
+                        throw IOException("Interrupted", e)
+                    }
                     if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
                     sentBytes.write(b, off, len)
                 }
@@ -96,18 +123,32 @@ open class FakeHttpURLConnection(url: URL) : HttpURLConnection(url) {
             throw IOException("No input stream for error response")
         }
         if (blockReads) {
-            readStartedLatch.countDown()
+            val localReadStarted = AtomicBoolean(false)
             return object : InputStream() {
                 private var pos = 0
                 override fun read(): Int {
                     if (pos >= fakeResponseBody.size) return -1
-                    readReleaseLatch.await(5, TimeUnit.SECONDS)
+                    if (localReadStarted.compareAndSet(false, true)) {
+                        readStartedLatch.countDown()
+                    }
+                    try {
+                        readReleaseLatch.await()
+                    } catch (e: InterruptedException) {
+                        throw IOException("Interrupted", e)
+                    }
                     if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
                     return fakeResponseBody[pos++].toInt() and 0xFF
                 }
                 override fun read(b: ByteArray, off: Int, len: Int): Int {
                     if (pos >= fakeResponseBody.size) return -1
-                    readReleaseLatch.await(5, TimeUnit.SECONDS)
+                    if (localReadStarted.compareAndSet(false, true)) {
+                        readStartedLatch.countDown()
+                    }
+                    try {
+                        readReleaseLatch.await()
+                    } catch (e: InterruptedException) {
+                        throw IOException("Interrupted", e)
+                    }
                     if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
                     val available = minOf(len, fakeResponseBody.size - pos)
                     System.arraycopy(fakeResponseBody, pos, b, off, available)
