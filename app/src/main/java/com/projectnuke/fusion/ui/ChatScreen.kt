@@ -927,10 +927,8 @@ fun ChatScreen(
         val historyBeforeUser = snapshot
             .take(previousUserIndex)
             .map { message -> ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content) }
-        val shouldUseWebSearch = !isStyleRegeneration && (webSearchEnabled || shouldAutoUseWebSearch(previousUserText))
         val externalApiAttachmentBlocked = generationMode == ChatGenerationMode.EXTERNAL_AI_API &&
             attachmentsToSend.isNotEmpty()
-        val shouldUseWebSearchForRequest = shouldUseWebSearch && !externalApiAttachmentBlocked
 
 if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
             val requestId = UUID.randomUUID().toString()
@@ -1773,56 +1771,129 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         }
 
         if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
-            isGenerating = true
-            extractingMemoryCandidates = true
-            generationStatus = "메모리 후보를 추출하는 중입니다."
-            DeveloperLogStore.record(context, "memory", "메모리 후보 추출 시작", "conversationId=$conversationId")
+            val requestId = UUID.randomUUID().toString()
+            val capturedProviderId = selectedExternalProviderId
+                ?: externalProviders.firstOrNull(::isRunnableExternalProvider)?.id
+            val capturedPromptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
+            val extractionSnapshot = GenerationRequestSnapshot(
+                requestId = requestId,
+                conversationId = conversationId,
+                generationModeKey = generationMode.name,
+                selectedModelId = selectedModel,
+                selectedModelPath = null,
+                settings = requestSettings,
+                reasoningEnabled = reasoningEnabled,
+                webSearchPolicy = GenerationRequestSnapshot.WebSearchPolicy.DISABLED,
+                attachmentIds = emptyList(),
+                multimodalImagePaths = emptyList(),
+                promptText = extractionPrompt,
+                rawUserText = extractionPrompt,
+                createdAt = System.currentTimeMillis(),
+                history = recentVisibleMessages,
+                promptLabInstruction = capturedPromptLabInstruction,
+                externalProviderId = capturedProviderId,
+                externalProviderSelectionFrozen = true,
+            )
+
+            chatViewModel.update(extractionSnapshot.conversationId) {
+                it.copy(
+                    isGenerating = true,
+                    activeRequestId = requestId,
+                    extractingMemoryCandidates = true,
+                    generationStatus = "메모리 후보를 추출하는 중입니다.",
+                    streamingText = null,
+                    streamingMetricsLine = null,
+                    regeneratingMessageId = null,
+                    actualWebSearchUsed = false,
+                )
+            }
 
             scope.launch {
                 try {
-                    when (
-                        val result = runExternalAiRequest(
-                            currentMessages = currentMessages
-                        )
-                    ) {
-                        is ExternalAiChatResult.Success -> {
-                            refreshExternalProviderState()
-                            memoryCandidateText = result.content.trim()
-                            DeveloperLogStore.record(
-                                context,
-                                "memory",
-                                "메모리 후보 추출 성공",
-                                "conversationId=$conversationId, length=${memoryCandidateText.length}, count=${parseMemoryCandidateLines(memoryCandidateText).size}"
-                            )
-                        }
+                    chatViewModel.registry.start(chatViewModel.scope, extractionSnapshot) { s ->
+                        if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
+                        try {
+                            val request = extractionSnapshot
+                            val sessionMessages = buildList<ChatMessage> {
+                                add(ChatMessage(role = "system", content = """
+                                    FUSION_GENERATION_SETTINGS
+                                    maxTokens=${request.settings.maxTokens}
+                                    topK=${request.settings.topK}
+                                    topP=${request.settings.topP}
+                                    temperature=${request.settings.temperature}
+                                    accelerator=${request.settings.accelerator.name}
+                                    reasoningBudgetTokens=${request.settings.reasoningBudgetTokens}
+                                    speculativeDecoding=${request.settings.speculativeDecodingEnabled == true}
+                                """.trimIndent()))
+                                add(ChatMessage(role = "system", content = buildFusionSystemPrompt(
+                                    reasoningEnabled = request.reasoningEnabled,
+                                    webSearchEnabled = false,
+                                    webContext = null,
+                                    promptLabInstruction = request.promptLabInstruction,
+                                )))
+                                add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, request.selectedModelId ?: "").name}"))
+                                buildConversationSummaryContextText(loadConversationSummary(context, request.conversationId))?.let { summaryContext ->
+                                    add(ChatMessage(role = "system", content = summaryContext))
+                                }
+                                addAll(request.history)
+                                add(ChatMessage(role = "user", content = request.promptText))
+                            }
 
-                        is ExternalAiChatResult.NoProvider -> {
-                            refreshExternalProviderState()
-                            Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
-                        }
-
-                        is ExternalAiChatResult.BlockedAttachment -> {
-                            Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
-                        }
-
-                        is ExternalAiChatResult.Empty -> {
-                            Toast.makeText(context, "외부 AI API에서 빈 응답을 받았습니다.", Toast.LENGTH_SHORT).show()
-                        }
-
-                        is ExternalAiChatResult.Error -> {
-                            Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                            when (val result = runExternalAiRequest(currentMessages = sessionMessages, hasAttachments = false, providerId = request.externalProviderId, providerSelectionFrozen = true)) {
+                                is ExternalAiChatResult.Success -> {
+                                    refreshExternalProviderState()
+                                    val trimmed = result.content.trim()
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == request.conversationId) {
+                                        memoryCandidateText = trimmed
+                                    }
+                                    DeveloperLogStore.record(
+                                        context,
+                                        "memory",
+                                        "메모리 후보 추출 성공",
+                                        "conversationId=${request.conversationId}, length=${trimmed.length}, count=${parseMemoryCandidateLines(trimmed).size}"
+                                    )
+                                }
+                                is ExternalAiChatResult.NoProvider -> {
+                                    refreshExternalProviderState()
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == request.conversationId) {
+                                        Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                is ExternalAiChatResult.BlockedAttachment -> {
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == request.conversationId) {
+                                        Toast.makeText(context, result.message, Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                is ExternalAiChatResult.Empty -> {
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == request.conversationId) {
+                                        Toast.makeText(context, "외부 AI API에서 빈 응답을 받았습니다.", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                is ExternalAiChatResult.Error -> {
+                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == request.conversationId) {
+                                        Toast.makeText(context, result.message, Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            if (e is CancellationException) throw e
+                            Log.e("FusionMemory", "Memory candidate extraction failed", e)
+                            DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", e::class.java.simpleName)
+                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == extractionSnapshot.conversationId) {
+                                Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                            }
+                        } finally {
+                            chatViewModel.finishRequestState(s.conversationId, extractionSnapshot.requestId)
                         }
                     }
                 } catch (e: Exception) {
+                    chatViewModel.finishRequestState(extractionSnapshot.conversationId, extractionSnapshot.requestId)
+                    if (e is CancellationException) throw e
                     Log.e("FusionMemory", "Memory candidate extraction failed", e)
                     DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", e::class.java.simpleName)
-                    Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
-                } finally {
-                    generationStatus = null
-                    extractingMemoryCandidates = false
-                    isGenerating = false
-                    streamingAssistantText = null
-                    streamingMetricsLine = null
+                    if (currentConversationId == extractionSnapshot.conversationId) {
+                        Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             return
