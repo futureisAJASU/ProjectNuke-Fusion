@@ -9,10 +9,8 @@ import com.projectnuke.fusion.ai.secure.SecretStore
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
-import java.io.OutputStream
 import java.net.URL
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -244,59 +242,11 @@ class OpenAiCompatibleClientTest {
 
     // ── Coroutine cancellation tests (deterministic) ─────────────────
 
-    private fun blockingReadFakeConn(
-        responseBody: ByteArray = "x".repeat(1000).toByteArray(Charsets.UTF_8)
-    ): FakeHttpURLConnection {
-        val conn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
-        conn.configure(responseCode = 200, responseBody = responseBody)
-        return object : FakeHttpURLConnection(URL("https://example.com/chat/completions")) {
-            override fun getInputStream(): InputStream {
-                return object : InputStream() {
-                    private var pos = 0
-                    init { readStartedLatch.countDown() }
-                    override fun read(): Int {
-                        if (pos >= responseBody.size) return -1
-                        readReleaseLatch.await(5, TimeUnit.SECONDS)
-                        if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
-                        return responseBody[pos++].toInt() and 0xFF
-                    }
-                    override fun read(b: ByteArray, off: Int, len: Int): Int {
-                        if (pos >= responseBody.size) return -1
-                        readReleaseLatch.await(5, TimeUnit.SECONDS)
-                        if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
-                        val available = minOf(len, responseBody.size - pos)
-                        System.arraycopy(responseBody, pos, b, off, available)
-                        pos += available
-                        return available
-                    }
-                }
-            }
-        }.also {
-            it.configure(responseCode = 200, responseBody = responseBody)
-        }
-    }
-
-    private fun blockingWriteFakeConn(): FakeHttpURLConnection {
-        return object : FakeHttpURLConnection(URL("https://example.com/chat/completions")) {
-            override fun getOutputStream(): OutputStream {
-                return object : OutputStream() {
-                    init { writeStartedLatch.countDown() }
-                    override fun write(b: Int) {
-                        writeReleaseLatch.await(5, TimeUnit.SECONDS)
-                        if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
-                    }
-                    override fun write(b: ByteArray, off: Int, len: Int) {
-                        writeReleaseLatch.await(5, TimeUnit.SECONDS)
-                        if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
-                    }
-                }
-            }
-        }
-    }
-
     @Test
     fun cancellationDuringResponseRead_disconnects() = runBlocking {
-        val fakeConn = blockingReadFakeConn()
+        val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
+        fakeConn.configure(responseCode = 200, responseBody = "x".repeat(1000).toByteArray(Charsets.UTF_8))
+        fakeConn.blockReads = true
 
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
@@ -316,7 +266,9 @@ class OpenAiCompatibleClientTest {
 
     @Test
     fun cancellationDuringRequestWrite_disconnects() = runBlocking {
-        val fakeConn = blockingWriteFakeConn()
+        val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
+        fakeConn.configure(responseCode = 200)
+        fakeConn.blockWrites = true
 
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
@@ -336,7 +288,9 @@ class OpenAiCompatibleClientTest {
 
     @Test
     fun cancellationDoesNotProduceAiProviderClientException() = runBlocking {
-        val fakeConn = blockingReadFakeConn("delayed".repeat(10000).toByteArray(Charsets.UTF_8))
+        val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
+        fakeConn.configure(responseCode = 200, responseBody = "delayed".repeat(10000).toByteArray(Charsets.UTF_8))
+        fakeConn.blockReads = true
 
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
@@ -383,32 +337,9 @@ class OpenAiCompatibleClientTest {
     @Test
     fun cancellationVersusSuccess_race_cancellationCanWin() = runBlocking {
         val gate = CountDownLatch(1)
-        val fakeConn = object : FakeHttpURLConnection(URL("https://example.com/chat/completions")) {
-            override fun getInputStream(): InputStream {
-                return object : InputStream() {
-                    private var pos = 0
-                    private val data = """{"id":"race-2","model":"test","choices":[{"message":{"content":"data"}}]}""".toByteArray(Charsets.UTF_8)
-                    init { readStartedLatch.countDown() }
-
-                    override fun read(): Int {
-                        if (pos >= data.size) return -1
-                        gate.await(5, TimeUnit.SECONDS)
-                        if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
-                        return data[pos++].toInt() and 0xFF
-                    }
-
-                    override fun read(b: ByteArray, off: Int, len: Int): Int {
-                        if (pos >= data.size) return -1
-                        gate.await(5, TimeUnit.SECONDS)
-                        if (disconnectCount.get() > 0) throw IOException("Connection disconnected")
-                        val available = minOf(len, data.size - pos)
-                        System.arraycopy(data, pos, b, off, available)
-                        pos += available
-                        return available
-                    }
-                }
-            }
-        }
+        val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
+        fakeConn.configure(responseCode = 200, responseBody = """{"id":"race-2","model":"test","choices":[{"message":{"content":"data"}}]}""".toByteArray(Charsets.UTF_8))
+        fakeConn.blockReads = true
 
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
@@ -530,7 +461,9 @@ class OpenAiCompatibleClientTest {
 
     @Test
     fun disconnectCausedIOException_cancelledDoesNotMapToProviderError() = runBlocking {
-        val fakeConn = blockingReadFakeConn("x".repeat(200).toByteArray())
+        val fakeConn = FakeHttpURLConnection(URL("https://example.com/chat/completions"))
+        fakeConn.configure(responseCode = 200, responseBody = "x".repeat(200).toByteArray())
+        fakeConn.blockReads = true
 
         val config = makeConfig()
         val client = OpenAiCompatibleClient(secretStore = FakeSecretStore("valid-key"), connectionFactory = { fakeConn })
