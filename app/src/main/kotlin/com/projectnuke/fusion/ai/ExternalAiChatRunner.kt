@@ -45,7 +45,8 @@ internal class ExternalAiChatRunner(
     suspend fun generateFromMessages(
         messages: List<AiMessage>,
         hasAttachments: Boolean = false,
-        providerId: String? = null
+        providerId: String? = null,
+        providerSelectionFrozen: Boolean = false,
     ): ExternalAiChatResult {
         if (hasAttachments) {
             return ExternalAiChatResult.BlockedAttachment(
@@ -53,10 +54,11 @@ internal class ExternalAiChatRunner(
             )
         }
 
-        val provider = if (providerId != null) {
-            providerRepository.getRunnableProviderById(providerId)
-        } else {
-            providerRepository.getSelectedRunnableProvider()
+        val provider = when {
+            providerSelectionFrozen && providerId == null -> null
+            providerSelectionFrozen -> providerRepository.getRunnableProviderById(providerId!!)
+            providerId != null -> providerRepository.getRunnableProviderById(providerId)
+            else -> providerRepository.getSelectedRunnableProvider()
         } ?: return ExternalAiChatResult.NoProvider(
             "사용 가능한 외부 AI API 제공자가 없습니다. AI API 설정에서 필수 항목을 확인해 주세요."
         )

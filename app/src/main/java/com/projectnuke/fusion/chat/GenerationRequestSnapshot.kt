@@ -29,6 +29,20 @@ data class GenerationRequestSnapshot(
     val history: List<ChatMessage> = emptyList(),
     val promptLabInstruction: String = "",
     val externalProviderId: String? = null,
+    val externalProviderSelectionFrozen: Boolean = false,
 ) {
     enum class WebSearchPolicy { DISABLED, ENABLED, AUTO }
+
+    companion object {
+        fun resolveWebSearchPolicy(
+            externalApiAttachmentBlocked: Boolean,
+            webSearchEnabled: Boolean,
+            autoWebSearchSuggested: Boolean,
+        ): WebSearchPolicy = when {
+            externalApiAttachmentBlocked -> WebSearchPolicy.DISABLED
+            webSearchEnabled -> WebSearchPolicy.ENABLED
+            autoWebSearchSuggested -> WebSearchPolicy.AUTO
+            else -> WebSearchPolicy.DISABLED
+        }
+    }
 }

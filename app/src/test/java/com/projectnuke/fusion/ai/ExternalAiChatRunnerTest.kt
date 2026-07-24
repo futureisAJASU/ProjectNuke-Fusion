@@ -8,6 +8,7 @@ import com.projectnuke.fusion.ai.model.AiProviderType
 import com.projectnuke.fusion.ai.model.AiRole
 import com.projectnuke.fusion.ai.network.AiProviderClientException
 import com.projectnuke.fusion.ai.network.ChatClient
+import com.projectnuke.fusion.chat.GenerationRequestSnapshot
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -149,10 +150,9 @@ class ExternalAiChatRunnerTest {
     }
 
     @Test
-    fun capturedProviderId_usedEvenIfSelectionChanges() = runBlocking {
+    fun nonFrozenExplicitId_usesExactLookup() = runBlocking {
         val multiSource = MultiProviderSource()
         multiSource.selectedId = "provider_b"
-        val capturedProviderId = "provider_a"
         val fakeClient = object : ChatClient {
             override suspend fun chatCompletion(
                 config: AiProviderConfig,
@@ -167,14 +167,14 @@ class ExternalAiChatRunnerTest {
         val result = runner.generateFromMessages(
             messages = listOf(AiMessage(AiRole.USER, "hi")),
             hasAttachments = false,
-            providerId = capturedProviderId
+            providerId = "provider_a"
         )
         assertTrue(result is ExternalAiChatResult.Success)
         assertEquals("From A", (result as ExternalAiChatResult.Success).content)
     }
 
     @Test
-    fun capturedProviderDeleted_returnsNoProvider() = runBlocking {
+    fun nonFrozenExplicitDeleted_returnsNoProvider() = runBlocking {
         val multiSource = MultiProviderSource()
         multiSource.selectedId = "provider_b"
         val fakeClient = object : ChatClient {
@@ -195,41 +195,7 @@ class ExternalAiChatRunnerTest {
     }
 
     @Test
-    fun capturedProviderDisabled_returnsNoProvider() = runBlocking {
-        val source = object : ExternalAiProviderSource {
-            override suspend fun getSelectedRunnableProvider(): AiProviderConfig? {
-                return AiProviderConfig(
-                    id = "enabled", type = AiProviderType.OPENAI, displayName = "Enabled",
-                    baseUrl = "https://enabled.example.com/", modelId = "e-model", apiKeySecretId = "e-key"
-                )
-            }
-            override suspend fun getRunnableProviderById(id: String): AiProviderConfig? {
-                if (id == "disabled") return null
-                return AiProviderConfig(
-                    id = "enabled", type = AiProviderType.OPENAI, displayName = "Enabled",
-                    baseUrl = "https://enabled.example.com/", modelId = "e-model", apiKeySecretId = "e-key"
-                )
-            }
-        }
-        val fakeClient = object : ChatClient {
-            override suspend fun chatCompletion(
-                config: AiProviderConfig,
-                request: AiChatRequest
-            ): AiChatResponse {
-                throw AssertionError("Should not be called")
-            }
-        }
-        val runner = ExternalAiChatRunner(source, fakeClient)
-        val result = runner.generateFromMessages(
-            messages = listOf(AiMessage(AiRole.USER, "hi")),
-            hasAttachments = false,
-            providerId = "disabled"
-        )
-        assertTrue(result is ExternalAiChatResult.NoProvider)
-    }
-
-    @Test
-    fun nullProviderId_usesSelectedProvider() = runBlocking {
+    fun nonFrozenNull_usesSelectedProvider() = runBlocking {
         val multiSource = MultiProviderSource()
         multiSource.selectedId = "provider_b"
         val fakeClient = object : ChatClient {
@@ -249,6 +215,225 @@ class ExternalAiChatRunnerTest {
         )
         assertTrue(result is ExternalAiChatResult.Success)
         assertEquals("From B", (result as ExternalAiChatResult.Success).content)
+    }
+
+    @Test
+    fun frozenProviderA_usedEvenIfSelectionIsB() = runBlocking {
+        val multiSource = MultiProviderSource()
+        multiSource.selectedId = "provider_b"
+        val fakeClient = object : ChatClient {
+            override suspend fun chatCompletion(
+                config: AiProviderConfig,
+                request: AiChatRequest
+            ): AiChatResponse {
+                assertEquals("provider_a", config.id)
+                return AiChatResponse(id = "1", model = "a-model", content = "From A")
+            }
+        }
+        val runner = ExternalAiChatRunner(multiSource, fakeClient)
+        val result = runner.generateFromMessages(
+            messages = listOf(AiMessage(AiRole.USER, "hi")),
+            hasAttachments = false,
+            providerId = "provider_a",
+            providerSelectionFrozen = true
+        )
+        assertTrue(result is ExternalAiChatResult.Success)
+        assertEquals("From A", (result as ExternalAiChatResult.Success).content)
+        assertEquals(0, multiSource.selectedProviderCallCount)
+        assertEquals(1, multiSource.exactLookupCallCount)
+    }
+
+    @Test
+    fun frozenDeletedProvider_returnsNoProvider() = runBlocking {
+        val multiSource = MultiProviderSource()
+        multiSource.selectedId = "provider_b"
+        val fakeClient = object : ChatClient {
+            override suspend fun chatCompletion(
+                config: AiProviderConfig,
+                request: AiChatRequest
+            ): AiChatResponse {
+                throw AssertionError("Should not be called")
+            }
+        }
+        val runner = ExternalAiChatRunner(multiSource, fakeClient)
+        val result = runner.generateFromMessages(
+            messages = listOf(AiMessage(AiRole.USER, "hi")),
+            hasAttachments = false,
+            providerId = "deleted_provider",
+            providerSelectionFrozen = true
+        )
+        assertTrue(result is ExternalAiChatResult.NoProvider)
+        assertEquals(0, multiSource.selectedProviderCallCount)
+    }
+
+    @Test
+    fun frozenDisabledProvider_returnsNoProvider() = runBlocking {
+        val source = object : ExternalAiProviderSource {
+            var selectedProviderCallCount = 0
+            var exactLookupCallCount = 0
+
+            override suspend fun getSelectedRunnableProvider(): AiProviderConfig? {
+                selectedProviderCallCount++
+                return AiProviderConfig(
+                    id = "enabled", type = AiProviderType.OPENAI, displayName = "Enabled",
+                    baseUrl = "https://enabled.example.com/", modelId = "e-model", apiKeySecretId = "e-key"
+                )
+            }
+
+            override suspend fun getRunnableProviderById(id: String): AiProviderConfig? {
+                exactLookupCallCount++
+                if (id == "disabled") return null
+                return AiProviderConfig(
+                    id = "enabled", type = AiProviderType.OPENAI, displayName = "Enabled",
+                    baseUrl = "https://enabled.example.com/", modelId = "e-model", apiKeySecretId = "e-key"
+                )
+            }
+        }
+        val fakeClient = object : ChatClient {
+            override suspend fun chatCompletion(
+                config: AiProviderConfig,
+                request: AiChatRequest
+            ): AiChatResponse {
+                throw AssertionError("Should not be called")
+            }
+        }
+        val runner = ExternalAiChatRunner(source, fakeClient)
+        val result = runner.generateFromMessages(
+            messages = listOf(AiMessage(AiRole.USER, "hi")),
+            hasAttachments = false,
+            providerId = "disabled",
+            providerSelectionFrozen = true
+        )
+        assertTrue(result is ExternalAiChatResult.NoProvider)
+        assertEquals(0, source.selectedProviderCallCount)
+        assertEquals(1, source.exactLookupCallCount)
+    }
+
+    @Test
+    fun frozenNullId_returnsNoProvider() = runBlocking {
+        val multiSource = MultiProviderSource()
+        multiSource.selectedId = "provider_b"
+        val fakeClient = object : ChatClient {
+            override suspend fun chatCompletion(
+                config: AiProviderConfig,
+                request: AiChatRequest
+            ): AiChatResponse {
+                throw AssertionError("Should not be called")
+            }
+        }
+        val runner = ExternalAiChatRunner(multiSource, fakeClient)
+        val result = runner.generateFromMessages(
+            messages = listOf(AiMessage(AiRole.USER, "hi")),
+            hasAttachments = false,
+            providerId = null,
+            providerSelectionFrozen = true
+        )
+        assertTrue(result is ExternalAiChatResult.NoProvider)
+        assertEquals(0, multiSource.selectedProviderCallCount)
+    }
+
+    @Test
+    fun frozenNullId_neverCallsSelectedProvider() = runBlocking {
+        val multiSource = MultiProviderSource()
+        multiSource.selectedId = "provider_b"
+        val fakeClient = object : ChatClient {
+            override suspend fun chatCompletion(
+                config: AiProviderConfig,
+                request: AiChatRequest
+            ): AiChatResponse {
+                throw AssertionError("Should not be called")
+            }
+        }
+        val runner = ExternalAiChatRunner(multiSource, fakeClient)
+        runner.generateFromMessages(
+            messages = listOf(AiMessage(AiRole.USER, "hi")),
+            hasAttachments = false,
+            providerId = null,
+            providerSelectionFrozen = true
+        )
+        assertEquals(0, multiSource.selectedProviderCallCount)
+    }
+
+    @Test
+    fun frozenExactLookup_doesNotMutateSelection() = runBlocking {
+        val multiSource = MultiProviderSource()
+        multiSource.selectedId = "provider_b"
+        val fakeClient = object : ChatClient {
+            override suspend fun chatCompletion(
+                config: AiProviderConfig,
+                request: AiChatRequest
+            ): AiChatResponse {
+                return AiChatResponse(id = "1", model = "a-model", content = "From A")
+            }
+        }
+        val runner = ExternalAiChatRunner(multiSource, fakeClient)
+        runner.generateFromMessages(
+            messages = listOf(AiMessage(AiRole.USER, "hi")),
+            hasAttachments = false,
+            providerId = "provider_a",
+            providerSelectionFrozen = true
+        )
+        assertEquals("provider_b", multiSource.selectedId)
+    }
+
+    @Test
+    fun resolveWebSearchPolicy_attachmentBlockedAndManualEnabled_returnsDisabled() {
+        assertEquals(
+            GenerationRequestSnapshot.WebSearchPolicy.DISABLED,
+            GenerationRequestSnapshot.resolveWebSearchPolicy(
+                externalApiAttachmentBlocked = true,
+                webSearchEnabled = true,
+                autoWebSearchSuggested = false
+            )
+        )
+    }
+
+    @Test
+    fun resolveWebSearchPolicy_attachmentBlockedAndAutoSuggested_returnsDisabled() {
+        assertEquals(
+            GenerationRequestSnapshot.WebSearchPolicy.DISABLED,
+            GenerationRequestSnapshot.resolveWebSearchPolicy(
+                externalApiAttachmentBlocked = true,
+                webSearchEnabled = false,
+                autoWebSearchSuggested = true
+            )
+        )
+    }
+
+    @Test
+    fun resolveWebSearchPolicy_manualEnabled_returnsEnabled() {
+        assertEquals(
+            GenerationRequestSnapshot.WebSearchPolicy.ENABLED,
+            GenerationRequestSnapshot.resolveWebSearchPolicy(
+                externalApiAttachmentBlocked = false,
+                webSearchEnabled = true,
+                autoWebSearchSuggested = false
+            )
+        )
+    }
+
+    @Test
+    fun resolveWebSearchPolicy_autoSuggested_returnsAuto() {
+        assertEquals(
+            GenerationRequestSnapshot.WebSearchPolicy.AUTO,
+            GenerationRequestSnapshot.resolveWebSearchPolicy(
+                externalApiAttachmentBlocked = false,
+                webSearchEnabled = false,
+                autoWebSearchSuggested = true
+            )
+        )
+    }
+
+    @Test
+    fun resolveWebSearchPolicy_neither_returnsDisabled() {
+        assertEquals(
+            GenerationRequestSnapshot.WebSearchPolicy.DISABLED,
+            GenerationRequestSnapshot.resolveWebSearchPolicy(
+                externalApiAttachmentBlocked = false,
+                webSearchEnabled = false,
+                autoWebSearchSuggested = false
+            )
+        )
     }
 
     private class FakeProviderSource : ExternalAiProviderSource {
@@ -283,6 +468,8 @@ class ExternalAiChatRunnerTest {
 
     private class MultiProviderSource : ExternalAiProviderSource {
         var selectedId: String? = "provider_b"
+        var selectedProviderCallCount = 0
+        var exactLookupCallCount = 0
 
         private val providers = listOf(
             AiProviderConfig(
@@ -304,10 +491,12 @@ class ExternalAiChatRunnerTest {
         )
 
         override suspend fun getSelectedRunnableProvider(): AiProviderConfig? {
+            selectedProviderCallCount++
             return providers.firstOrNull { it.id == selectedId }
         }
 
         override suspend fun getRunnableProviderById(id: String): AiProviderConfig? {
+            exactLookupCallCount++
             val p = providers.firstOrNull { it.id == id }
             if (p != null && p.isEnabled && !p.apiKeySecretId.isNullOrBlank() && p.baseUrl.isNotBlank() && p.modelId.isNotBlank()) return p
             return null
