@@ -15,7 +15,6 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -593,9 +592,13 @@ class GenerationSessionRegistryTest {
                     }
                 }
 
-                delay(100)
-
                 withTimeout(2000) {
+                    while (!registry.isPending(15L, "B")) {
+                        yield()
+                    }
+                }
+
+                val cancelB = async(Dispatchers.Default) {
                     registry.cancelAndJoin(15L, "B", "stop-pending-B")
                 }
 
@@ -604,6 +607,8 @@ class GenerationSessionRegistryTest {
                 val bResult = withTimeout(2000) { bDeferred.await() }
                 assertTrue("B start should have thrown CancellationException", bResult is CancellationException)
                 assertEquals(1, bBlockEntered.count)
+
+                assertTrue(withTimeout(2000) { cancelB.await() })
 
                 assertNull("registry should not contain A", registry.activeSession(15L))
                 assertFalse("registry should not have active session for A", registry.isActive(15L, "A"))
@@ -634,6 +639,272 @@ class GenerationSessionRegistryTest {
     fun `hasActiveSession returns false for unknown conversation`() {
         val registry = GenerationSessionRegistry()
         assertFalse(registry.hasActiveSession(99L))
+    }
+
+    @Test
+    fun `pending cancelAndJoin waits for token completion before returning`() {
+        runBlocking {
+            val scope = testScope()
+            val aCleanupStarted = CountDownLatch(1)
+            val aCleanupRelease = CompletableDeferred<Unit>()
+            val aStarted = CountDownLatch(1)
+            val bBlockEntered = CountDownLatch(1)
+            try {
+                val registry = GenerationSessionRegistry()
+
+                val aDone = async(Dispatchers.Default) {
+                    registry.start(scope, snapshot(16L, "A")) {
+                        aStarted.countDown()
+                        try {
+                            CompletableDeferred<Unit>().await()
+                        } finally {
+                            aCleanupStarted.countDown()
+                            withContext(NonCancellable) {
+                                aCleanupRelease.await()
+                            }
+                        }
+                    }
+                }
+
+                awaitGate(aStarted)
+
+                async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                    registry.cancelAndJoin(16L, "A", "stop-A")
+                }
+
+                awaitGate(aCleanupStarted)
+
+                val bDeferred = async(Dispatchers.Default) {
+                    try {
+                        registry.start(scope, snapshot(16L, "B")) {
+                            bBlockEntered.countDown()
+                            CompletableDeferred<Unit>().await()
+                        }
+                        null
+                    } catch (e: CancellationException) {
+                        e
+                    }
+                }
+
+                withTimeout(2000) {
+                    while (!registry.isPending(16L, "B")) {
+                        yield()
+                    }
+                }
+
+                val cancelB = async(Dispatchers.Default) {
+                    registry.cancelAndJoin(16L, "B", "stop-pending-B")
+                }
+
+                withTimeout(2000) {
+                    while (registry.isPending(16L, "B")) {
+                        yield()
+                    }
+                }
+
+                assertFalse("cancelAndJoin should be blocked until B's start terminates",
+                    cancelB.isCompleted)
+
+                aCleanupRelease.complete(Unit)
+
+                val bResult = withTimeout(2000) { bDeferred.await() }
+                assertTrue(bResult is CancellationException)
+                assertEquals(1, bBlockEntered.count)
+
+                assertTrue(withTimeout(2000) { cancelB.await() })
+
+                assertNull("registry should not contain A", registry.activeSession(16L))
+                assertFalse("registry should not have active session for B", registry.isActive(16L, "B"))
+
+                withTimeout(2000) { aDone.await() }
+            } finally {
+                aCleanupRelease.complete(Unit)
+                scope.cancel()
+                withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+            }
+        }
+    }
+
+    @Test
+    fun `B-then-C pending supersession cancels B and C becomes active`() = runBlocking {
+        val scope = testScope()
+        val aCleanupStarted = CountDownLatch(1)
+        val aCleanupRelease = CompletableDeferred<Unit>()
+        val aStarted = CountDownLatch(1)
+        val bBlockEntered = CountDownLatch(1)
+        val cEntered = CountDownLatch(1)
+        val cHold = CompletableDeferred<Unit>()
+        try {
+            val registry = GenerationSessionRegistry()
+
+            val aDone = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(17L, "A")) {
+                    aStarted.countDown()
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } finally {
+                        aCleanupStarted.countDown()
+                        withContext(NonCancellable) {
+                            aCleanupRelease.await()
+                        }
+                    }
+                }
+            }
+
+            awaitGate(aStarted)
+
+            async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                registry.cancelAndJoin(17L, "A", "stop-A")
+            }
+
+            awaitGate(aCleanupStarted)
+
+            val bDeferred = async(Dispatchers.Default) {
+                try {
+                    registry.start(scope, snapshot(17L, "B")) {
+                        bBlockEntered.countDown()
+                        CompletableDeferred<Unit>().await()
+                    }
+                    null
+                } catch (e: CancellationException) {
+                    e
+                }
+            }
+
+            withTimeout(2000) {
+                while (!registry.isPending(17L, "B")) {
+                    yield()
+                }
+            }
+
+            val cDeferred = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(17L, "C")) {
+                    cEntered.countDown()
+                    cHold.await()
+                }
+            }
+
+            withTimeout(2000) {
+                while (registry.isPending(17L, "B")) {
+                    yield()
+                }
+            }
+
+            assertFalse("B should no longer be pending after C replaces it",
+                registry.isPending(17L, "B"))
+
+            withTimeout(2000) {
+                while (!registry.isPending(17L, "C")) {
+                    yield()
+                }
+            }
+
+            aCleanupRelease.complete(Unit)
+
+            val bResult = withTimeout(2000) { bDeferred.await() }
+            assertTrue("B start should have thrown CancellationException", bResult is CancellationException)
+            assertEquals(1, bBlockEntered.count)
+
+            awaitGate(cEntered)
+
+            assertTrue("C should be active after B is superseded", registry.isActive(17L, "C"))
+            assertFalse("B should not be active", registry.isActive(17L, "B"))
+            assertFalse("A should not be active", registry.isActive(17L, "A"))
+        } finally {
+            aCleanupRelease.complete(Unit)
+            cHold.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `cancelled start cleanup leaves no residual token and later start works`() = runBlocking {
+        val scope = testScope()
+        val aCleanupStarted = CountDownLatch(1)
+        val aCleanupRelease = CompletableDeferred<Unit>()
+        val aStarted = CountDownLatch(1)
+        val bBlockEntered = CountDownLatch(1)
+        val cEntered = CountDownLatch(1)
+        val cHold = CompletableDeferred<Unit>()
+        try {
+            val registry = GenerationSessionRegistry()
+
+            val aDone = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(18L, "A")) {
+                    aStarted.countDown()
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } finally {
+                        aCleanupStarted.countDown()
+                        withContext(NonCancellable) {
+                            aCleanupRelease.await()
+                        }
+                    }
+                }
+            }
+
+            awaitGate(aStarted)
+
+            async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                registry.cancelAndJoin(18L, "A", "stop-A")
+            }
+
+            awaitGate(aCleanupStarted)
+
+            val bDeferred = async(Dispatchers.Default) {
+                try {
+                    registry.start(scope, snapshot(18L, "B")) {
+                        bBlockEntered.countDown()
+                        CompletableDeferred<Unit>().await()
+                    }
+                    "installed"
+                } catch (e: CancellationException) {
+                    "cancelled"
+                }
+            }
+
+            withTimeout(2000) {
+                while (!registry.isPending(18L, "B")) {
+                    yield()
+                }
+            }
+
+            async(Dispatchers.Default) {
+                registry.cancelAndJoin(18L, "B", "cleanup-test")
+            }
+
+            withTimeout(2000) {
+                while (registry.isPending(18L, "B")) {
+                    yield()
+                }
+            }
+
+            assertFalse("B should not be pending after cancellation",
+                registry.isPending(18L, "B"))
+
+            aCleanupRelease.complete(Unit)
+
+            val bResult = withTimeout(2000) { bDeferred.await() }
+            assertEquals("B start should have been cancelled", "cancelled", bResult)
+            assertEquals(1, bBlockEntered.count)
+
+            val cDeferred = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(18L, "C")) {
+                    cEntered.countDown()
+                    cHold.await()
+                }
+            }
+
+            awaitGate(cEntered)
+
+            assertTrue("C should be active after B cleanup", registry.isActive(18L, "C"))
+        } finally {
+            aCleanupRelease.complete(Unit)
+            cHold.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
     }
 
     // -- helpers --

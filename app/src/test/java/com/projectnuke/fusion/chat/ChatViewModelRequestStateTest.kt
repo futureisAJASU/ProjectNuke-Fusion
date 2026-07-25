@@ -12,7 +12,6 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -284,7 +283,8 @@ class ChatViewModelRequestStateTest {
             assertFalse(stateAfter.extractingMemoryCandidates)
             assertFalse(stateAfter.actualWebSearchUsed)
 
-            assertTrue("B should still be active after A cleanup completes", vm.registry.isActive(convId, "B"))
+            assertTrue("B should still be active after A cleanup completes",
+                vm.registry.isActive(convId, "B"))
         } finally {
             aCleanupRelease.complete(Unit)
             bHold.complete(Unit)
@@ -349,7 +349,7 @@ class ChatViewModelRequestStateTest {
                 actualWebSearchUsed = false,
             ) }
 
-            val bDeferred = async(Dispatchers.Unconfined) {
+            val bDeferred = async(Dispatchers.Default) {
                 try {
                     vm.registry.start(scope, snapshot(convId, "B")) {
                         bBlockEntered.countDown()
@@ -361,9 +361,13 @@ class ChatViewModelRequestStateTest {
                 }
             }
 
-            delay(100)
-
             withTimeout(2000) {
+                while (!vm.registry.isPending(convId, "B")) {
+                    yield()
+                }
+            }
+
+            val cancelB = async(Dispatchers.Default) {
                 vm.cancelGeneration(convId, "stop-pending-B")
             }
 
@@ -372,6 +376,8 @@ class ChatViewModelRequestStateTest {
             val bResult = withTimeout(2000) { bDeferred.await() }
             assertTrue("B start should have thrown CancellationException", bResult is CancellationException)
             assertEquals(1, bBlockEntered.count)
+
+            withTimeout(2000) { cancelB.await() }
 
             assertNull("registry should not contain A", vm.registry.activeSession(convId))
             assertFalse("registry should not have active session for A", vm.registry.isActive(convId, "A"))
@@ -387,7 +393,103 @@ class ChatViewModelRequestStateTest {
             assertFalse(stateAfter.extractingMemoryCandidates)
             assertFalse(stateAfter.actualWebSearchUsed)
 
+            withTimeout(2000) { aSession.job.join() }
+        } finally {
             aCleanupRelease.complete(Unit)
+            bHold.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `cancelAndAwait cancels pending B and active A and clears state`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val aCleanupStarted = CountDownLatch(1)
+        val aCleanupRelease = CompletableDeferred<Unit>()
+        val aStarted = CountDownLatch(1)
+        val bBlockEntered = CountDownLatch(1)
+        val bHold = CompletableDeferred<Unit>()
+        try {
+            val vm = ChatViewModel()
+            val convId = 108L
+
+            vm.update(convId) { it.copy(
+                activeRequestId = "A",
+                isGenerating = true,
+                streamingText = "A-stream",
+            ) }
+
+            val aSession = withTimeout(2000) {
+                vm.registry.start(scope, snapshot(convId, "A")) {
+                    aStarted.countDown()
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } finally {
+                        aCleanupStarted.countDown()
+                        withContext(NonCancellable) {
+                            aCleanupRelease.await()
+                        }
+                    }
+                }
+            }
+
+            awaitGate(aStarted)
+
+            async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                vm.registry.cancelAndJoin(convId, "A", "stop-A")
+            }
+
+            awaitGate(aCleanupStarted)
+
+            val bDeferred = async(Dispatchers.Default) {
+                try {
+                    vm.registry.start(scope, snapshot(convId, "B")) {
+                        bBlockEntered.countDown()
+                        bHold.await()
+                    }
+                    null
+                } catch (e: CancellationException) {
+                    e
+                }
+            }
+
+            withTimeout(2000) {
+                while (!vm.registry.isPending(convId, "B")) {
+                    yield()
+                }
+            }
+
+            val deleteDone = async(Dispatchers.Default) {
+                vm.cancelAndAwait(convId, "delete")
+            }
+
+            withTimeout(2000) {
+                while (vm.registry.isPending(convId, "B")) {
+                    yield()
+                }
+            }
+
+            aCleanupRelease.complete(Unit)
+
+            val bResult = withTimeout(2000) { bDeferred.await() }
+            assertTrue("B start should have thrown CancellationException",
+                bResult is CancellationException)
+            assertEquals(1, bBlockEntered.count)
+
+            withTimeout(2000) { deleteDone.await() }
+
+            assertFalse("no active session for A after deletion",
+                vm.registry.isActive(convId, "A"))
+            assertFalse("no active session for B after deletion",
+                vm.registry.isActive(convId, "B"))
+            assertFalse("no pending request after deletion",
+                vm.registry.isPending(convId, "A") || vm.registry.isPending(convId, "B"))
+
+            val state = vm.state(convId)
+            assertNull("state should be cleared after deletion", state.activeRequestId)
+            assertFalse(state.isGenerating)
+
             withTimeout(2000) { aSession.job.join() }
         } finally {
             aCleanupRelease.complete(Unit)
