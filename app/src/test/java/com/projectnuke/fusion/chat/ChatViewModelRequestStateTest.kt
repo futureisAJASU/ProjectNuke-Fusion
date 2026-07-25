@@ -2,17 +2,21 @@ package com.projectnuke.fusion.chat
 
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -281,6 +285,110 @@ class ChatViewModelRequestStateTest {
             assertFalse(stateAfter.actualWebSearchUsed)
 
             assertTrue("B should still be active after A cleanup completes", vm.registry.isActive(convId, "B"))
+        } finally {
+            aCleanupRelease.complete(Unit)
+            bHold.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `cancelGeneration of pending B stops B before block enters`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val aCleanupStarted = CountDownLatch(1)
+        val aCleanupRelease = CompletableDeferred<Unit>()
+        val aStarted = CountDownLatch(1)
+        val bBlockEntered = CountDownLatch(1)
+        val bHold = CompletableDeferred<Unit>()
+        try {
+            val vm = ChatViewModel()
+            val convId = 107L
+
+            vm.update(convId) { it.copy(
+                activeRequestId = "A",
+                isGenerating = true,
+                streamingText = "A-stream",
+                streamingMetricsLine = "A-metrics",
+                generationStatus = "A-status",
+                regeneratingMessageId = 1L,
+                extractingMemoryCandidates = true,
+                actualWebSearchUsed = true,
+            ) }
+
+            val aSession = withTimeout(2000) {
+                vm.registry.start(scope, snapshot(convId, "A")) {
+                    aStarted.countDown()
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } finally {
+                        aCleanupStarted.countDown()
+                        withContext(NonCancellable) {
+                            aCleanupRelease.await()
+                        }
+                    }
+                }
+            }
+
+            awaitGate(aStarted)
+
+            async(Dispatchers.Default) {
+                vm.cancelGeneration(convId, "stop-A")
+            }
+
+            awaitGate(aCleanupStarted)
+
+            vm.update(convId) { it.copy(
+                activeRequestId = "B",
+                isGenerating = true,
+                streamingText = "B-stream",
+                streamingMetricsLine = "B-metrics",
+                generationStatus = "B-status",
+                regeneratingMessageId = 2L,
+                extractingMemoryCandidates = false,
+                actualWebSearchUsed = false,
+            ) }
+
+            val bDeferred = async(Dispatchers.Unconfined) {
+                try {
+                    vm.registry.start(scope, snapshot(convId, "B")) {
+                        bBlockEntered.countDown()
+                        bHold.await()
+                    }
+                    null
+                } catch (e: CancellationException) {
+                    e
+                }
+            }
+
+            delay(100)
+
+            withTimeout(2000) {
+                vm.cancelGeneration(convId, "stop-pending-B")
+            }
+
+            aCleanupRelease.complete(Unit)
+
+            val bResult = withTimeout(2000) { bDeferred.await() }
+            assertTrue("B start should have thrown CancellationException", bResult is CancellationException)
+            assertEquals(1, bBlockEntered.count)
+
+            assertNull("registry should not contain A", vm.registry.activeSession(convId))
+            assertFalse("registry should not have active session for A", vm.registry.isActive(convId, "A"))
+            assertFalse("registry should not have active session for B", vm.registry.isActive(convId, "B"))
+
+            val stateAfter = vm.state(convId)
+            assertNull(stateAfter.activeRequestId)
+            assertFalse(stateAfter.isGenerating)
+            assertNull(stateAfter.streamingText)
+            assertNull(stateAfter.streamingMetricsLine)
+            assertNull(stateAfter.generationStatus)
+            assertNull(stateAfter.regeneratingMessageId)
+            assertFalse(stateAfter.extractingMemoryCandidates)
+            assertFalse(stateAfter.actualWebSearchUsed)
+
+            aCleanupRelease.complete(Unit)
+            withTimeout(2000) { aSession.job.join() }
         } finally {
             aCleanupRelease.complete(Unit)
             bHold.complete(Unit)

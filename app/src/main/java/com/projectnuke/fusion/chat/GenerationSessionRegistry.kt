@@ -17,7 +17,17 @@ class GenerationSession(
 
 class GenerationSessionRegistry {
     private val sessions = ConcurrentHashMap<Long, GenerationSession>()
+    private val pending = ConcurrentHashMap<Long, String>()
+    private val cancelledRequests = HashSet<String>()
     private val lockStripes = Array(16) { Mutex() }
+
+    private fun registerCancelled(requestId: String) = synchronized(cancelledRequests) {
+        cancelledRequests.add(requestId)
+    }
+
+    private fun isCancelled(requestId: String): Boolean = synchronized(cancelledRequests) {
+        cancelledRequests.remove(requestId)
+    }
 
     private fun stripeFor(conversationId: Long): Mutex =
         lockStripes[(conversationId and 15L).toInt()]
@@ -31,11 +41,28 @@ class GenerationSessionRegistry {
         val requestId = snapshot.requestId
         val lock = stripeFor(conversationId)
 
+        pending[conversationId] = requestId
+
+        if (isCancelled(requestId)) {
+            pending.remove(conversationId, requestId)
+            throw CancellationException("Request $requestId was cancelled before start")
+        }
+
         return lock.withLock {
+            if (isCancelled(requestId)) {
+                pending.remove(conversationId, requestId)
+                throw CancellationException("Request $requestId was cancelled before start")
+            }
+
             val previous = sessions[conversationId]
             if (previous != null && !previous.job.isCompleted) {
                 previous.job.cancel(CancellationException("superseded-by-${requestId}"))
                 previous.job.join()
+            }
+
+            if (isCancelled(requestId)) {
+                pending.remove(conversationId, requestId)
+                throw CancellationException("Request $requestId was cancelled before start")
             }
 
             lateinit var gs: GenerationSession
@@ -50,6 +77,7 @@ class GenerationSessionRegistry {
                 job = coroutineJob,
             )
             sessions[conversationId] = gs
+            pending.remove(conversationId, requestId)
 
             gs.job.invokeOnCompletion {
                 sessions.remove(conversationId, gs)
@@ -57,6 +85,7 @@ class GenerationSessionRegistry {
 
             if (!gs.job.start()) {
                 sessions.remove(conversationId, gs)
+                pending.remove(conversationId, requestId)
                 throw CancellationException(
                     "Scope cancelled before session could start for conversation $conversationId"
                 )
@@ -97,15 +126,34 @@ class GenerationSessionRegistry {
         requestId: String,
         reason: String
     ): Boolean {
+        val pendingId = pending[conversationId]
+        if (pendingId == requestId) {
+            registerCancelled(requestId)
+            pending.remove(conversationId, requestId)
+            return true
+        }
+
         val lock = stripeFor(conversationId)
         return lock.withLock {
-            val session = sessions[conversationId] ?: return@withLock false
-            if (session.requestId != requestId) return@withLock false
-            if (session.job.isCompleted) return@withLock false
-            session.job.cancel(CancellationException(reason))
-            session.job.join()
-            true
+            val session = sessions[conversationId]
+            if (session != null) {
+                if (session.requestId != requestId) return@withLock false
+                if (session.job.isCompleted) return@withLock false
+                session.job.cancel(CancellationException(reason))
+                session.job.join()
+                true
+            } else {
+                val pendingId2 = pending[conversationId]
+                if (pendingId2 != requestId) return@withLock false
+                registerCancelled(requestId)
+                pending.remove(conversationId, requestId)
+                true
+            }
         }
+    }
+
+    fun hasCancelledRequest(requestId: String): Boolean = synchronized(cancelledRequests) {
+        cancelledRequests.contains(requestId)
     }
 
     fun hasActiveSession(conversationId: Long): Boolean =

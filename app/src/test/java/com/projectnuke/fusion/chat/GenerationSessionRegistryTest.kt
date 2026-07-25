@@ -3,19 +3,23 @@ package com.projectnuke.fusion.chat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -76,8 +80,8 @@ class GenerationSessionRegistryTest {
     @Test
     fun `block exception removes the session`() = runBlocking {
         val scope = testScope()
-        val errors = mutableListOf<Throwable>()
-        val handler = CoroutineExceptionHandler { _, e -> errors.add(e) }
+        val errorRef = AtomicReference<Throwable>()
+        val handler = CoroutineExceptionHandler { _, e -> errorRef.set(e) }
         val errorScope = CoroutineScope(scope.coroutineContext[Job]!! + Dispatchers.Default + handler)
         try {
             val registry = GenerationSessionRegistry()
@@ -87,8 +91,8 @@ class GenerationSessionRegistryTest {
                 }
             }
             withTimeout(2000) { session.job.join() }
-            assertTrue("expected IllegalStateException in errors",
-                errors.any { it is IllegalStateException })
+            assertTrue("expected IllegalStateException in errorRef",
+                errorRef.get() is IllegalStateException)
             assertFalse(registry.isActive(3L, "r3"))
             assertNull(registry.activeSession(3L))
         } finally {
@@ -228,7 +232,7 @@ class GenerationSessionRegistryTest {
             }
 
             holdA.complete(Unit)
-            withTimeout(2000) { aDone.await(); bDone.await() }
+            withTimeout(2000) { aDone.await() }
             awaitGate(bStarted)
 
             assertTrue("B should be active after A cleanup", registry.isActive(6L, "B"))
@@ -240,7 +244,6 @@ class GenerationSessionRegistryTest {
                 }
             }
 
-            withTimeout(2000) { bDone.await() }
             awaitGate(cStarted)
 
             assertTrue("C should be active as the newest starting session",
@@ -265,13 +268,13 @@ class GenerationSessionRegistryTest {
         val bStarted = CountDownLatch(1)
         try {
             val registry = GenerationSessionRegistry()
-            val aDone = async(Dispatchers.Default) {
+            val aSession = async(Dispatchers.Default) {
                 registry.start(scope, snapshot(10L, "A")) {
                     aStarted.countDown()
                     holdA.await()
                 }
             }
-            val bDone = async(Dispatchers.Default) {
+            val bSession = async(Dispatchers.Default) {
                 registry.start(scope, snapshot(20L, "B")) {
                     bStarted.countDown()
                     holdB.await()
@@ -286,7 +289,9 @@ class GenerationSessionRegistryTest {
 
             holdA.complete(Unit)
             holdB.complete(Unit)
-            withTimeout(2000) { aDone.await(); bDone.await() }
+            val aSess = withTimeout(2000) { aSession.await() }
+            val bSess = withTimeout(2000) { bSession.await() }
+            withTimeout(2000) { aSess.job.join(); bSess.job.join() }
 
             assertFalse(registry.isActive(10L, "A"))
             assertFalse(registry.isActive(20L, "B"))
@@ -540,6 +545,76 @@ class GenerationSessionRegistryTest {
             bHold.complete(Unit)
             scope.cancel()
             withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `pending request cancellation prevents block entry and throws CancellationException`() {
+        runBlocking {
+            val scope = testScope()
+            val aCleanupStarted = CountDownLatch(1)
+            val aCleanupRelease = CompletableDeferred<Unit>()
+            val aStarted = CountDownLatch(1)
+            val bBlockEntered = CountDownLatch(1)
+            try {
+                val registry = GenerationSessionRegistry()
+
+                val aDone = async(Dispatchers.Default) {
+                    registry.start(scope, snapshot(15L, "A")) {
+                        aStarted.countDown()
+                        try {
+                            CompletableDeferred<Unit>().await()
+                        } finally {
+                            aCleanupStarted.countDown()
+                            withContext(NonCancellable) {
+                                aCleanupRelease.await()
+                            }
+                        }
+                    }
+                }
+
+                awaitGate(aStarted)
+
+                async(Dispatchers.Default, start = CoroutineStart.UNDISPATCHED) {
+                    registry.cancelAndJoin(15L, "A", "stop-A")
+                }
+
+                awaitGate(aCleanupStarted)
+
+                val bDeferred = async(Dispatchers.Default) {
+                    try {
+                        registry.start(scope, snapshot(15L, "B")) {
+                            bBlockEntered.countDown()
+                            CompletableDeferred<Unit>().await()
+                        }
+                        null
+                    } catch (e: CancellationException) {
+                        e
+                    }
+                }
+
+                delay(100)
+
+                withTimeout(2000) {
+                    registry.cancelAndJoin(15L, "B", "stop-pending-B")
+                }
+
+                aCleanupRelease.complete(Unit)
+
+                val bResult = withTimeout(2000) { bDeferred.await() }
+                assertTrue("B start should have thrown CancellationException", bResult is CancellationException)
+                assertEquals(1, bBlockEntered.count)
+
+                assertNull("registry should not contain A", registry.activeSession(15L))
+                assertFalse("registry should not have active session for A", registry.isActive(15L, "A"))
+                assertFalse("registry should not have active session for B", registry.isActive(15L, "B"))
+
+                withTimeout(2000) { aDone.await() }
+            } finally {
+                aCleanupRelease.complete(Unit)
+                scope.cancel()
+                withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+            }
         }
     }
 

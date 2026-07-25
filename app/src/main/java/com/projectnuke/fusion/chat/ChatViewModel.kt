@@ -93,9 +93,8 @@ class ChatViewModel {
 
     suspend fun cancelGeneration(conversationId: Long, reason: String = "user-stop") {
         val requestId = state(conversationId).activeRequestId ?: return
-        if (registry.cancelAndJoin(conversationId, requestId, reason)) {
-            finishRequestState(conversationId, requestId)
-        }
+        registry.cancelAndJoin(conversationId, requestId, reason)
+        finishRequestState(conversationId, requestId)
     }
 
     /**
