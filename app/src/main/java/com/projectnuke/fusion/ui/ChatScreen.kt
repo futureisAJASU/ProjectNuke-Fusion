@@ -1908,6 +1908,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 .firstOrNull { it.name == request.selectedModelId && isModelDownloaded(context, it) }
                                 ?.let { getModelFile(context, it).absolutePath }
                         if (activeModelPath == null) {
+                            DeveloperLogStore.record(context, "memory", "메모리 후보 추출 실패", "conversationId=${request.conversationId}, reason=model file missing")
                             if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == request.conversationId) {
                                 Toast.makeText(context, "메모리 후보를 추출할 수 없습니다.", Toast.LENGTH_SHORT).show()
                             }
@@ -1931,8 +1932,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 webContext = null,
                                 promptLabInstruction = request.promptLabInstruction,
                             )))
-                            request.selectedModelPath?.let { modelPath ->
-                                add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=$modelPath"))
+                            if (request.selectedModelPath != null && activeModelPath == request.selectedModelPath) {
+                                add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=${request.selectedModelPath}"))
                             }
                             add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${FusionModelCatalog.inferFamily(context, request.selectedModelId ?: "").name}"))
                             buildConversationSummaryContextText(loadConversationSummary(context, request.conversationId))?.let { summaryContext ->
