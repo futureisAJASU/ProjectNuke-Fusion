@@ -19,7 +19,7 @@ class GenerationSession(
 
 class GenerationSessionRegistry {
     private val sessions = ConcurrentHashMap<Long, GenerationSession>()
-    private val pendingTokens = ConcurrentHashMap<Long, PendingStart>()
+    private val latestTokens = ConcurrentHashMap<Long, PendingStart>()
     private val lockStripes = Array(16) { Mutex() }
 
     internal class PendingStart(
@@ -71,7 +71,7 @@ class GenerationSessionRegistry {
 
         val token = PendingStart(conversationId, requestId)
 
-        val replaced = pendingTokens.put(conversationId, token)
+        val replaced = latestTokens.put(conversationId, token)
         token.predecessor = replaced
         if (replaced != null) {
             replaced.cancel("superseded-by-${requestId}")
@@ -123,15 +123,14 @@ class GenerationSessionRegistry {
                     throw token.cancellationException()
                 }
 
-                pendingTokens.remove(conversationId, token)
-
                 gs.job.invokeOnCompletion {
+                    latestTokens.remove(conversationId, token)
                     sessions.remove(conversationId, gs)
                 }
 
                 if (!gs.job.start()) {
                     sessions.remove(conversationId, gs)
-                    pendingTokens.remove(conversationId, token)
+                    latestTokens.remove(conversationId, token)
                     throw CancellationException(
                         "Scope cancelled before session could start for conversation $conversationId"
                     )
@@ -140,7 +139,9 @@ class GenerationSessionRegistry {
                 gs
             }
         } finally {
-            pendingTokens.remove(conversationId, token)
+            if (token.state() != PendingStart.State.INSTALLED) {
+                latestTokens.remove(conversationId, token)
+            }
             token.completed.complete(Unit)
         }
     }
@@ -161,30 +162,42 @@ class GenerationSessionRegistry {
     }
 
     suspend fun cancelAndJoin(conversationId: Long, reason: String): Boolean {
-        val token = pendingTokens[conversationId]
-        val tokenWasCancelled = token != null && token.cancel(reason)
-
-        val settledTokens = mutableListOf<PendingStart>()
-        if (tokenWasCancelled) {
-            settledTokens.add(token)
-            settlePredecessorChain(token, reason, settledTokens)
-        }
-
-        val lock = stripeFor(conversationId)
-        val joinedActive = lock.withLock {
-            val session = sessions[conversationId]
-            if (session != null && !session.job.isCompleted) {
-                session.job.cancel(CancellationException(reason))
-                session.job.join()
-                true
-            } else {
-                false
+        val head = latestTokens[conversationId]
+        if (head == null) {
+            val lock = stripeFor(conversationId)
+            return lock.withLock {
+                val session = sessions[conversationId]
+                if (session != null && !session.job.isCompleted) {
+                    session.job.cancel(CancellationException(reason))
+                    session.job.join()
+                    true
+                } else false
             }
         }
 
-        settledTokens.forEach { it.completed.await() }
+        val settled = mutableListOf<PendingStart>()
 
-        return joinedActive || tokenWasCancelled
+        when (head.state()) {
+            PendingStart.State.INSTALLED -> {
+                head.publishedSession.get()?.let { session ->
+                    if (!session.job.isCompleted) {
+                        session.job.cancel(CancellationException(reason))
+                        session.job.join()
+                    }
+                }
+            }
+            PendingStart.State.CANCELLED -> {}
+            else -> {
+                head.cancel(reason)
+                settled.add(head)
+            }
+        }
+
+        settlePredecessorChain(head, reason, settled)
+
+        settled.forEach { it.completed.await() }
+
+        return true
     }
 
     suspend fun cancelAndJoin(
@@ -192,50 +205,33 @@ class GenerationSessionRegistry {
         requestId: String,
         reason: String
     ): Boolean {
-        val token = pendingTokens[conversationId]
-        if (token != null && token.requestId == requestId) {
-            if (token.cancel(reason)) {
-                val settledTokens = mutableListOf<PendingStart>(token)
-                settlePredecessorChain(token, reason, settledTokens)
+        val head = latestTokens[conversationId]
+        if (head == null) return false
+        if (head.requestId != requestId) return false
 
-                settledTokens.forEach { it.completed.await() }
+        val settled = mutableListOf<PendingStart>()
 
-                val lock = stripeFor(conversationId)
-                lock.withLock {
-                    val session = sessions[conversationId]
-                    if (session != null && session.requestId == requestId && !session.job.isCompleted) {
+        when (head.state()) {
+            PendingStart.State.INSTALLED -> {
+                head.publishedSession.get()?.let { session ->
+                    if (!session.job.isCompleted) {
                         session.job.cancel(CancellationException(reason))
                         session.job.join()
                     }
                 }
-
-                return true
+            }
+            PendingStart.State.CANCELLED -> return false
+            else -> {
+                head.cancel(reason)
+                settled.add(head)
             }
         }
 
-        val lock = stripeFor(conversationId)
-        var pendingToAwait: PendingStart? = null
-        val result = lock.withLock {
-            val session = sessions[conversationId]
-            if (session != null) {
-                if (session.requestId != requestId) return@withLock false
-                if (session.job.isCompleted) return@withLock false
-                session.job.cancel(CancellationException(reason))
-                session.job.join()
-                true
-            } else {
-                val token2 = pendingTokens[conversationId]
-                if (token2 != null && token2.requestId == requestId) {
-                    if (token2.cancel(reason)) {
-                        pendingToAwait = token2
-                        true
-                    } else false
-                } else false
-            }
-        }
+        settlePredecessorChain(head, reason, settled)
 
-        pendingToAwait?.completed?.await()
-        return result
+        settled.forEach { it.completed.await() }
+
+        return true
     }
 
     private suspend fun settlePredecessorChain(
@@ -245,13 +241,22 @@ class GenerationSessionRegistry {
     ) {
         var pred = from.predecessor
         while (pred != null) {
-            pred.cancel(reason)
-            val session = pred.publishedSession.get()
-            if (session != null && !session.job.isCompleted) {
-                session.job.cancel(CancellationException(reason))
-                runCatching { session.job.join() }
+            when (pred.state()) {
+                PendingStart.State.PENDING,
+                PendingStart.State.STARTING -> {
+                    pred.cancel(reason)
+                    out.add(pred)
+                }
+                PendingStart.State.INSTALLED -> {
+                    pred.publishedSession.get()?.let { session ->
+                        if (!session.job.isCompleted) {
+                            session.job.cancel(CancellationException(reason))
+                            session.job.join()
+                        }
+                    }
+                }
+                PendingStart.State.CANCELLED -> {}
             }
-            out.add(pred)
             pred = pred.predecessor
         }
     }
@@ -263,18 +268,21 @@ class GenerationSessionRegistry {
         sessions.filterValues { it.job.isActive }.keys.toSet()
 
     internal fun isPending(conversationId: Long, requestId: String): Boolean {
-        val token = pendingTokens[conversationId] ?: return false
+        val token = latestTokens[conversationId] ?: return false
         return token.requestId == requestId && token.state() == PendingStart.State.PENDING
     }
 
     internal fun isStarting(conversationId: Long, requestId: String): Boolean {
-        val token = pendingTokens[conversationId] ?: return false
+        val token = latestTokens[conversationId] ?: return false
         return token.requestId == requestId && token.state() == PendingStart.State.STARTING
     }
 
     internal fun hasSessionPublished(conversationId: Long, requestId: String): Boolean {
-        val token = pendingTokens[conversationId] ?: return false
+        val token = latestTokens[conversationId] ?: return false
         if (token.requestId != requestId) return false
         return token.publishedSession.get() != null
     }
+
+    internal fun latestToken(conversationId: Long): PendingStart? =
+        latestTokens[conversationId]
 }
