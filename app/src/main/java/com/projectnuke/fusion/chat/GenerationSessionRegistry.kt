@@ -22,25 +22,23 @@ class GenerationSessionRegistry {
     private val pendingTokens = ConcurrentHashMap<Long, PendingStart>()
     private val lockStripes = Array(16) { Mutex() }
 
-    private class PendingStart(
+    internal class PendingStart(
         val conversationId: Long,
         val requestId: String
     ) {
         private val state = AtomicReference(State.PENDING)
         val completed = CompletableDeferred<Unit>()
+        val publishedSession = AtomicReference<GenerationSession?>()
 
         @Volatile
         var predecessor: PendingStart? = null
 
-        @Volatile
-        var predecessorSession: GenerationSession? = null
-
-        enum class State { PENDING, STARTING, COMMITTED, CANCELLED }
+        enum class State { PENDING, STARTING, INSTALLED, CANCELLED }
 
         fun cancel(reason: String): Boolean {
             while (true) {
                 val current = state.get()
-                if (current == State.COMMITTED || current == State.CANCELLED) return false
+                if (current == State.INSTALLED || current == State.CANCELLED) return false
                 if (state.compareAndSet(current, State.CANCELLED)) return true
             }
         }
@@ -48,15 +46,16 @@ class GenerationSessionRegistry {
         fun tryBeginStarting(): Boolean =
             state.compareAndSet(State.PENDING, State.STARTING)
 
-        fun tryCommit(): Boolean =
-            state.compareAndSet(State.STARTING, State.COMMITTED)
+        fun tryInstall(): Boolean =
+            state.compareAndSet(State.STARTING, State.INSTALLED)
 
         fun cancellationException(): CancellationException =
             CancellationException("Request $requestId was cancelled before start")
 
-        fun isPendingState(): Boolean =
-            state.get() == State.PENDING
+        fun state(): State = state.get()
     }
+
+    internal var onBeforeInstall: suspend () -> Unit = {}
 
     private fun stripeFor(conversationId: Long): Mutex =
         lockStripes[(conversationId and 15L).toInt()]
@@ -71,7 +70,6 @@ class GenerationSessionRegistry {
         val lock = stripeFor(conversationId)
 
         val token = PendingStart(conversationId, requestId)
-        token.predecessorSession = sessions[conversationId]
 
         val replaced = pendingTokens.put(conversationId, token)
         token.predecessor = replaced
@@ -91,10 +89,6 @@ class GenerationSessionRegistry {
                     previous.job.join()
                 }
 
-                if (!token.tryCommit()) {
-                    throw token.cancellationException()
-                }
-
                 if (!scope.coroutineContext[Job]!!.isActive) {
                     throw CancellationException(
                         "Scope cancelled before session could start for conversation $conversationId"
@@ -112,7 +106,23 @@ class GenerationSessionRegistry {
                     requestId = requestId,
                     job = coroutineJob,
                 )
+
+                token.publishedSession.set(gs)
                 sessions[conversationId] = gs
+
+                onBeforeInstall()
+
+                if (!token.tryInstall()) {
+                    sessions.remove(conversationId, gs)
+                    if (!coroutineJob.isCompleted) {
+                        coroutineJob.cancel(CancellationException(
+                            "Request $requestId was cancelled before install"
+                        ))
+                        coroutineJob.join()
+                    }
+                    throw token.cancellationException()
+                }
+
                 pendingTokens.remove(conversationId, token)
 
                 gs.job.invokeOnCompletion {
@@ -151,8 +161,14 @@ class GenerationSessionRegistry {
     }
 
     suspend fun cancelAndJoin(conversationId: Long, reason: String): Boolean {
-        val captured = pendingTokens[conversationId]
-        val capturedPending = if (captured != null && captured.cancel(reason)) captured else null
+        val token = pendingTokens[conversationId]
+        val tokenWasCancelled = token != null && token.cancel(reason)
+
+        val settledTokens = mutableListOf<PendingStart>()
+        if (tokenWasCancelled) {
+            settledTokens.add(token)
+            settlePredecessorChain(token, reason, settledTokens)
+        }
 
         val lock = stripeFor(conversationId)
         val joinedActive = lock.withLock {
@@ -166,9 +182,9 @@ class GenerationSessionRegistry {
             }
         }
 
-        capturedPending?.completed?.await()
+        settledTokens.forEach { it.completed.await() }
 
-        return joinedActive || capturedPending != null
+        return joinedActive || tokenWasCancelled
     }
 
     suspend fun cancelAndJoin(
@@ -179,23 +195,10 @@ class GenerationSessionRegistry {
         val token = pendingTokens[conversationId]
         if (token != null && token.requestId == requestId) {
             if (token.cancel(reason)) {
-                val cancelledPreds = mutableListOf<PendingStart>()
-                var pred = token.predecessor
-                while (pred != null) {
-                    if (pred.cancel(reason)) {
-                        cancelledPreds.add(pred)
-                    }
-                    pred = pred.predecessor
-                }
+                val settledTokens = mutableListOf<PendingStart>(token)
+                settlePredecessorChain(token, reason, settledTokens)
 
-                val predSession = token.predecessorSession
-                if (predSession != null && !predSession.job.isCompleted) {
-                    predSession.job.cancel(CancellationException(reason))
-                    predSession.job.join()
-                }
-
-                token.completed.await()
-                cancelledPreds.forEach { it.completed.await() }
+                settledTokens.forEach { it.completed.await() }
 
                 val lock = stripeFor(conversationId)
                 lock.withLock {
@@ -235,6 +238,24 @@ class GenerationSessionRegistry {
         return result
     }
 
+    private suspend fun settlePredecessorChain(
+        from: PendingStart,
+        reason: String,
+        out: MutableList<PendingStart>
+    ) {
+        var pred = from.predecessor
+        while (pred != null) {
+            pred.cancel(reason)
+            val session = pred.publishedSession.get()
+            if (session != null && !session.job.isCompleted) {
+                session.job.cancel(CancellationException(reason))
+                runCatching { session.job.join() }
+            }
+            out.add(pred)
+            pred = pred.predecessor
+        }
+    }
+
     fun hasActiveSession(conversationId: Long): Boolean =
         sessions[conversationId]?.job?.isActive == true
 
@@ -243,6 +264,17 @@ class GenerationSessionRegistry {
 
     internal fun isPending(conversationId: Long, requestId: String): Boolean {
         val token = pendingTokens[conversationId] ?: return false
-        return token.requestId == requestId && token.isPendingState()
+        return token.requestId == requestId && token.state() == PendingStart.State.PENDING
+    }
+
+    internal fun isStarting(conversationId: Long, requestId: String): Boolean {
+        val token = pendingTokens[conversationId] ?: return false
+        return token.requestId == requestId && token.state() == PendingStart.State.STARTING
+    }
+
+    internal fun hasSessionPublished(conversationId: Long, requestId: String): Boolean {
+        val token = pendingTokens[conversationId] ?: return false
+        if (token.requestId != requestId) return false
+        return token.publishedSession.get() != null
     }
 }
