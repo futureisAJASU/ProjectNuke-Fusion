@@ -15,6 +15,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -907,7 +908,129 @@ class GenerationSessionRegistryTest {
         }
     }
 
-    // -- helpers --
+    @Test
+    fun `C superseding B in STARTING state prevents B from becoming active`() {
+        runBlocking {
+            val scope = testScope()
+            val aBlock = CompletableDeferred<Unit>()
+            val aCleanupStarted = CountDownLatch(1)
+            val aCleanupRelease = CompletableDeferred<Unit>()
+            val aStarted = CountDownLatch(1)
+            val cEntered = CountDownLatch(1)
+            val cHold = CompletableDeferred<Unit>()
+            try {
+                val registry = GenerationSessionRegistry()
+
+                val aDone = async(Dispatchers.Default) {
+                    registry.start(scope, snapshot(19L, "A")) {
+                        aStarted.countDown()
+                        try {
+                            aBlock.await()
+                        } finally {
+                            aCleanupStarted.countDown()
+                            withContext(NonCancellable) {
+                                aCleanupRelease.await()
+                            }
+                        }
+                    }
+                }
+                awaitGate(aStarted)
+
+                val bDeferred = async(Dispatchers.Default) {
+                    try {
+                        registry.start(scope, snapshot(19L, "B")) {
+                            CompletableDeferred<Unit>().await()
+                        }
+                        null
+                    } catch (e: CancellationException) {
+                        e
+                    }
+                }
+
+                delay(100)
+
+                aBlock.complete(Unit)
+                awaitGate(aCleanupStarted)
+
+                async(Dispatchers.Default) {
+                    registry.start(scope, snapshot(19L, "C")) {
+                        cEntered.countDown()
+                        cHold.await()
+                    }
+                }
+
+                delay(100)
+
+                assertFalse("B should no longer be pending",
+                    registry.isPending(19L, "B"))
+
+                aCleanupRelease.complete(Unit)
+
+                val bResult = withTimeout(2000) { bDeferred.await() }
+                assertTrue("B start should have thrown CancellationException",
+                    bResult is CancellationException)
+
+                awaitGate(cEntered)
+
+                assertTrue("C should be active", registry.isActive(19L, "C"))
+                assertFalse("B should not be active", registry.isActive(19L, "B"))
+                assertFalse("A should not be active", registry.isActive(19L, "A"))
+            } finally {
+                aBlock.complete(Unit)
+                aCleanupRelease.complete(Unit)
+                cHold.complete(Unit)
+                scope.cancel()
+                withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+            }
+        }
+    }
+
+    @Test
+    fun `cancelAndJoin request cancels predecessor active session`() {
+        runBlocking {
+            val scope = testScope()
+            val aBlock = CompletableDeferred<Unit>()
+            val aStarted = CountDownLatch(1)
+            try {
+                val registry = GenerationSessionRegistry()
+
+                val aDone = async(Dispatchers.Default) {
+                    registry.start(scope, snapshot(20L, "A")) {
+                        aStarted.countDown()
+                        aBlock.await()
+                    }
+                }
+                awaitGate(aStarted)
+
+                val bDeferred = async(Dispatchers.Default) {
+                    try {
+                        registry.start(scope, snapshot(20L, "B")) {
+                            CompletableDeferred<Unit>().await()
+                        }
+                        null
+                    } catch (e: CancellationException) {
+                        e
+                    }
+                }
+
+                delay(100)
+
+                assertTrue("cancelAndJoin(B) should cancel B and predecessor A",
+                    registry.cancelAndJoin(20L, "B", "cancel-B"))
+
+                assertFalse("A should no longer be active",
+                    registry.isActive(20L, "A"))
+                assertFalse("B should not be active",
+                    registry.isActive(20L, "B"))
+
+                withTimeout(2000) { aDone.await(); bDeferred.await() }
+            } finally {
+                aBlock.complete(Unit)
+                scope.cancel()
+                withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+            }
+        }
+    }
 
     private fun testScope(): CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default)

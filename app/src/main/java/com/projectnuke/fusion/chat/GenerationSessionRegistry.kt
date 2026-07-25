@@ -29,18 +29,27 @@ class GenerationSessionRegistry {
         private val state = AtomicReference(State.PENDING)
         val completed = CompletableDeferred<Unit>()
 
-        enum class State { PENDING, STARTING, CANCELLED }
+        @Volatile
+        var predecessor: PendingStart? = null
+
+        @Volatile
+        var predecessorSession: GenerationSession? = null
+
+        enum class State { PENDING, STARTING, COMMITTED, CANCELLED }
 
         fun cancel(reason: String): Boolean {
             while (true) {
                 val current = state.get()
-                if (current != State.PENDING) return false
+                if (current == State.COMMITTED || current == State.CANCELLED) return false
                 if (state.compareAndSet(current, State.CANCELLED)) return true
             }
         }
 
         fun tryBeginStarting(): Boolean =
             state.compareAndSet(State.PENDING, State.STARTING)
+
+        fun tryCommit(): Boolean =
+            state.compareAndSet(State.STARTING, State.COMMITTED)
 
         fun cancellationException(): CancellationException =
             CancellationException("Request $requestId was cancelled before start")
@@ -62,8 +71,10 @@ class GenerationSessionRegistry {
         val lock = stripeFor(conversationId)
 
         val token = PendingStart(conversationId, requestId)
+        token.predecessorSession = sessions[conversationId]
 
         val replaced = pendingTokens.put(conversationId, token)
+        token.predecessor = replaced
         if (replaced != null) {
             replaced.cancel("superseded-by-${requestId}")
         }
@@ -78,6 +89,10 @@ class GenerationSessionRegistry {
                 if (previous != null && !previous.job.isCompleted) {
                     previous.job.cancel(CancellationException("superseded-by-${requestId}"))
                     previous.job.join()
+                }
+
+                if (!token.tryCommit()) {
+                    throw token.cancellationException()
                 }
 
                 if (!scope.coroutineContext[Job]!!.isActive) {
@@ -164,7 +179,33 @@ class GenerationSessionRegistry {
         val token = pendingTokens[conversationId]
         if (token != null && token.requestId == requestId) {
             if (token.cancel(reason)) {
+                val cancelledPreds = mutableListOf<PendingStart>()
+                var pred = token.predecessor
+                while (pred != null) {
+                    if (pred.cancel(reason)) {
+                        cancelledPreds.add(pred)
+                    }
+                    pred = pred.predecessor
+                }
+
+                val predSession = token.predecessorSession
+                if (predSession != null && !predSession.job.isCompleted) {
+                    predSession.job.cancel(CancellationException(reason))
+                    predSession.job.join()
+                }
+
                 token.completed.await()
+                cancelledPreds.forEach { it.completed.await() }
+
+                val lock = stripeFor(conversationId)
+                lock.withLock {
+                    val session = sessions[conversationId]
+                    if (session != null && session.requestId == requestId && !session.job.isCompleted) {
+                        session.job.cancel(CancellationException(reason))
+                        session.job.join()
+                    }
+                }
+
                 return true
             }
         }
