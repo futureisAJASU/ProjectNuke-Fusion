@@ -92,6 +92,22 @@ class GenerationSessionRegistry {
         }
     }
 
+    suspend fun cancelAndJoin(
+        conversationId: Long,
+        requestId: String,
+        reason: String
+    ): Boolean {
+        val lock = stripeFor(conversationId)
+        return lock.withLock {
+            val session = sessions[conversationId] ?: return@withLock false
+            if (session.requestId != requestId) return@withLock false
+            if (session.job.isCompleted) return@withLock false
+            session.job.cancel(CancellationException(reason))
+            session.job.join()
+            true
+        }
+    }
+
     fun hasActiveSession(conversationId: Long): Boolean =
         sessions[conversationId]?.job?.isActive == true
 

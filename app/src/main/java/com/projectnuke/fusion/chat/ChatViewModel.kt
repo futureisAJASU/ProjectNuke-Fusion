@@ -91,18 +91,11 @@ class ChatViewModel {
         _states.update { it - conversationId }
     }
 
-    /** Cancels any active session for [conversationId]. */
     suspend fun cancelGeneration(conversationId: Long, reason: String = "user-stop") {
-        registry.cancelAndJoin(conversationId, reason)
-        update(conversationId) { it.copy(
-            isGenerating = false,
-            activeRequestId = null,
-            streamingText = null,
-            streamingMetricsLine = null,
-            generationStatus = null,
-            regeneratingMessageId = null,
-            extractingMemoryCandidates = false,
-        ) }
+        val requestId = state(conversationId).activeRequestId ?: return
+        if (registry.cancelAndJoin(conversationId, requestId, reason)) {
+            finishRequestState(conversationId, requestId)
+        }
     }
 
     /**

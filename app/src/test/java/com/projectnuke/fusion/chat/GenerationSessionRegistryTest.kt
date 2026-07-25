@@ -3,16 +3,16 @@ package com.projectnuke.fusion.chat
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -28,52 +28,72 @@ class GenerationSessionRegistryTest {
     @Test
     fun `started session becomes active with correct conversation and request ID`() = runBlocking {
         val scope = testScope()
+        val blockEntered = CountDownLatch(1)
+        val blockRelease = CompletableDeferred<Unit>()
         try {
             val registry = GenerationSessionRegistry()
             val session = withTimeout(2000) {
-                registry.start(scope, snapshot(1L, "r1")) { }
+                registry.start(scope, snapshot(1L, "r1")) {
+                    blockEntered.countDown()
+                    blockRelease.await()
+                }
             }
+            awaitGate(blockEntered)
             assertEquals(1L, session.conversationId)
             assertEquals("r1", session.requestId)
             assertTrue(session.job.isActive)
             assertTrue(registry.isActive(1L, "r1"))
             assertNotNull(registry.activeSession(1L))
         } finally {
+            blockRelease.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
     @Test
     fun `normal block completion removes the session`() = runBlocking {
         val scope = testScope()
+        val blockRelease = CompletableDeferred<Unit>()
         try {
             val registry = GenerationSessionRegistry()
             val session = withTimeout(2000) {
-                registry.start(scope, snapshot(2L, "r2")) { }
+                registry.start(scope, snapshot(2L, "r2")) {
+                    blockRelease.await()
+                }
             }
-            session.job.join()
+            blockRelease.complete(Unit)
+            withTimeout(2000) { session.job.join() }
             assertFalse(registry.isActive(2L, "r2"))
             assertNull(registry.activeSession(2L))
         } finally {
+            blockRelease.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
     @Test
     fun `block exception removes the session`() = runBlocking {
         val scope = testScope()
+        val errors = mutableListOf<Throwable>()
+        val handler = CoroutineExceptionHandler { _, e -> errors.add(e) }
+        val errorScope = CoroutineScope(scope.coroutineContext[Job]!! + Dispatchers.Default + handler)
         try {
             val registry = GenerationSessionRegistry()
             val session = withTimeout(2000) {
-                registry.start(scope, snapshot(3L, "r3")) {
+                registry.start(errorScope, snapshot(3L, "r3")) {
                     throw IllegalStateException("boom")
                 }
             }
-            session.job.join()
+            withTimeout(2000) { session.job.join() }
+            assertTrue("expected IllegalStateException in errors",
+                errors.any { it is IllegalStateException })
             assertFalse(registry.isActive(3L, "r3"))
             assertNull(registry.activeSession(3L))
         } finally {
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -104,6 +124,7 @@ class GenerationSessionRegistryTest {
             }
 
             awaitGate(aStarted)
+
             val bDone = async(Dispatchers.Default) {
                 registry.start(scope, snapshot(4L, "B")) {
                     bEntered.set(true)
@@ -125,6 +146,7 @@ class GenerationSessionRegistryTest {
             aCleanupRelease.complete(Unit)
             bHold.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -135,6 +157,7 @@ class GenerationSessionRegistryTest {
         val aCleanupRelease = CompletableDeferred<Unit>()
         val aStarted = CountDownLatch(1)
         val bStarted = CountDownLatch(1)
+        val bHold = CompletableDeferred<Unit>()
         try {
             val registry = GenerationSessionRegistry()
 
@@ -156,77 +179,80 @@ class GenerationSessionRegistryTest {
             val bDone = async(Dispatchers.Default) {
                 registry.start(scope, snapshot(5L, "B")) {
                     bStarted.countDown()
-                    CompletableDeferred<Unit>().await()
+                    bHold.await()
                 }
             }
 
             aCleanupRelease.complete(Unit)
             withTimeout(2000) { aDone.await() }
-
             awaitGate(bStarted)
+
             assertTrue("B should be the active session after replacement",
                 registry.isActive(5L, "B"))
             assertEquals("B", registry.activeSession(5L)?.requestId)
         } finally {
             holdGate.complete(Unit)
             aCleanupRelease.complete(Unit)
+            bHold.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
     @Test
-    fun `concurrent starts for one conversation leave only the newest active`() {
-        runBlocking {
-            val scope = testScope()
-            val holdGate = CompletableDeferred<Unit>()
-            val aCleanupRelease = CompletableDeferred<Unit>()
-            val aStarted = CountDownLatch(1)
-            val cHold = CompletableDeferred<Unit>()
-            try {
-                val registry = GenerationSessionRegistry()
+    fun `concurrent starts for one conversation leave only the newest active`() = runBlocking {
+        val scope = testScope()
+        val holdA = CompletableDeferred<Unit>()
+        val aStarted = CountDownLatch(1)
+        val bStarted = CountDownLatch(1)
+        val bHold = CompletableDeferred<Unit>()
+        val cStarted = CountDownLatch(1)
+        val cHold = CompletableDeferred<Unit>()
+        try {
+            val registry = GenerationSessionRegistry()
 
-                val aDone = async(Dispatchers.Default) {
-                    registry.start(scope, snapshot(6L, "A")) {
-                        aStarted.countDown()
-                        try {
-                            holdGate.await()
-                        } finally {
-                            withContext(NonCancellable) {
-                                aCleanupRelease.await()
-                            }
-                        }
-                    }
+            val aDone = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(6L, "A")) {
+                    aStarted.countDown()
+                    holdA.await()
                 }
-
-                awaitGate(aStarted)
-
-                val bDone = async(Dispatchers.Default) {
-                    registry.start(scope, snapshot(6L, "B")) { }
-                }
-                val cStarted = CountDownLatch(1)
-                val cDone = async(Dispatchers.Default) {
-                    registry.start(scope, snapshot(6L, "C")) {
-                        cStarted.countDown()
-                        cHold.await()
-                    }
-                }
-
-                aCleanupRelease.complete(Unit)
-                withTimeout(2000) { aDone.await(); bDone.await() }
-                awaitGate(cStarted)
-
-                assertTrue("C should be active as the newest starting session",
-                    registry.isActive(6L, "C"))
-                assertFalse("A should no longer be active", registry.isActive(6L, "A"))
-                assertFalse("B should no longer be active", registry.isActive(6L, "B"))
-
-                withTimeout(2000) { cHold.complete(Unit); cDone.await() }
-            } finally {
-                holdGate.complete(Unit)
-                aCleanupRelease.complete(Unit)
-                cHold.complete(Unit)
-                scope.cancel()
             }
+
+            awaitGate(aStarted)
+
+            val bDone = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(6L, "B")) {
+                    bStarted.countDown()
+                    bHold.await()
+                }
+            }
+
+            holdA.complete(Unit)
+            withTimeout(2000) { aDone.await(); bDone.await() }
+            awaitGate(bStarted)
+
+            assertTrue("B should be active after A cleanup", registry.isActive(6L, "B"))
+
+            val cDone = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(6L, "C")) {
+                    cStarted.countDown()
+                    cHold.await()
+                }
+            }
+
+            withTimeout(2000) { bDone.await() }
+            awaitGate(cStarted)
+
+            assertTrue("C should be active as the newest starting session",
+                registry.isActive(6L, "C"))
+            assertFalse("A should no longer be active", registry.isActive(6L, "A"))
+            assertFalse("B should no longer be active", registry.isActive(6L, "B"))
+        } finally {
+            holdA.complete(Unit)
+            bHold.complete(Unit)
+            cHold.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -268,6 +294,7 @@ class GenerationSessionRegistryTest {
             holdA.complete(Unit)
             holdB.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -312,6 +339,7 @@ class GenerationSessionRegistryTest {
             holdGate.complete(Unit)
             cleanupRelease.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -338,6 +366,7 @@ class GenerationSessionRegistryTest {
         } finally {
             holdGate.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -351,7 +380,6 @@ class GenerationSessionRegistryTest {
                     registry.start(deadScope, snapshot(9L, "r9")) { }
                     assertTrue("expected CancellationException", false)
                 } catch (_: CancellationException) {
-                    // expected
                 }
             }
             assertNull(registry.activeSession(9L))
@@ -397,7 +425,7 @@ class GenerationSessionRegistryTest {
                 registry.isActive(11L, "B"))
 
             assertTrue("cancelAndJoin on B should succeed and wait for completion",
-                registry.cancelAndJoin(11L, "cancel-B"))
+                registry.cancelAndJoin(11L, "B", "cancel-B"))
             assertFalse("B should no longer be active", registry.isActive(11L, "B"))
 
             assertFalse("repeated cancel should be harmless",
@@ -409,6 +437,7 @@ class GenerationSessionRegistryTest {
             aCleanupRelease.complete(Unit)
             bHold.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -434,6 +463,7 @@ class GenerationSessionRegistryTest {
         } finally {
             holdGate.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -454,7 +484,7 @@ class GenerationSessionRegistryTest {
                 registry.start(scope, snapshot(13L, "r13")) { release.await() }
             }
             release.complete(Unit)
-            session.job.join()
+            withTimeout(2000) { session.job.join() }
             assertFalse("cancel should return false for completed job",
                 registry.cancel(13L, "late"))
             assertFalse("cancelAndJoin should return false for completed session",
@@ -462,6 +492,54 @@ class GenerationSessionRegistryTest {
         } finally {
             release.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `request-aware cancelAndJoin returns false for stale request`() = runBlocking {
+        val scope = testScope()
+        val holdA = CompletableDeferred<Unit>()
+        val aStarted = CountDownLatch(1)
+        val bStarted = CountDownLatch(1)
+        val bHold = CompletableDeferred<Unit>()
+        try {
+            val registry = GenerationSessionRegistry()
+
+            val aDone = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(14L, "A")) {
+                    aStarted.countDown()
+                    holdA.await()
+                }
+            }
+
+            awaitGate(aStarted)
+
+            val bDone = async(Dispatchers.Default) {
+                registry.start(scope, snapshot(14L, "B")) {
+                    bStarted.countDown()
+                    bHold.await()
+                }
+            }
+
+            holdA.complete(Unit)
+            withTimeout(2000) { aDone.await(); bDone.await() }
+            awaitGate(bStarted)
+
+            assertTrue("B should be active after replacement", registry.isActive(14L, "B"))
+
+            assertFalse("stale request A cancellation should return false",
+                registry.cancelAndJoin(14L, "A", "late-cancel-A"))
+            assertTrue("B should still be active", registry.isActive(14L, "B"))
+
+            assertTrue("cancel B with matching request should succeed",
+                registry.cancelAndJoin(14L, "B", "cancel-B"))
+            assertFalse("B should no longer be active", registry.isActive(14L, "B"))
+        } finally {
+            holdA.complete(Unit)
+            bHold.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 

@@ -5,6 +5,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -25,13 +26,29 @@ class ChatViewModelRequestStateTest {
         val vm = ChatViewModel()
         val convId = 100L
         vm.update(convId) {
-            it.copy(activeRequestId = "A", isGenerating = true, streamingText = "hello")
+            it.copy(
+                activeRequestId = "A",
+                isGenerating = true,
+                streamingText = "hello",
+                streamingMetricsLine = "metrics",
+                generationStatus = "gen",
+                regeneratingMessageId = 42L,
+                extractingMemoryCandidates = true,
+                actualWebSearchUsed = true,
+            )
         }
         assertEquals("A", vm.state(convId).activeRequestId)
 
         vm.finishRequestState(convId, "A")
-        assertNull(vm.state(convId).activeRequestId)
-        assertFalse(vm.state(convId).isGenerating)
+        val state = vm.state(convId)
+        assertNull(state.activeRequestId)
+        assertFalse(state.isGenerating)
+        assertNull(state.streamingText)
+        assertNull(state.streamingMetricsLine)
+        assertNull(state.generationStatus)
+        assertNull(state.regeneratingMessageId)
+        assertFalse(state.extractingMemoryCandidates)
+        assertFalse(state.actualWebSearchUsed)
     }
 
     @Test
@@ -65,9 +82,14 @@ class ChatViewModelRequestStateTest {
             val convId = 103L
             vm.update(convId) { it.copy(activeRequestId = "R") }
 
-            withTimeout(2000) {
-                vm.registry.start(scope, snapshot(convId, "R")) { }
+            val blockRelease = CompletableDeferred<Unit>()
+            val session = withTimeout(2000) {
+                vm.registry.start(scope, snapshot(convId, "R")) {
+                    blockRelease.await()
+                }
             }
+            blockRelease.complete(Unit)
+            withTimeout(2000) { session.job.join() }
 
             vm.updateRequestState(convId, "R", requireActiveSession = true) {
                 it.copy(streamingText = "should-not-appear")
@@ -75,6 +97,7 @@ class ChatViewModelRequestStateTest {
             assertNull(vm.state(convId).streamingText)
         } finally {
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -86,9 +109,14 @@ class ChatViewModelRequestStateTest {
             val convId = 104L
             vm.update(convId) { it.copy(activeRequestId = "R", isGenerating = true) }
 
-            withTimeout(2000) {
-                vm.registry.start(scope, snapshot(convId, "R")) { }
+            val blockRelease = CompletableDeferred<Unit>()
+            val session = withTimeout(2000) {
+                vm.registry.start(scope, snapshot(convId, "R")) {
+                    blockRelease.await()
+                }
             }
+            blockRelease.complete(Unit)
+            withTimeout(2000) { session.job.join() }
 
             vm.updateRequestState(convId, "R", requireActiveSession = false) {
                 it.copy(isGenerating = false)
@@ -96,6 +124,7 @@ class ChatViewModelRequestStateTest {
             assertFalse(vm.state(convId).isGenerating)
         } finally {
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -122,12 +151,14 @@ class ChatViewModelRequestStateTest {
                 activeRequestId = "R",
                 isGenerating = true,
                 streamingText = "in-flight",
+                streamingMetricsLine = "metrics",
                 generationStatus = "generating",
                 regeneratingMessageId = 42L,
                 extractingMemoryCandidates = true,
+                actualWebSearchUsed = true,
             ) }
 
-            val startDone = async(Dispatchers.Default) {
+            val session = withTimeout(2000) {
                 vm.registry.start(scope, snapshot(convId, "R")) {
                     entered.countDown()
                     holdGate.await()
@@ -138,15 +169,18 @@ class ChatViewModelRequestStateTest {
             withTimeout(2000) { vm.cancelGeneration(convId, "test-stop") }
 
             val state = vm.state(convId)
-            assertFalse(state.isGenerating)
             assertNull(state.activeRequestId)
+            assertFalse(state.isGenerating)
             assertNull(state.streamingText)
+            assertNull(state.streamingMetricsLine)
             assertNull(state.generationStatus)
             assertNull(state.regeneratingMessageId)
             assertFalse(state.extractingMemoryCandidates)
+            assertFalse(state.actualWebSearchUsed)
         } finally {
             holdGate.complete(Unit)
             scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
     }
 
@@ -155,6 +189,104 @@ class ChatViewModelRequestStateTest {
         val vm = ChatViewModel()
         vm.cancelGeneration(999L, "nothing")
         assertTrue(true)
+    }
+
+    @Test
+    fun `cancelGeneration of A cannot clear replacement B`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val aCleanupStarted = CountDownLatch(1)
+        val aCleanupRelease = CompletableDeferred<Unit>()
+        val aStarted = CountDownLatch(1)
+        val bStarted = CountDownLatch(1)
+        val bHold = CompletableDeferred<Unit>()
+        try {
+            val vm = ChatViewModel()
+            val convId = 106L
+
+            vm.update(convId) { it.copy(
+                activeRequestId = "A",
+                isGenerating = true,
+                streamingText = "A-stream",
+                streamingMetricsLine = "A-metrics",
+                generationStatus = "A-status",
+                regeneratingMessageId = 1L,
+                extractingMemoryCandidates = true,
+                actualWebSearchUsed = true,
+            ) }
+
+            val aSession = withTimeout(2000) {
+                vm.registry.start(scope, snapshot(convId, "A")) {
+                    aStarted.countDown()
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } finally {
+                        aCleanupStarted.countDown()
+                        withContext(NonCancellable) {
+                            aCleanupRelease.await()
+                        }
+                    }
+                }
+            }
+
+            awaitGate(aStarted)
+
+            val cancelDone = async(Dispatchers.Default) {
+                vm.cancelGeneration(convId, "stop-A")
+            }
+
+            awaitGate(aCleanupStarted)
+
+            vm.update(convId) { it.copy(
+                activeRequestId = "B",
+                isGenerating = true,
+                streamingText = "B-stream",
+                streamingMetricsLine = "B-metrics",
+                generationStatus = "B-status",
+                regeneratingMessageId = 2L,
+                extractingMemoryCandidates = false,
+                actualWebSearchUsed = false,
+            ) }
+
+            val bSessionDeferred = async(Dispatchers.Default) {
+                vm.registry.start(scope, snapshot(convId, "B")) {
+                    bStarted.countDown()
+                    bHold.await()
+                }
+            }
+
+            aCleanupRelease.complete(Unit)
+            withTimeout(2000) { cancelDone.await() }
+            awaitGate(bStarted)
+
+            val stateB = vm.state(convId)
+            assertEquals("B", stateB.activeRequestId)
+            assertTrue(stateB.isGenerating)
+            assertEquals("B-stream", stateB.streamingText)
+            assertEquals("B-metrics", stateB.streamingMetricsLine)
+            assertEquals("B-status", stateB.generationStatus)
+            assertEquals(2L, stateB.regeneratingMessageId)
+            assertFalse(stateB.extractingMemoryCandidates)
+            assertFalse(stateB.actualWebSearchUsed)
+
+            assertTrue("B should be active in registry", vm.registry.isActive(convId, "B"))
+
+            val stateAfter = vm.state(convId)
+            assertEquals("B", stateAfter.activeRequestId)
+            assertTrue(stateAfter.isGenerating)
+            assertEquals("B-stream", stateAfter.streamingText)
+            assertEquals("B-metrics", stateAfter.streamingMetricsLine)
+            assertEquals("B-status", stateAfter.generationStatus)
+            assertEquals(2L, stateAfter.regeneratingMessageId)
+            assertFalse(stateAfter.extractingMemoryCandidates)
+            assertFalse(stateAfter.actualWebSearchUsed)
+
+            assertTrue("B should still be active after A cleanup completes", vm.registry.isActive(convId, "B"))
+        } finally {
+            aCleanupRelease.complete(Unit)
+            bHold.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
     }
 
     // -- helpers --
