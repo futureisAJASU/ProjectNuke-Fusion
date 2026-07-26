@@ -2,6 +2,8 @@ package com.projectnuke.fusion.util
 
 import android.content.Context
 import com.projectnuke.fusion.data.ChatDao
+import com.projectnuke.fusion.util.AttachmentMessageCodec
+import com.projectnuke.fusion.util.ParsedAttachments
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +57,20 @@ object AttachmentStorageManager {
         targetFile.exists() && targetFile.delete()
     }
 
+fun resolveManagedAttachment(context: Context, path: String): File? {
+        if (path.isBlank()) return null
+        val targetCanonical = safeCanonicalPath(path) ?: return null
+        val dirCanonical = safeCanonicalPath(getAttachmentDirectory(context).absolutePath)
+            ?: return null
+        if (targetCanonical == dirCanonical) return null
+        val prefix = "$dirCanonical${File.separator}"
+        if (!targetCanonical.startsWith(prefix)) return null
+        val targetFile = File(targetCanonical)
+        if (!targetFile.exists()) return null
+        if (!targetFile.isFile) return null
+        return targetFile
+    }
+
     suspend fun calculateAttachmentStorageStats(
         context: Context,
         dao: ChatDao
@@ -62,7 +78,7 @@ object AttachmentStorageManager {
         val dir = getAttachmentDirectory(context)
         val files = dir.listFiles()?.filter { it.isFile } ?: emptyList()
         val allMessageContents = dao.getAllMessageContents()
-        val referencedPaths = extractReferencedAttachmentPaths(allMessageContents)
+        val referencedPaths = extractReferencedAttachmentPaths(context, allMessageContents)
         val referencedCanonical = referencedPaths.mapNotNull { safeCanonicalPath(it) }.toSet()
 
         val referencedCount = files.count { file ->
@@ -87,7 +103,7 @@ object AttachmentStorageManager {
                 ?: return@withContext CleanupResult(deletedFiles = 0)
             val files = dir.listFiles()?.filter { it.isFile } ?: emptyList()
             val allMessageContents = dao.getAllMessageContents()
-            val referencedPaths = extractReferencedAttachmentPaths(allMessageContents)
+            val referencedPaths = extractReferencedAttachmentPaths(context, allMessageContents)
             val referencedCanonical = referencedPaths.mapNotNull { safeCanonicalPath(it) }.toSet()
             val pendingCanonical = pendingAttachmentPaths.toSet()
             val now = System.currentTimeMillis()
@@ -108,22 +124,20 @@ object AttachmentStorageManager {
         }
     }
 
-    private fun extractReferencedAttachmentPaths(contents: List<String>): Set<String> {
-        val v2Regex = Regex("""<fusion_attachment_v2>(.*?)\|(.*?)\|(.*?)</fusion_attachment_v2>""")
-        val v1Regex = Regex("""(?s)<fusion_attachment>\s*name=(.*?)\nmime=(.*?)\npath=(.*?)\s*</fusion_attachment>""")
+    private fun extractReferencedAttachmentPaths(
+        context: Context,
+        contents: List<String>
+    ): Set<String> {
+        val dirCanonical = safeCanonicalPath(getAttachmentDirectory(context).absolutePath) ?: return emptySet()
         val result = mutableSetOf<String>()
-
         contents.forEach { raw ->
-            v2Regex.findAll(raw).forEach { match ->
-                val path = match.groupValues.getOrNull(3)?.trim().orEmpty()
-                if (path.isNotBlank()) result.add(path)
-            }
-            v1Regex.findAll(raw).forEach { match ->
-                val path = match.groupValues.getOrNull(3)?.trim().orEmpty()
-                if (path.isNotBlank()) result.add(path)
+            val parsed = AttachmentMessageCodec.parseAttachmentMessage(raw)
+            parsed.records.forEach { record ->
+                val canonical = safeCanonicalPath(record.localPath) ?: return@forEach
+                if (!isInAttachmentDirectory(canonical, dirCanonical)) return@forEach
+                result.add(canonical)
             }
         }
-
         return result
     }
 

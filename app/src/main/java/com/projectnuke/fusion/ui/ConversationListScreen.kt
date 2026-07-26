@@ -380,17 +380,17 @@ fun ConversationListScreen(
                         deletingConversationId = deletingId
                         scope.launch {
                             try {
-                                chatViewModel.cancelAndAwait(
-                                    deletingId,
-                                    reason = "delete-conversation"
+                                chatViewModel.deleteConversation(
+                                    conversationId = deletingId,
+                                    dao = dao,
+                                    onNextConversation = { nextId ->
+                                        deletingConversationId = null
+                                        deleteConversation = null
+                                        if (deletingId == currentConversationId) {
+                                            onConversationRemovedFromList(deletingId, nextId)
+                                        }
+                                    }
                                 )
-                                if (dao.getConversationById(deletingId) != null) {
-                                    dao.deleteConversation(deletingId)
-                                }
-                                val nextConversationId = dao.getLatestConversation()?.id
-                                if (deletingId == currentConversationId) {
-                                    onConversationRemovedFromList(deletingId, nextConversationId)
-                                }
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (_: Exception) {

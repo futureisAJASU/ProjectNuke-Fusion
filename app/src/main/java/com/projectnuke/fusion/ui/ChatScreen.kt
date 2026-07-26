@@ -121,6 +121,8 @@ import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibility
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
+import com.projectnuke.fusion.util.AttachmentMessageCodec
+import com.projectnuke.fusion.util.AttachmentRecord
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryRiskLevel
@@ -3315,18 +3317,19 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         scope.launch {
                             val targetId = conversationId
                             if (targetId != 0L) {
-                                chatViewModel.cancelAndAwait(targetId, reason = "delete-conversation")
-                                // Re-check existence: a race could have removed it.
-                                if (dao.getConversationById(targetId) != null) {
-                                    dao.deleteConversation(targetId)
-                                }
+                                chatViewModel.deleteConversation(
+                                    conversationId = targetId,
+                                    dao = dao,
+                                    onNextConversation = { nextId ->
+                                        input = ""
+                                        clearPendingAttachmentDrafts(pendingAttachments)
+                                        streamingAssistantText = null
+                                        streamingMetricsLine = null
+                                        generationStatus = null
+                                        onNewChat()
+                                    }
+                                )
                             }
-                            input = ""
-                            clearPendingAttachmentDrafts(pendingAttachments)
-                            streamingAssistantText = null
-                            streamingMetricsLine = null
-                            generationStatus = null
-                            onNewChat()
                         }
                     }
                 ) {
@@ -9839,61 +9842,29 @@ private fun buildMessageContentWithAttachments(
     body: String,
     attachments: List<LocalAttachment>
 ): String {
-    if (attachments.isEmpty()) return body
-
-    val attachmentTags = attachments.joinToString("\n") { attachment ->
-        val safeName = attachment.name
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-
-        val safeMime = attachment.mimeType
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-
-        val safePath = attachment.localPath
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-
-        "<fusion_attachment_v2>$safeName|$safeMime|$safePath</fusion_attachment_v2>"
-    }
-
-    return listOf(attachmentTags, body)
-        .filter { it.isNotBlank() }
-        .joinToString("\n\n")
+    return AttachmentMessageCodec.serializeAttachmentMessage(
+        attachments.map {
+            AttachmentRecord(
+                name = it.name,
+                mimeType = it.mimeType,
+                localPath = it.localPath
+            )
+        },
+        body
+    )
 }
 
 private fun parseMessageAttachments(raw: String): ParsedMessageContent {
-    val newRegex = Regex(
-        pattern = """<fusion_attachment_v2>(.*?)\|(.*?)\|(.*?)</fusion_attachment_v2>"""
-    )
-
-    val newAttachments = newRegex.findAll(raw).map { match ->
-        LocalAttachment(
-            name = match.groupValues[1].unescapeAttachmentField(),
-            mimeType = match.groupValues[2].unescapeAttachmentField(),
-            localPath = match.groupValues[3].unescapeAttachmentField()
-        )
-    }.toList()
-
-    val oldRegex = Regex(
-        pattern = """(?s)<fusion_attachment>\s*name=(.*?)\nmime=(.*?)\npath=(.*?)\s*</fusion_attachment>"""
-    )
-
-    val oldAttachments = oldRegex.findAll(raw).map { match ->
-        LocalAttachment(
-            name = match.groupValues[1].trim(),
-            mimeType = match.groupValues[2].trim(),
-            localPath = match.groupValues[3].trim()
-        )
-    }.toList()
-
-    val body = oldRegex
-        .replace(newRegex.replace(raw, ""), "")
-        .trim()
-
+    val parsed = AttachmentMessageCodec.parseAttachmentMessage(raw)
     return ParsedMessageContent(
-        body = body,
-        attachments = newAttachments + oldAttachments
+        body = parsed.body,
+        attachments = parsed.records.map {
+            LocalAttachment(
+                name = it.name,
+                mimeType = it.mimeType,
+                localPath = it.localPath
+            )
+        }
     )
 }
 
@@ -9918,12 +9889,6 @@ private fun parseMemoryCandidateLines(raw: String): List<String> {
         .distinct()
 }
 
-private fun String.unescapeAttachmentField(): String {
-    return this
-        .replace("\\|", "|")
-        .replace("\\\\", "\\")
-        .trim()
-}
 private fun buildModelUserContent(
     body: String,
     attachments: List<LocalAttachment>

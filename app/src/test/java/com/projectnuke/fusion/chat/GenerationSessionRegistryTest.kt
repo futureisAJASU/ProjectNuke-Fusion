@@ -23,6 +23,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.fail
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -2041,6 +2042,91 @@ class GenerationSessionRegistryTest {
                 withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
             }
         }
+    }
+
+    @Test
+    fun `deletion fence prevents new start after DELETING`() = runBlocking {
+        val scope = testScope()
+        val registry = GenerationSessionRegistry()
+        val snap = snapshot(1L, "req-A")
+
+        registry.start(scope, snap) { session -> }
+
+        val result = registry.cancelAndDeleteConversation(1L, "delete-test")
+        assertTrue(result.success)
+
+        try {
+            registry.start(scope, snapshot(1L, "req-B")) { _ -> }
+            fail("Expected CancellationException for DELETING conversation")
+        } catch (_: CancellationException) {
+        }
+
+        scope.cancel()
+        scope.coroutineContext[Job]!!.join()
+    }
+
+    @Test
+    fun `stale start after successful deletion is rejected`() = runBlocking {
+        val scope = testScope()
+        val registry = GenerationSessionRegistry()
+        registry.start(scope, snapshot(1L, "req-A")) { _ -> }
+        registry.cancelAndDeleteConversation(1L, "delete-test")
+
+        try {
+            registry.start(scope, snapshot(1L, "req-early")) { _ -> }
+            fail("Expected CancellationException for DELETED conversation")
+        } catch (_: CancellationException) {
+        }
+
+        scope.cancel()
+        scope.coroutineContext[Job]!!.join()
+    }
+
+    @Test
+    fun `repeated deletion is idempotent`() = runBlocking {
+        val scope = testScope()
+        val registry = GenerationSessionRegistry()
+        val snap = snapshot(1L, "req-A")
+        registry.start(scope, snap) { _ -> }
+
+        val first = registry.cancelAndDeleteConversation(1L, "delete-test")
+        assertTrue(first.success)
+        assertFalse(registry.cancelAndDeleteConversation(1L, "delete-test").success)
+
+        scope.cancel()
+        scope.coroutineContext[Job]!!.join()
+    }
+
+    @Test
+    fun `another conversation can generate normally during deletion`() = runBlocking {
+        val scope = testScope()
+        val registry = GenerationSessionRegistry()
+        registry.start(scope, snapshot(1L, "req-A")) { _ -> }
+        registry.cancelAndDeleteConversation(1L, "delete-test")
+
+        val snapOther = snapshot(2L, "req-B")
+        val session = registry.start(scope, snapOther) { _ -> }
+        assertEquals(2L, session.conversationId)
+
+        scope.cancel()
+        scope.coroutineContext[Job]!!.join()
+    }
+
+    @Test
+    fun `deleting start before registry registration is rejected`() = runBlocking {
+        val scope = testScope()
+        val registry = GenerationSessionRegistry()
+
+        registry.cancelAndDeleteConversation(1L, "delete-test")
+
+        try {
+            registry.start(scope, snapshot(1L, "req-late")) { _ -> }
+            fail("Expected CancellationException for DELETING conversation")
+        } catch (_: CancellationException) {
+        }
+
+        scope.cancel()
+        scope.coroutineContext[Job]!!.join()
     }
 
     private fun testScope(): CoroutineScope =
