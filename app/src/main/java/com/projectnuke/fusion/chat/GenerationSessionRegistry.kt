@@ -5,9 +5,11 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 
@@ -71,13 +73,13 @@ class GenerationSessionRegistry {
 
         val token = PendingStart(conversationId, requestId)
 
-        val replaced = latestTokens.put(conversationId, token)
-        token.predecessor = replaced
-        if (replaced != null) {
-            replaced.cancel("superseded-by-${requestId}")
-        }
-
         try {
+            latestTokens.compute(conversationId) { _, previous ->
+                token.predecessor = previous
+                previous?.cancel("superseded-by-$requestId")
+                token
+            }
+
             return lock.withLock {
                 if (!token.tryBeginStarting()) {
                     throw token.cancellationException()
@@ -138,6 +140,19 @@ class GenerationSessionRegistry {
 
                 gs
             }
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) {
+                val session = token.publishedSession.get()
+                if (session != null) {
+                    sessions.remove(conversationId, session)
+                }
+                if (token.state() != PendingStart.State.INSTALLED) {
+                    val settled = mutableListOf<PendingStart>()
+                    settlePredecessorChain(token, "start-cancelled", settled)
+                    settled.forEach { it.completed.await() }
+                }
+            }
+            throw e
         } finally {
             if (token.state() != PendingStart.State.INSTALLED) {
                 latestTokens.remove(conversationId, token)
@@ -186,7 +201,11 @@ class GenerationSessionRegistry {
                     }
                 }
             }
-            PendingStart.State.CANCELLED -> {}
+            PendingStart.State.CANCELLED -> {
+                if (!head.completed.isCompleted) {
+                    settled.add(head)
+                }
+            }
             else -> {
                 head.cancel(reason)
                 settled.add(head)
@@ -220,7 +239,10 @@ class GenerationSessionRegistry {
                     }
                 }
             }
-            PendingStart.State.CANCELLED -> return false
+            PendingStart.State.CANCELLED -> {
+                if (head.completed.isCompleted) return false
+                settled.add(head)
+            }
             else -> {
                 head.cancel(reason)
                 settled.add(head)
