@@ -48,6 +48,7 @@ import com.projectnuke.fusion.data.escapeSqlLikeQuery
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
@@ -62,22 +63,24 @@ private val DrawerAccentBlue = Color(0xFF9FD0FF)
 
 @Composable
 fun ConversationListScreen(
-    currentConversationId: Long,
-    onBack: () -> Unit,
-    onOpenConversation: (Long) -> Unit,
-    onConversationRemovedFromList: (removedConversationId: Long, nextConversationId: Long?) -> Unit,
-    onNewChat: () -> Unit
+  chatViewModel: com.projectnuke.fusion.chat.ChatViewModel,
+  currentConversationId: Long,
+  onBack: () -> Unit,
+  onOpenConversation: (Long) -> Unit,
+  onConversationRemovedFromList: (removedConversationId: Long, nextConversationId: Long?) -> Unit,
+  onNewChat: () -> Unit
 ) {
-    val context = LocalContext.current
-    val db = remember { AppDatabase.getInstance(context) }
-    val dao = remember { db.chatDao() }
-    val scope = rememberCoroutineScope()
+  val context = LocalContext.current
+  val db = remember { AppDatabase.getInstance(context) }
+  val dao = remember { db.chatDao() }
+  val scope = rememberCoroutineScope()
 
-    var searchQuery by remember { mutableStateOf("") }
-    var menuConversation by remember { mutableStateOf<ConversationEntity?>(null) }
-    var renameConversation by remember { mutableStateOf<ConversationEntity?>(null) }
-    var renameTitle by remember { mutableStateOf("") }
-    var deleteConversation by remember { mutableStateOf<ConversationEntity?>(null) }
+  var searchQuery by remember { mutableStateOf("") }
+  var menuConversation by remember { mutableStateOf<ConversationEntity?>(null) }
+  var renameConversation by remember { mutableStateOf<ConversationEntity?>(null) }
+  var renameTitle by remember { mutableStateOf("") }
+  var deleteConversation by remember { mutableStateOf<ConversationEntity?>(null) }
+  var deletingConversationId by remember { mutableStateOf<Long?>(null) }
 
     val conversations by dao.observeConversations()
         .collectAsState(initial = emptyList())

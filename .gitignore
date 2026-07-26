@@ -24,3 +24,4 @@ models/
 
 hs_err_pid*.log
 replay_pid*.log
+test-output*.txt

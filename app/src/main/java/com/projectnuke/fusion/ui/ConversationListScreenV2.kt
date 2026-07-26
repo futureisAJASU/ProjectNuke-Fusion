@@ -77,6 +77,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -121,19 +122,20 @@ private enum class SidebarPage {
 
 @Composable
 fun ConversationListScreenV2(
-    currentConversationId: Long,
-    onBack: () -> Unit,
-    onOpenConversation: (Long) -> Unit,
-    onConversationRemovedFromList: (removedConversationId: Long, nextConversationId: Long?) -> Unit,
-    onNewChat: () -> Unit,
-    isDrawerOpen: Boolean = true,
-    onOpenModelLibrary: (() -> Unit)? = null,
-    onOpenAdvancedSettings: (() -> Unit)? = null,
-    openBenchmarkRequest: Int = 0,
-    benchmarkRequestModelFilter: String? = null,
-    benchmarkRequestOpenHistory: Boolean = false
+  chatViewModel: com.projectnuke.fusion.chat.ChatViewModel,
+  currentConversationId: Long,
+  onBack: () -> Unit,
+  onOpenConversation: (Long) -> Unit,
+  onConversationRemovedFromList: (removedConversationId: Long, nextConversationId: Long?) -> Unit,
+  onNewChat: () -> Unit,
+  isDrawerOpen: Boolean = true,
+  onOpenModelLibrary: (() -> Unit)? = null,
+  onOpenAdvancedSettings: (() -> Unit)? = null,
+  openBenchmarkRequest: Int = 0,
+  benchmarkRequestModelFilter: String? = null,
+  benchmarkRequestOpenHistory: Boolean = false
 ) {
-    val context = LocalContext.current
+  val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val db = remember { AppDatabase.getInstance(context) }
     val dao = remember { db.chatDao() }
@@ -146,6 +148,7 @@ fun ConversationListScreenV2(
     var renameConversation by remember { mutableStateOf<ConversationEntity?>(null) }
     var renameTitle by remember { mutableStateOf("") }
     var deleteConversation by remember { mutableStateOf<ConversationEntity?>(null) }
+  var deletingConversationId by remember { mutableStateOf<Long?>(null) }
     var showAttachmentStorageDialog by remember { mutableStateOf(false) }
     var showAppInfoDialog by remember { mutableStateOf(false) }
     var showReleaseNotesDialog by remember { mutableStateOf(false) }
@@ -1458,31 +1461,66 @@ fun ConversationListScreenV2(
         )
     }
 
-    deleteConversation?.let { conversation ->
-        AlertDialog(
-            onDismissRequest = { deleteConversation = null },
-            title = { Text("채팅 삭제") },
-            text = { Text("이 채팅을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.") },
-            dismissButton = { TextButton(onClick = { deleteConversation = null }) { Text("취소") } },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        deleteConversation = null
-                        scope.launch {
-                            dao.deleteConversation(conversation.id)
-                            val nextConversationId = dao.getLatestConversation()?.id
-                            if (conversation.id == currentConversationId) {
-                                onConversationRemovedFromList(conversation.id, nextConversationId)
-                            }
-                        }
-                    }
-                ) { Text("삭제", color = Color(0xFFFF7A7A)) }
-            },
-            containerColor = DrawerPanelBg,
-            titleContentColor = DrawerTextPrimary,
-            textContentColor = DrawerTextPrimary
-        )
-    }
+deleteConversation?.let { conversation ->
+  val isDeleting = deletingConversationId == conversation.id
+  AlertDialog(
+    onDismissRequest = {
+      if (!isDeleting) {
+        deleteConversation = null
+        deletingConversationId = null
+      }
+    },
+    title = { Text("채팅 삭제") },
+    text = { Text("이 채팅을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.") },
+    dismissButton = {
+      TextButton(
+        onClick = {
+          deleteConversation = null
+          deletingConversationId = null
+        },
+        enabled = !isDeleting
+      ) { Text("취소") }
+    },
+    confirmButton = {
+      TextButton(
+        onClick = {
+          if (isDeleting) return@TextButton
+          deletingConversationId = conversation.id
+          scope.launch {
+            try {
+              chatViewModel.cancelAndAwait(
+                conversation.id,
+                reason = "delete-conversation"
+              )
+              if (dao.getConversationById(conversation.id) != null) {
+                dao.deleteConversation(conversation.id)
+              }
+              val nextConversationId = dao.getLatestConversation()?.id
+              if (conversation.id == currentConversationId) {
+                onConversationRemovedFromList(conversation.id, nextConversationId)
+              }
+            } catch (e: CancellationException) {
+              throw e
+            } catch (_: Exception) {
+              Toast.makeText(
+                context,
+                "채팅을 삭제하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                Toast.LENGTH_SHORT
+              ).show()
+            } finally {
+              deleteConversation = null
+              deletingConversationId = null
+            }
+          }
+        },
+        enabled = !isDeleting
+      ) { Text("삭제", color = Color(0xFFFF7A7A)) }
+    },
+    containerColor = DrawerPanelBg,
+    titleContentColor = DrawerTextPrimary,
+    textContentColor = DrawerTextPrimary
+  )
+}
 }
 
 @Composable

@@ -51,8 +51,9 @@ fun FusionApp() {
                 drawerContainerColor = Color(0xFF000000),
                 drawerContentColor = Color(0xFFF5F5F5)
             ) {
-                ConversationListScreenV2(
-                    currentConversationId = currentConversationId,
+ConversationListScreenV2(
+  chatViewModel = chatViewModel,
+  currentConversationId = currentConversationId,
                     onBack = {
                         scope.launch {
                             drawerState.close()
