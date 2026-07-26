@@ -555,36 +555,33 @@ private val QuickPromptPresets = listOf(
 )
 @Composable
 fun ChatScreen(
-    conversationId: Long,
-    onConversationCreated: (Long) -> Unit,
-    onOpenList: () -> Unit,
-    onNewChat: () -> Unit,
-    openModelLibraryRequest: Int = 0,
-    openAdvancedSettingsRequest: Int = 0,
-    onOpenBenchmark: (modelName: String?, openHistory: Boolean) -> Unit = { _, _ -> }
+  conversationId: Long,
+  onConversationCreated: (Long) -> Unit,
+  onOpenList: () -> Unit,
+  onNewChat: () -> Unit,
+  openModelLibraryRequest: Int = 0,
+  openAdvancedSettingsRequest: Int = 0,
+  onOpenBenchmark: (modelName: String?, openHistory: Boolean) -> Unit = { _, _ -> },
+  chatViewModel: com.projectnuke.fusion.chat.ChatViewModel
 ) {
-    val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
-    val density = LocalDensity.current
-    val settingsPrefs = remember {
-        context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
-    }
-    val db = remember { AppDatabase.getInstance(context) }
-    val dao = remember { db.chatDao() }
-    val aiSecretStore = remember { AndroidKeystoreSecretStore(context) }
-    val aiProviderRepository = remember { AiProviderRepository(context, aiSecretStore) }
-    val webSearchProviderRepository = remember { WebSearchProviderRepository(context, aiSecretStore) }
-    val externalAiChatRunner = remember {
-        ExternalAiChatRunner(
-            providerRepository = aiProviderRepository,
-            client = OpenAiCompatibleClient(aiSecretStore)
-        )
-    }
-    val chatViewModel = remember { com.projectnuke.fusion.chat.ChatViewModel() }
-    var pickerOriginConversationId by remember { mutableStateOf<Long?>(null) }
-    DisposableEffect(chatViewModel) {
-        onDispose { chatViewModel.dispose() }
-    }
+  val context = LocalContext.current
+  val clipboardManager = LocalClipboardManager.current
+  val density = LocalDensity.current
+  val settingsPrefs = remember {
+    context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE)
+  }
+  val db = remember { AppDatabase.getInstance(context) }
+  val dao = remember { db.chatDao() }
+  val aiSecretStore = remember { AndroidKeystoreSecretStore(context) }
+  val aiProviderRepository = remember { AiProviderRepository(context, aiSecretStore) }
+  val webSearchProviderRepository = remember { WebSearchProviderRepository(context, aiSecretStore) }
+  val externalAiChatRunner = remember {
+    ExternalAiChatRunner(
+      providerRepository = aiProviderRepository,
+      client = OpenAiCompatibleClient(aiSecretStore)
+    )
+  }
+  var pickerOriginConversationId by remember { mutableStateOf<Long?>(null) }
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
     var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }

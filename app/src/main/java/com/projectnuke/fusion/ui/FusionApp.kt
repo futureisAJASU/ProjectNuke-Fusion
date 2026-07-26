@@ -8,6 +8,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -16,11 +17,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import com.projectnuke.fusion.chat.ChatViewModel
 import kotlinx.coroutines.launch
 
 @Composable
 fun FusionApp() {
-    var currentConversationId by remember { mutableLongStateOf(0L) }
+  val chatViewModel = remember { ChatViewModel() }
+  DisposableEffect(chatViewModel) {
+    onDispose { chatViewModel.dispose() }
+  }
+  var currentConversationId by remember { mutableLongStateOf(0L) }
     var openModelLibraryRequest by remember { mutableLongStateOf(0L) }
     var openAdvancedSettingsRequest by remember { mutableLongStateOf(0L) }
     var openBenchmarkRequest by remember { mutableLongStateOf(0L) }
@@ -85,27 +91,28 @@ fun FusionApp() {
             }
         }
     ) {
-        ChatScreen(
-            conversationId = currentConversationId,
-            onConversationCreated = { newId ->
-                currentConversationId = newId
-            },
-            onOpenList = {
-                scope.launch {
-                    drawerState.open()
-                }
-            },
-            onNewChat = {
-                currentConversationId = 0L
-            },
-            openModelLibraryRequest = openModelLibraryRequest.toInt(),
-            openAdvancedSettingsRequest = openAdvancedSettingsRequest.toInt(),
-            onOpenBenchmark = { modelName, openHistory ->
-                benchmarkRequestModelFilter = modelName
-                benchmarkRequestOpenHistory = openHistory
-                openBenchmarkRequest += 1L
-                scope.launch { drawerState.open() }
-            }
-        )
+ChatScreen(
+  conversationId = currentConversationId,
+  onConversationCreated = { newId ->
+    currentConversationId = newId
+  },
+  onOpenList = {
+    scope.launch {
+      drawerState.open()
+    }
+  },
+  onNewChat = {
+    currentConversationId = 0L
+  },
+  openModelLibraryRequest = openModelLibraryRequest.toInt(),
+  openAdvancedSettingsRequest = openAdvancedSettingsRequest.toInt(),
+  onOpenBenchmark = { modelName, openHistory ->
+    benchmarkRequestModelFilter = modelName
+    benchmarkRequestOpenHistory = openHistory
+    openBenchmarkRequest += 1L
+    scope.launch { drawerState.open() }
+  },
+  chatViewModel = chatViewModel
+)
     }
 }
