@@ -347,8 +347,14 @@ fun ConversationListScreen(
     }
 
     deleteConversation?.let { conversation ->
+        val isDeleting = deletingConversationId == conversation.id
         AlertDialog(
-            onDismissRequest = { deleteConversation = null },
+            onDismissRequest = {
+                if (!isDeleting) {
+                    deleteConversation = null
+                    deletingConversationId = null
+                }
+            },
             title = {
                 Text("채팅 삭제")
             },
@@ -356,22 +362,54 @@ fun ConversationListScreen(
                 Text("이 채팅을 삭제할까요? 이 작업은 되돌릴 수 없습니다.")
             },
             dismissButton = {
-                TextButton(onClick = { deleteConversation = null }) {
+                TextButton(
+                    onClick = {
+                        deleteConversation = null
+                        deletingConversationId = null
+                    },
+                    enabled = !isDeleting
+                ) {
                     Text("취소")
                 }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        deleteConversation = null
+                        if (deletingConversationId != null) return@TextButton
+                        val deletingId = conversation.id
+                        deletingConversationId = deletingId
                         scope.launch {
-                            dao.deleteConversation(conversation.id)
-                            val nextConversationId = dao.getLatestConversation()?.id
-                            if (conversation.id == currentConversationId) {
-                                onConversationRemovedFromList(conversation.id, nextConversationId)
+                            try {
+                                chatViewModel.cancelAndAwait(
+                                    deletingId,
+                                    reason = "delete-conversation"
+                                )
+                                if (dao.getConversationById(deletingId) != null) {
+                                    dao.deleteConversation(deletingId)
+                                }
+                                val nextConversationId = dao.getLatestConversation()?.id
+                                if (deletingId == currentConversationId) {
+                                    onConversationRemovedFromList(deletingId, nextConversationId)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                Toast.makeText(
+                                    context,
+                                    "채팅 삭제에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } finally {
+                                if (deletingConversationId == deletingId) {
+                                    deletingConversationId = null
+                                }
+                                if (deleteConversation?.id == deletingId) {
+                                    deleteConversation = null
+                                }
                             }
                         }
-                    }
+                    },
+                    enabled = !isDeleting
                 ) {
                     Text("삭제", color = Color(0xFFFF7A7A))
                 }
