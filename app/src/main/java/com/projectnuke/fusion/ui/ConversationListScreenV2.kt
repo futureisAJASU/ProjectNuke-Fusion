@@ -1484,20 +1484,21 @@ deleteConversation?.let { conversation ->
     confirmButton = {
       TextButton(
         onClick = {
-          if (isDeleting) return@TextButton
-          deletingConversationId = conversation.id
+          if (deletingConversationId != null) return@TextButton
+          val deletingId = conversation.id
+          deletingConversationId = deletingId
           scope.launch {
             try {
               chatViewModel.cancelAndAwait(
-                conversation.id,
+                deletingId,
                 reason = "delete-conversation"
               )
-              if (dao.getConversationById(conversation.id) != null) {
-                dao.deleteConversation(conversation.id)
+              if (dao.getConversationById(deletingId) != null) {
+                dao.deleteConversation(deletingId)
               }
               val nextConversationId = dao.getLatestConversation()?.id
-              if (conversation.id == currentConversationId) {
-                onConversationRemovedFromList(conversation.id, nextConversationId)
+              if (deletingId == currentConversationId) {
+                onConversationRemovedFromList(deletingId, nextConversationId)
               }
             } catch (e: CancellationException) {
               throw e
@@ -1508,8 +1509,12 @@ deleteConversation?.let { conversation ->
                 Toast.LENGTH_SHORT
               ).show()
             } finally {
-              deleteConversation = null
-              deletingConversationId = null
+              if (deletingConversationId == deletingId) {
+                deletingConversationId = null
+              }
+              if (deleteConversation?.id == deletingId) {
+                deleteConversation = null
+              }
             }
           }
         },
