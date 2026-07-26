@@ -140,20 +140,23 @@ class GenerationSessionRegistry {
 
                 gs
             }
-        } catch (e: CancellationException) {
-            withContext(NonCancellable) {
-                val session = token.publishedSession.get()
-                if (session != null) {
-                    sessions.remove(conversationId, session)
-                }
-                if (token.state() != PendingStart.State.INSTALLED) {
-                    val settled = mutableListOf<PendingStart>()
-                    settlePredecessorChain(token, "start-cancelled", settled)
-                    settled.forEach { it.completed.await() }
-                }
-            }
-            throw e
-        } finally {
+ } catch (e: CancellationException) {
+    withContext(NonCancellable) {
+      if (token.state() != PendingStart.State.INSTALLED) {
+        token.publishedSession.get()?.let { session ->
+          sessions.remove(conversationId, session)
+          if (!session.job.isCompleted) {
+            session.job.cancel(CancellationException("start-cancelled"))
+            session.job.join()
+          }
+        }
+        val settled = mutableListOf<PendingStart>()
+        settlePredecessorChain(token, "start-cancelled", settled)
+        settled.forEach { it.completed.await() }
+      }
+    }
+    throw e
+  } finally {
             if (token.state() != PendingStart.State.INSTALLED) {
                 latestTokens.remove(conversationId, token)
             }
@@ -277,7 +280,13 @@ class GenerationSessionRegistry {
                         }
                     }
                 }
-                PendingStart.State.CANCELLED -> {}
+                PendingStart.State.CANCELLED -> {
+                    if (!pred.completed.isCompleted) {
+                        if (out.none { it === pred }) {
+                            out.add(pred)
+                        }
+                    }
+                }
             }
             pred = pred.predecessor
         }
