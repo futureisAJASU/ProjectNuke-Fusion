@@ -1,7 +1,5 @@
 package com.projectnuke.fusion.chat
 
-import android.content.Context
-import com.projectnuke.fusion.data.ChatDao
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import kotlinx.coroutines.CoroutineScope
@@ -106,25 +104,6 @@ class ChatViewModel {
      */
     suspend fun cancelAndAwait(conversationId: Long, reason: String = "delete"): Boolean =
         registry.cancelAndJoin(conversationId, reason).also { clear(conversationId) }
-
-    suspend fun deleteConversation(
-        conversationId: Long,
-        dao: ChatDao,
-        onNextConversation: (Long?) -> Unit = {},
-        onSummaryCleanupDebt: (String) -> Unit = {},
-        onCandidatesCleanupDebt: (String) -> Unit = {}
-    ): GenerationSessionRegistry.DeletionResult {
-        val result = registry.cancelAndDeleteConversation(
-            conversationId,
-            "delete-conversation"
-        )
-        clear(conversationId)
-        dao.deleteConversation(conversationId)
-        val nextId = dao.getLatestConversation()?.id
-        onNextConversation(nextId)
-
-        return result
-    }
 
     fun dispose() {
         scope.cancel()

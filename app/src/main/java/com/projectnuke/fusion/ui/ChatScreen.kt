@@ -684,7 +684,7 @@ fun ChatScreen(
         return externalAiChatRunner.generateFromMessages(
             messages = buildExternalAiMessages(
                 messages = currentMessages,
-                stripAttachments = { stripSearchSourcesMetadata(parseMessageAttachments(it).body) }
+                stripAttachments = { stripSearchSourcesMetadata(parseMessageAttachments(context, it).body) }
             ),
             hasAttachments = hasAttachments,
             providerId = providerId,
@@ -863,7 +863,7 @@ fun ChatScreen(
             emptyList()
         } else {
             activeMessageEntities.filter { message ->
-                visibleSearchText(message.content).contains(query, ignoreCase = true)
+                visibleSearchText(context, message.content).contains(query, ignoreCase = true)
             }
         }
     }
@@ -899,9 +899,9 @@ fun ChatScreen(
         }
 
         val previousUser = snapshot[previousUserIndex]
-        val parsedUserMessage = parseMessageAttachments(previousUser.content)
+        val parsedUserMessage = parseMessageAttachments(context, previousUser.content)
         val previousUserText = parsedUserMessage.body.trim()
-        val originalAssistantText = visibleSearchText(targetMessage.content)
+        val originalAssistantText = visibleSearchText(context, targetMessage.content)
         val isStyleRegeneration = action.instruction != null
         val attachmentsToSend = if (isStyleRegeneration) emptyList() else parsedUserMessage.attachments
         val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
@@ -1544,8 +1544,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     .asReversed()
                                     .firstOrNull { it.role == "user" }
                                     ?.content
-                                    ?.let { parseMessageAttachments(it).body }
-                                    ?.trim()
+?.let { parseMessageAttachments(context, it).body }
+?.trim()
                                     .orEmpty()
                                 val searchIntent = FusionWebSearch.detectIntent(retrySnapshot.rawUserText)
                                 chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = when (searchIntent) {
@@ -1708,9 +1708,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
             .takeLast(12)
             .mapNotNull { entity ->
                 val visibleText = if (entity.role == "user") {
-                    parseMessageAttachments(entity.content).body.trim()
+                    parseMessageAttachments(context, entity.content).body.trim()
                 } else {
-                    visibleSearchText(entity.content).trim()
+                    visibleSearchText(context, entity.content).trim()
                 }
                 visibleText.takeIf { it.isNotBlank() }?.let {
                     ChatMessage(role = entity.role, content = it)
@@ -2412,8 +2412,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             .asReversed()
                                                             .firstOrNull { it.role == "user" }
                                                             ?.content
-                                                            ?.let { parseMessageAttachments(it).body }
-                                                            ?.trim()
+?.let { parseMessageAttachments(context, it).body }
+ ?.trim()
                                                             .orEmpty()
                                                         val response = FusionWebSearch.search(
                                                             userInput = snapshot.rawUserText,
@@ -2563,8 +2563,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                     .asReversed()
                                                     .firstOrNull { it.role == "user" }
                                                     ?.content
-                                                    ?.let { parseMessageAttachments(it).body }
-                                                    ?.trim()
+?.let { parseMessageAttachments(context, it).body }
+?.trim()
                                                     .orEmpty()
                                                 val response = FusionWebSearch.search(
                                                     userInput = snapshot.rawUserText,
@@ -2880,7 +2880,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             ) { result ->
                                 InChatSearchResultRow(
                                     role = if (result.role == "user") "사용자" else "Fusion",
-                                    preview = visibleSearchText(result.content),
+                                    preview = visibleSearchText(context, result.content),
                                     onClick = {
                                         scope.launch {
                                             val idx = activeMessageEntities.indexOfFirst { it.id == result.id }
@@ -3317,19 +3317,18 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         scope.launch {
                             val targetId = conversationId
                             if (targetId != 0L) {
-                                chatViewModel.deleteConversation(
-                                    conversationId = targetId,
-                                    dao = dao,
-                                    onNextConversation = { nextId ->
-                                        input = ""
-                                        clearPendingAttachmentDrafts(pendingAttachments)
-                                        streamingAssistantText = null
-                                        streamingMetricsLine = null
-                                        generationStatus = null
-                                        onNewChat()
-                                    }
-                                )
+                                chatViewModel.cancelAndAwait(targetId, reason = "delete-conversation")
+                                // Re-check existence: a race could have removed it.
+                                if (dao.getConversationById(targetId) != null) {
+                                    dao.deleteConversation(targetId)
+                                }
                             }
+                            input = ""
+                            clearPendingAttachmentDrafts(pendingAttachments)
+                            streamingAssistantText = null
+                            streamingMetricsLine = null
+                            generationStatus = null
+                            onNewChat()
                         }
                     }
                 ) {
@@ -4484,8 +4483,9 @@ private fun ActionIcon(
 private fun UserMessageBubble(
     content: String
 ) {
+    val context = LocalContext.current
     val parsed = remember(content) {
-        parseMessageAttachments(content)
+        parseMessageAttachments(context, content)
     }
 
     Column(
@@ -9648,6 +9648,7 @@ private fun normalizeWebSearchQuery(query: String): String {
 }
 
 private fun buildWebSearchQuery(
+    context: Context,
     latestUserInput: String,
     messages: List<ChatMessage>
 ): String {
@@ -9663,7 +9664,7 @@ private fun buildWebSearchQuery(
         .asReversed()
         .firstOrNull { it.role == "user" }
         ?.content
-        ?.let { parseMessageAttachments(it).body }
+        ?.let { parseMessageAttachments(context, it).body }
         ?.trim()
         .orEmpty()
 
@@ -9842,20 +9843,32 @@ private fun buildMessageContentWithAttachments(
     body: String,
     attachments: List<LocalAttachment>
 ): String {
-    return AttachmentMessageCodec.serializeAttachmentMessage(
-        attachments.map {
-            AttachmentRecord(
-                name = it.name,
-                mimeType = it.mimeType,
-                localPath = it.localPath
-            )
-        },
-        body
-    )
+    if (attachments.isEmpty()) return body
+
+    val attachmentTags = attachments.joinToString("\n") { attachment ->
+        val safeName = attachment.name
+            .replace("\\", "\\\\")
+            .replace("|", "\\|")
+
+        val safeMime = attachment.mimeType
+            .replace("\\", "\\\\")
+            .replace("|", "\\|")
+
+        val safePath = attachment.localPath
+            .replace("\\", "\\\\")
+            .replace("|", "\\|")
+
+        "<fusion_attachment_v2>$safeName|$safeMime|$safePath</fusion_attachment_v2>"
+    }
+
+    return listOf(attachmentTags, body)
+        .filter { it.isNotBlank() }
+        .joinToString("\n\n")
 }
 
-private fun parseMessageAttachments(raw: String): ParsedMessageContent {
-    val parsed = AttachmentMessageCodec.parseAttachmentMessage(raw)
+private fun parseMessageAttachments(context: Context, raw: String): ParsedMessageContent {
+    val attachmentDir = AttachmentStorageManager.getAttachmentDirectory(context)
+    val parsed = AttachmentMessageCodec.parseTrustedAttachmentMessage(raw, attachmentDir)
     return ParsedMessageContent(
         body = parsed.body,
         attachments = parsed.records.map {
@@ -9868,8 +9881,9 @@ private fun parseMessageAttachments(raw: String): ParsedMessageContent {
     )
 }
 
-private fun visibleSearchText(rawMessageContent: String): String {
-    val withoutAttachments = parseMessageAttachments(rawMessageContent).body
+private fun visibleSearchText(context: Context, raw: String): String {
+    val attachmentDir = AttachmentStorageManager.getAttachmentDirectory(context)
+    val withoutAttachments = AttachmentMessageCodec.parseTrustedAttachmentMessage(raw, attachmentDir).body
     val withoutMetrics = splitFusionMetrics(withoutAttachments).content
     return withoutMetrics
         .replace(Regex("""(?is)<fusion_thinking>.*?</fusion_thinking>"""), "")
@@ -9889,6 +9903,12 @@ private fun parseMemoryCandidateLines(raw: String): List<String> {
         .distinct()
 }
 
+private fun String.unescapeAttachmentField(): String {
+    return this
+        .replace("\\|", "|")
+        .replace("\\\\", "\\")
+        .trim()
+}
 private fun buildModelUserContent(
     body: String,
     attachments: List<LocalAttachment>

@@ -1487,36 +1487,36 @@ deleteConversation?.let { conversation ->
           if (deletingConversationId != null) return@TextButton
           val deletingId = conversation.id
           deletingConversationId = deletingId
-        scope.launch {
-                try {
-                  chatViewModel.deleteConversation(
-                    conversationId = deletingId,
-                    dao = dao,
-                    onNextConversation = { nextId ->
-                      deletingConversationId = null
-                      deleteConversation = null
-                      if (deletingId == currentConversationId) {
-                        onConversationRemovedFromList(deletingId, nextId)
-                      }
-                    }
-                  )
-                } catch (e: CancellationException) {
-                  throw e
-                } catch (_: Exception) {
-                  Toast.makeText(
-                    context,
-                    "채팅을 삭제하지 못했습니다. 잠시 후 다시 시도해 주세요.",
-                    Toast.LENGTH_SHORT
-                  ).show()
-                } finally {
-                  if (deletingConversationId == deletingId) {
-                    deletingConversationId = null
-                  }
-                  if (deleteConversation?.id == deletingId) {
-                    deleteConversation = null
-                  }
-                }
+          scope.launch {
+            try {
+              chatViewModel.cancelAndAwait(
+                deletingId,
+                reason = "delete-conversation"
+              )
+              if (dao.getConversationById(deletingId) != null) {
+                dao.deleteConversation(deletingId)
               }
+              val nextConversationId = dao.getLatestConversation()?.id
+              if (deletingId == currentConversationId) {
+                onConversationRemovedFromList(deletingId, nextConversationId)
+              }
+            } catch (e: CancellationException) {
+              throw e
+            } catch (_: Exception) {
+              Toast.makeText(
+                context,
+                "채팅을 삭제하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                Toast.LENGTH_SHORT
+              ).show()
+            } finally {
+              if (deletingConversationId == deletingId) {
+                deletingConversationId = null
+              }
+              if (deleteConversation?.id == deletingId) {
+                deleteConversation = null
+              }
+            }
+          }
         },
         enabled = !isDeleting
       ) { Text("삭제", color = Color(0xFFFF7A7A)) }

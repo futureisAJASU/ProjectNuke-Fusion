@@ -20,35 +20,9 @@ class GenerationSession(
 )
 
 class GenerationSessionRegistry {
-    enum class DeletionState { ACTIVE, DELETING, DELETED }
-
-    data class DeletionResult(
-        val success: Boolean,
-        val deletedConversationId: Long,
-        val cleanupDebt: List<String> = emptyList()
-    )
-
-    class DeletionFence {
-        private val state = AtomicReference(DeletionState.ACTIVE)
-
-        fun tryBeginDeleting(): Boolean =
-            state.compareAndSet(DeletionState.ACTIVE, DeletionState.DELETING)
-
-        fun markDeleted(): Boolean =
-            state.compareAndSet(DeletionState.DELETING, DeletionState.DELETED)
-
-        fun isDeletingOrDeleted(): Boolean {
-            val s = state.get()
-            return s == DeletionState.DELETING || s == DeletionState.DELETED
-        }
-
-        fun state(): DeletionState = state.get()
-    }
-
     private val sessions = ConcurrentHashMap<Long, GenerationSession>()
     private val latestTokens = ConcurrentHashMap<Long, PendingStart>()
     private val lockStripes = Array(16) { Mutex() }
-    private val deletionFences = ConcurrentHashMap<Long, DeletionFence>()
 
     internal class PendingStart(
         val conversationId: Long,
@@ -95,11 +69,6 @@ class GenerationSessionRegistry {
     ): GenerationSession {
         val conversationId = snapshot.conversationId
         val requestId = snapshot.requestId
-
-        val fence = deletionFences.getOrPut(conversationId) { DeletionFence() }
-        if (fence.isDeletingOrDeleted()) {
-            throw CancellationException("Conversation $conversationId is being deleted")
-        }
         val lock = stripeFor(conversationId)
 
         val token = PendingStart(conversationId, requestId)
@@ -112,11 +81,6 @@ class GenerationSessionRegistry {
             }
 
             return lock.withLock {
-                fence.isDeletingOrDeleted().let { deleting ->
-                    if (deleting) throw CancellationException(
-                        "Conversation $conversationId is being deleted"
-                    )
-                }
                 if (!token.tryBeginStarting()) {
                     throw token.cancellationException()
                 }
@@ -352,37 +316,4 @@ class GenerationSessionRegistry {
 
     internal fun latestToken(conversationId: Long): PendingStart? =
         latestTokens[conversationId]
-
-    suspend fun cancelAndDeleteConversation(
-        conversationId: Long,
-        reason: String = "delete-conversation"
-    ): DeletionResult {
-        val fence = deletionFences.getOrPut(conversationId) { DeletionFence() }
-        if (!fence.tryBeginDeleting()) {
-            return DeletionResult(
-                success = false,
-                deletedConversationId = conversationId,
-                cleanupDebt = emptyList()
-            )
-        }
-
-        val cancelSucceeded = cancelAndJoin(conversationId, reason)
-
-        val settled = mutableListOf<PendingStart>()
-        val head = latestTokens[conversationId]
-        if (head != null && head.state() != PendingStart.State.INSTALLED) {
-            settlePredecessorChain(head, reason, settled)
-        }
-
-        fence.markDeleted()
-
-        return DeletionResult(
-            success = cancelSucceeded,
-            deletedConversationId = conversationId,
-            cleanupDebt = emptyList()
-        )
-    }
-
-    fun isDeletingOrDeleted(conversationId: Long): Boolean =
-        deletionFences[conversationId]?.isDeletingOrDeleted() ?: false
 }
