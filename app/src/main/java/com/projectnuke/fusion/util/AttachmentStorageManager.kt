@@ -57,10 +57,10 @@ object AttachmentStorageManager {
         targetFile.exists() && targetFile.delete()
     }
 
-fun resolveManagedAttachment(context: Context, path: String): File? {
+fun resolveManagedAttachment(attachmentRoot: File, path: String): File? {
         if (path.isBlank()) return null
         val targetCanonical = safeCanonicalPath(path) ?: return null
-        val dirCanonical = safeCanonicalPath(getAttachmentDirectory(context).absolutePath)
+        val dirCanonical = safeCanonicalPath(attachmentRoot.absolutePath)
             ?: return null
         if (targetCanonical == dirCanonical) return null
         val prefix = "$dirCanonical${File.separator}"
@@ -69,6 +69,10 @@ fun resolveManagedAttachment(context: Context, path: String): File? {
         if (!targetFile.exists()) return null
         if (!targetFile.isFile) return null
         return targetFile
+    }
+
+    fun resolveManagedAttachment(context: Context, path: String): File? {
+        return resolveManagedAttachment(getAttachmentDirectory(context), path)
     }
 
     suspend fun calculateAttachmentStorageStats(
@@ -128,14 +132,15 @@ fun resolveManagedAttachment(context: Context, path: String): File? {
         context: Context,
         contents: List<String>
     ): Set<String> {
-        val dirCanonical = safeCanonicalPath(getAttachmentDirectory(context).absolutePath) ?: return emptySet()
+        val attachmentRoot = getAttachmentDirectory(context)
         val result = mutableSetOf<String>()
         contents.forEach { raw ->
-            val parsed = AttachmentMessageCodec.parseAttachmentMessage(raw)
+            val parsed = AttachmentMessageCodec.parseTrustedAttachmentMessage(raw, attachmentRoot)
             parsed.records.forEach { record ->
-                val canonical = safeCanonicalPath(record.localPath) ?: return@forEach
-                if (!isInAttachmentDirectory(canonical, dirCanonical)) return@forEach
-                result.add(canonical)
+                val resolved = resolveManagedAttachment(attachmentRoot, record.localPath)
+                if (resolved != null) {
+                    result.add(resolved.canonicalPath)
+                }
             }
         }
         return result

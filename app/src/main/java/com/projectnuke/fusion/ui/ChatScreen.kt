@@ -221,7 +221,9 @@ private data class LocalAttachment(
 
 private data class ParsedMessageContent(
     val body: String,
-    val attachments: List<LocalAttachment>
+    val attachments: List<LocalAttachment>,
+    val unavailableAttachments: List<LocalAttachment> = emptyList(),
+    val suspiciousEnvelope: Boolean = false
 )
 
 private data class FusionMetricsSplit(
@@ -2302,7 +2304,24 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 return@sendClick
                             }
 
+                            val attachmentDir = AttachmentStorageManager.getAttachmentDirectory(context)
+                            val allAttachmentsValid = attachmentsToSend.all { attachment ->
+                                AttachmentStorageManager.resolveManagedAttachment(
+                                    attachmentDir,
+                                    attachment.localPath
+                                ) != null
+                            }
+                            if (!allAttachmentsValid) {
+                                Toast.makeText(
+                                    context,
+                                    "일부 첨부 파일을 찾을 수 없습니다. 다시 첨부해 주세요.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                return@sendClick
+                            }
+
                             val userMessageContent = buildMessageContentWithAttachments(
+                                context,
                                 body = userInput,
                                 attachments = attachmentsToSend
                             )
@@ -4504,6 +4523,15 @@ private fun UserMessageBubble(
                 )
             }
         }
+        parsed.unavailableAttachments.forEach { attachment ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.82f)
+                    .padding(bottom = 6.dp)
+            ) {
+                UnavailableAttachmentCard(attachment = attachment)
+            }
+        }
 
         if (parsed.body.isNotBlank()) {
             Surface(
@@ -4818,8 +4846,12 @@ private fun AttachmentCard(
             Column(
                 modifier = Modifier.weight(1f)
             ) {
+                val displayName = attachment.name.ifBlank {
+                    attachment.localPath.substringAfterLast(File.separator).ifBlank { "첨부 파일" }
+                }
+                val displayMime = attachment.mimeType.ifBlank { "application/octet-stream" }
                 Text(
-                    text = attachment.name,
+                    text = displayName,
                     color = TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
@@ -4827,7 +4859,7 @@ private fun AttachmentCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = attachment.mimeType,
+                    text = displayMime,
                     color = TextSecondary,
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -4845,6 +4877,62 @@ private fun AttachmentCard(
                         .clip(CircleShape)
                         .clickable { onRemove() }
                         .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UnavailableAttachmentCard(
+    attachment: LocalAttachment
+) {
+    val displayName = attachment.name.ifBlank {
+        attachment.localPath.substringAfterLast(File.separator).ifBlank { "첨부 파일" }
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        color = Color(0xFF202020)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF2B2B2B)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "⚠",
+                    color = TextSecondary.copy(alpha = 0.5f),
+                    fontSize = 22.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = displayName,
+                    color = TextSecondary.copy(alpha = 0.5f),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "첨부 파일을 찾을 수 없습니다.",
+                    color = TextSecondary.copy(alpha = 0.4f),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -4884,9 +4972,16 @@ private fun buildImageUserInstruction(
 private fun AttachmentPreview(
     attachment: LocalAttachment
 ) {
-    val bitmap = remember(attachment.localPath, attachment.mimeType) {
-        if (attachment.mimeType.startsWith("image/")) {
-            loadAttachmentThumbnail(attachment.localPath)
+    val context = LocalContext.current
+    val resolvedFile = remember(attachment.localPath) {
+        AttachmentStorageManager.resolveManagedAttachment(
+            AttachmentStorageManager.getAttachmentDirectory(context),
+            attachment.localPath
+        )
+    }
+    val bitmap = remember(resolvedFile, attachment.mimeType) {
+        if (resolvedFile != null && attachment.mimeType.startsWith("image/")) {
+            loadAttachmentThumbnail(resolvedFile.canonicalPath)
         } else {
             null
         }
@@ -9424,22 +9519,26 @@ private fun openAttachmentFile(
     context: Context,
     attachment: LocalAttachment
 ) {
-    val file = File(attachment.localPath)
+    val resolved = AttachmentStorageManager.resolveManagedAttachment(
+        AttachmentStorageManager.getAttachmentDirectory(context),
+        attachment.localPath
+    )
 
-    if (!file.exists()) {
+    if (resolved == null) {
         Toast.makeText(
             context,
-            "첨부 파일을 찾을 수 없습니다: ${attachment.localPath}",
-            Toast.LENGTH_LONG
+            "첨부 파일을 찾을 수 없습니다.",
+            Toast.LENGTH_SHORT
         ).show()
         return
     }
 
     try {
-        val uri = FusionFileProvider.uriFor(context, file)
+        val uri = FusionFileProvider.uriFor(context, resolved)
 
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, attachment.mimeType)
+            val mime = attachment.mimeType.ifBlank { "application/octet-stream" }
+            setDataAndType(uri, mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
 
@@ -9840,30 +9939,29 @@ private fun clearPendingAttachmentDrafts(pendingAttachments: MutableList<LocalAt
 }
 
 private fun buildMessageContentWithAttachments(
+    context: Context,
     body: String,
     attachments: List<LocalAttachment>
 ): String {
     if (attachments.isEmpty()) return body
 
-    val attachmentTags = attachments.joinToString("\n") { attachment ->
-        val safeName = attachment.name
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-
-        val safeMime = attachment.mimeType
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-
-        val safePath = attachment.localPath
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-
-        "<fusion_attachment_v2>$safeName|$safeMime|$safePath</fusion_attachment_v2>"
+    val validatedRecords = attachments.mapNotNull { attachment ->
+        val resolved = AttachmentStorageManager.resolveManagedAttachment(
+            AttachmentStorageManager.getAttachmentDirectory(context),
+            attachment.localPath
+        )
+        if (resolved != null) {
+            AttachmentRecord(
+                name = attachment.name,
+                mimeType = attachment.mimeType,
+                localPath = resolved.canonicalPath
+            )
+        } else {
+            null
+        }
     }
 
-    return listOf(attachmentTags, body)
-        .filter { it.isNotBlank() }
-        .joinToString("\n\n")
+    return AttachmentMessageCodec.serializeAttachmentMessage(validatedRecords, body)
 }
 
 private fun parseMessageAttachments(context: Context, raw: String): ParsedMessageContent {
@@ -9877,7 +9975,15 @@ private fun parseMessageAttachments(context: Context, raw: String): ParsedMessag
                 mimeType = it.mimeType,
                 localPath = it.localPath
             )
-        }
+        },
+        unavailableAttachments = parsed.unavailableRecords.map {
+            LocalAttachment(
+                name = it.name,
+                mimeType = it.mimeType,
+                localPath = it.localPath
+            )
+        },
+        suspiciousEnvelope = parsed.suspiciousEnvelope
     )
 }
 

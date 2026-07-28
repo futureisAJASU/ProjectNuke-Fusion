@@ -12,7 +12,9 @@ data class AttachmentRecord(
 
 data class ParsedAttachments(
     val records: List<AttachmentRecord>,
-    val body: String
+    val body: String,
+    val unavailableRecords: List<AttachmentRecord> = emptyList(),
+    val suspiciousEnvelope: Boolean = false
 )
 
 object AttachmentMessageCodec {
@@ -182,40 +184,70 @@ object AttachmentMessageCodec {
             return null
         }
         if (jsonObj.length() != 3) return null
-        val name = if (jsonObj.has("n")) jsonObj.getString("n") else return null
-        val mimeType = if (jsonObj.has("t")) jsonObj.getString("t") else return null
-        val localPath = if (jsonObj.has("p")) jsonObj.getString("p") else return null
+        if (!jsonObj.has("n") || !jsonObj.has("t") || !jsonObj.has("p")) return null
+        if (!(jsonObj.get("n") is String) || !(jsonObj.get("t") is String) || !(jsonObj.get("p") is String)) return null
+        val name = jsonObj.getString("n")
+        val mimeType = jsonObj.getString("t")
+        val localPath = jsonObj.getString("p")
         return listOf(AttachmentRecord(name = name, mimeType = mimeType, localPath = localPath))
     }
 
     fun parseTrustedAttachmentMessage(raw: String, attachmentRoot: File): ParsedAttachments {
         val parsed = parseAttachmentMessage(raw)
         if (parsed.records.isEmpty()) return parsed
+
         val rootCanonical = try {
             attachmentRoot.canonicalPath
         } catch (_: Exception) {
-            return ParsedAttachments(emptyList(), raw)
+            return ParsedAttachments(emptyList(), raw, suspiciousEnvelope = true)
         }
+
         val trustedRecords = mutableListOf<AttachmentRecord>()
+        val unavailableRecords = mutableListOf<AttachmentRecord>()
+        var anySuspicious = false
+
         for (record in parsed.records) {
             val canonical = try {
                 File(record.localPath).canonicalPath
-            } catch (_: Exception) { continue }
-            if (canonical == rootCanonical) continue
+            } catch (_: Exception) {
+                anySuspicious = true
+                continue
+            }
+
+            if (canonical == rootCanonical) {
+                anySuspicious = true
+                continue
+            }
             val prefix = "$rootCanonical${File.separator}"
-            if (!canonical.startsWith(prefix)) continue
+            if (!canonical.startsWith(prefix)) {
+                anySuspicious = true
+                continue
+            }
             val file = File(canonical)
-            if (!file.exists() || !file.isFile) continue
-            trustedRecords.add(AttachmentRecord(
-                name = record.name,
-                mimeType = record.mimeType,
-                localPath = canonical
-            ))
+            if (file.exists() && file.isFile) {
+                trustedRecords.add(AttachmentRecord(
+                    name = record.name,
+                    mimeType = record.mimeType,
+                    localPath = canonical
+                ))
+            } else {
+                unavailableRecords.add(AttachmentRecord(
+                    name = record.name,
+                    mimeType = record.mimeType,
+                    localPath = canonical
+                ))
+            }
         }
-        if (trustedRecords.isEmpty() && parsed.records.isNotEmpty()) {
-            return ParsedAttachments(emptyList(), raw)
+
+        if (anySuspicious) {
+            return ParsedAttachments(emptyList(), raw, suspiciousEnvelope = true)
         }
-        return ParsedAttachments(trustedRecords, parsed.body)
+
+        return ParsedAttachments(
+            records = trustedRecords,
+            body = parsed.body,
+            unavailableRecords = unavailableRecords
+        )
     }
 
     private data class ParsedTagResult(

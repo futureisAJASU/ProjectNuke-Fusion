@@ -348,7 +348,11 @@ fun ConversationListScreen(
 
     deleteConversation?.let { conversation ->
         AlertDialog(
-            onDismissRequest = { deleteConversation = null },
+            onDismissRequest = {
+                if (deletingConversationId != conversation.id) {
+                    deleteConversation = null
+                }
+            },
             title = {
                 Text("채팅 삭제")
             },
@@ -356,19 +360,37 @@ fun ConversationListScreen(
                 Text("이 채팅을 삭제할까요? 이 작업은 되돌릴 수 없습니다.")
             },
             dismissButton = {
-                TextButton(onClick = { deleteConversation = null }) {
+                TextButton(
+                    onClick = {
+                        if (deletingConversationId != conversation.id) {
+                            deleteConversation = null
+                        }
+                    }
+                ) {
                     Text("취소")
                 }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        deleteConversation = null
+                        if (deletingConversationId != null) return@TextButton
+                        deletingConversationId = conversation.id
                         scope.launch {
-                            dao.deleteConversation(conversation.id)
-                            val nextConversationId = dao.getLatestConversation()?.id
-                            if (conversation.id == currentConversationId) {
-                                onConversationRemovedFromList(conversation.id, nextConversationId)
+                            try {
+                                chatViewModel.cancelAndAwait(conversation.id)
+                                if (dao.getConversationById(conversation.id) == null) return@launch
+                                dao.deleteConversation(conversation.id)
+                                val nextConversationId = dao.getLatestConversation()?.id
+                                if (conversation.id == currentConversationId) {
+                                    onConversationRemovedFromList(conversation.id, nextConversationId)
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                Toast.makeText(context, "삭제 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                deleteConversation = null
+                                deletingConversationId = null
                             }
                         }
                     }

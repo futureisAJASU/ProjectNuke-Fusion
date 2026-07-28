@@ -184,4 +184,96 @@ class AttachmentMessageCodecTest {
         assertEquals("", parsed.records[0].name)
         assertEquals("", parsed.records[0].mimeType)
     }
+
+    @Test
+    fun `control character followed by normal text round-trips`() {
+        val record = AttachmentRecord("file\u0000.txt", "text/plain", "/data/data/app/attachments/f.txt")
+        val body = "Hello\u0001world"
+        val serialized = codec.serializeAttachmentMessage(listOf(record), body)
+        val parsed = codec.parseAttachmentMessage(serialized)
+        assertEquals(1, parsed.records.size)
+        assertEquals("file\u0000.txt", parsed.records[0].name)
+        assertEquals(body, parsed.body)
+    }
+
+    @Test
+    fun `malformed JSON suffix rejected`() {
+        val serialized = "<fusion_attachment_v3>aW52YWxpZCE=</fusion_attachment_v3> body"
+        val parsed = codec.parseAttachmentMessage(serialized)
+        assertEquals(0, parsed.records.size)
+        assertEquals(serialized, parsed.body)
+    }
+
+    @Test
+    fun `non-string n field in v3 rejected`() {
+        val payload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+            """{"n":123,"t":"text/plain","p":"/path"}""".toByteArray(Charsets.UTF_8)
+        )
+        val serialized = "<fusion_attachment_v3>$payload</fusion_attachment_v3> body"
+        val parsed = codec.parseAttachmentMessage(serialized)
+        assertEquals(0, parsed.records.size)
+        assertEquals(serialized, parsed.body)
+    }
+
+    @Test
+    fun `non-string t field in v3 rejected`() {
+        val payload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+            """{"n":"name","t":true,"p":"/path"}""".toByteArray(Charsets.UTF_8)
+        )
+        val serialized = "<fusion_attachment_v3>$payload</fusion_attachment_v3> body"
+        val parsed = codec.parseAttachmentMessage(serialized)
+        assertEquals(0, parsed.records.size)
+        assertEquals(serialized, parsed.body)
+    }
+
+    @Test
+    fun `non-string p field in v3 rejected`() {
+        val payload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+            """{"n":"name","t":"text/plain","p":["array"]}""".toByteArray(Charsets.UTF_8)
+        )
+        val serialized = "<fusion_attachment_v3>$payload</fusion_attachment_v3> body"
+        val parsed = codec.parseAttachmentMessage(serialized)
+        assertEquals(0, parsed.records.size)
+        assertEquals(serialized, parsed.body)
+    }
+
+    @Test
+    fun `malformed v1 remains fully visible`() {
+        val body = "<fusion_attachment>\nname=test.txt\nmime=text/plain\n</fusion_attachment> after"
+        val parsed = codec.parseAttachmentMessage(body)
+        assertEquals(0, parsed.records.size)
+        assertEquals(body, parsed.body)
+    }
+
+    @Test
+    fun `malformed v2 too few fields rejected`() {
+        val body = "<fusion_attachment_v2>name|mime</fusion_attachment_v2> after"
+        val parsed = codec.parseAttachmentMessage(body)
+        assertEquals(0, parsed.records.size)
+        assertEquals(body, parsed.body)
+    }
+
+    @Test
+    fun `malformed v2 too many fields rejected`() {
+        val body = "<fusion_attachment_v2>a|b|c|d</fusion_attachment_v2> after"
+        val parsed = codec.parseAttachmentMessage(body)
+        assertEquals(0, parsed.records.size)
+        assertEquals(body, parsed.body)
+    }
+
+    @Test
+    fun `dangling escape in v2 rejected`() {
+        val body = "<fusion_attachment_v2>name\\|mime|path</fusion_attachment_v2> after"
+        val parsed = codec.parseAttachmentMessage(body)
+        assertEquals(0, parsed.records.size)
+        assertEquals(body, parsed.body)
+    }
+
+    @Test
+    fun `unknown escape character in v2 rejected`() {
+        val body = "<fusion_attachment_v2>name\\x|mime|path</fusion_attachment_v2> after"
+        val parsed = codec.parseAttachmentMessage(body)
+        assertEquals(0, parsed.records.size)
+        assertEquals(body, parsed.body)
+    }
 }
