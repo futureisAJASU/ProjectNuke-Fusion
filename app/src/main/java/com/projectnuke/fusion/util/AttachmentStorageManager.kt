@@ -26,6 +26,12 @@ data class CleanupResult(
     val deletedFiles: Int
 )
 
+internal data class AttachmentCandidate(
+    val name: String,
+    val mimeType: String,
+    val localPath: String
+)
+
 internal fun extractReferencedAttachmentPaths(
     contents: List<String>,
     attachmentRoot: File
@@ -80,7 +86,9 @@ object AttachmentStorageManager {
 
     internal fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassification {
         if (path.isBlank()) return AttachmentClassification.Suspicious
-        if (Files.isSymbolicLink(File(path).toPath())) return AttachmentClassification.Suspicious
+        val suppliedPath = runCatching { File(path).toPath() }.getOrNull()
+            ?: return AttachmentClassification.Suspicious
+        if (Files.isSymbolicLink(suppliedPath)) return AttachmentClassification.Suspicious
         val targetCanonical = safeCanonicalPath(path) ?: return AttachmentClassification.Suspicious
         val dirCanonical = safeCanonicalPath(attachmentRoot.absolutePath)
             ?: return AttachmentClassification.Suspicious
@@ -175,7 +183,7 @@ object AttachmentStorageManager {
 }
 
 internal fun validateAttachmentBatch(
-    candidates: List<AttachmentRecord>,
+    candidates: List<AttachmentCandidate>,
     attachmentRoot: File
 ): List<AttachmentRecord>? {
     val result = mutableListOf<AttachmentRecord>()

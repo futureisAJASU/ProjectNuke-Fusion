@@ -123,8 +123,8 @@ import com.projectnuke.fusion.modelzoo.FusionModelCompatibility
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
 import com.projectnuke.fusion.util.AttachmentMessageCodec
 import com.projectnuke.fusion.util.AttachmentRecord
-import com.projectnuke.fusion.util.AttachmentClassification
 import com.projectnuke.fusion.util.AttachmentStorageManager
+import com.projectnuke.fusion.util.AttachmentCandidate
 import com.projectnuke.fusion.util.validateAttachmentBatch
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryRiskLevel
@@ -2288,8 +2288,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             }
 
                             val attachmentDir = AttachmentStorageManager.getAttachmentDirectory(context)
-                            val pendingRecords = pendingList.map { AttachmentRecord(it.name, it.mimeType, it.localPath) }
-                            val attachmentsToSend = validateAttachmentBatch(pendingRecords, attachmentDir)
+                            val pendingCandidates = pendingList.map { AttachmentCandidate(it.name, it.mimeType, it.localPath) }
+                            val attachmentsToSend = validateAttachmentBatch(pendingCandidates, attachmentDir)
                             if (attachmentsToSend == null) {
                                 Toast.makeText(
                                     context,

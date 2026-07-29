@@ -497,6 +497,15 @@ class AttachmentStorageManagerPathTest {
     }
 
     @Test
+    fun `validateAttachmentBatch empty candidates returns empty records`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val result = validateAttachmentBatch(emptyList(), root)
+        assertNotNull(result)
+        assertTrue(result!!.isEmpty())
+        root.deleteRecursively()
+    }
+
+    @Test
     fun `validateAttachmentBatch all trusted returns canonical records in order`() {
         val root = Files.createTempDirectory("test_attachments").toFile()
         val a = File(root, "a.txt")
@@ -504,8 +513,8 @@ class AttachmentStorageManagerPathTest {
         val b = File(root, "b.txt")
         b.writeText("data")
         val candidates = listOf(
-            AttachmentRecord("a.txt", "text/plain", a.absolutePath),
-            AttachmentRecord("b.txt", "text/plain", b.absolutePath)
+            AttachmentCandidate("a.txt", "text/plain", a.absolutePath),
+            AttachmentCandidate("b.txt", "text/plain", b.absolutePath)
         )
         val result = validateAttachmentBatch(candidates, root)
         assertNotNull(result)
@@ -524,8 +533,8 @@ class AttachmentStorageManagerPathTest {
         valid.writeText("data")
         val missing = File(root, "missing.txt")
         val candidates = listOf(
-            AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
-            AttachmentRecord("missing.txt", "text/plain", missing.absolutePath)
+            AttachmentCandidate("valid.txt", "text/plain", valid.absolutePath),
+            AttachmentCandidate("missing.txt", "text/plain", missing.absolutePath)
         )
         val result = validateAttachmentBatch(candidates, root)
         assertNull("expected null batch when one item is unavailable", result)
@@ -540,8 +549,8 @@ class AttachmentStorageManagerPathTest {
         val dir = File(root, "subdir")
         dir.mkdirs()
         val candidates = listOf(
-            AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
-            AttachmentRecord("subdir", "inode/directory", dir.absolutePath)
+            AttachmentCandidate("valid.txt", "text/plain", valid.absolutePath),
+            AttachmentCandidate("subdir", "inode/directory", dir.absolutePath)
         )
         val result = validateAttachmentBatch(candidates, root)
         assertNull("expected null batch when one item is a directory", result)
@@ -565,11 +574,38 @@ class AttachmentStorageManagerPathTest {
         }
         if (created) {
             val candidates = listOf(
-                AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
-                AttachmentRecord("evil_link", "text/plain", symlink.absolutePath)
+                AttachmentCandidate("valid.txt", "text/plain", valid.absolutePath),
+                AttachmentCandidate("evil_link", "text/plain", symlink.absolutePath)
             )
             val result = validateAttachmentBatch(candidates, root)
             assertNull("expected null batch when one item is a symlink", result)
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch one broken symlink rejects whole batch`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val valid = File(root, "valid.txt")
+        valid.writeText("data")
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val missingFile = File(outsideDir, "nonexistent.txt")
+        val symlink = File(root, "broken_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(missingFile.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val candidates = listOf(
+                AttachmentCandidate("valid.txt", "text/plain", valid.absolutePath),
+                AttachmentCandidate("broken_link", "text/plain", symlink.absolutePath)
+            )
+            val result = validateAttachmentBatch(candidates, root)
+            assertNull("expected null batch when one item is a broken symlink", result)
             Files.delete(symlink.toPath())
         }
         root.deleteRecursively()
@@ -585,8 +621,8 @@ class AttachmentStorageManagerPathTest {
         val outsideFile = File(outsideDir, "outside.txt")
         outsideFile.writeText("data")
         val candidates = listOf(
-            AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
-            AttachmentRecord("outside.txt", "text/plain", outsideFile.absolutePath)
+            AttachmentCandidate("valid.txt", "text/plain", valid.absolutePath),
+            AttachmentCandidate("outside.txt", "text/plain", outsideFile.absolutePath)
         )
         val result = validateAttachmentBatch(candidates, root)
         assertNull("expected null batch when one item is outside root", result)
@@ -600,8 +636,8 @@ class AttachmentStorageManagerPathTest {
         val f = File(root, "dup.txt")
         f.writeText("data")
         val candidates = listOf(
-            AttachmentRecord("dup.txt", "text/plain", f.absolutePath),
-            AttachmentRecord("dup.txt", "text/plain", f.absolutePath)
+            AttachmentCandidate("dup.txt", "text/plain", f.absolutePath),
+            AttachmentCandidate("dup.txt", "text/plain", f.absolutePath)
         )
         val result = validateAttachmentBatch(candidates, root)
         assertNotNull(result)
@@ -618,7 +654,7 @@ class AttachmentStorageManagerPathTest {
             File(root, "f$i.txt").also { it.writeText("data$i") }
         }
         val candidates = files.mapIndexed { i, f ->
-            AttachmentRecord("f${i+1}.txt", "text/plain", f.absolutePath)
+            AttachmentCandidate("f${i+1}.txt", "text/plain", f.absolutePath)
         }
         val result = validateAttachmentBatch(candidates, root)
         assertNotNull(result)
@@ -630,6 +666,29 @@ class AttachmentStorageManagerPathTest {
     }
 
     @Test
+    fun `cleanup helper excludes broken symlink v3 record`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val missingFile = File(outsideDir, "nonexistent.txt")
+        val symlink = File(root, "broken_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(missingFile.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val tag = makeV3Tag(AttachmentRecord("broken_link", "text/plain", symlink.absolutePath))
+            val contents = listOf("$tag body")
+            val result = extractReferencedAttachmentPaths(contents, root)
+            assertTrue("expected empty references for broken symlink v3 record", result.isEmpty())
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
     fun `stored v3 message paths match canonical records attachment IDs and multimodal paths`() {
         val root = Files.createTempDirectory("test_attachments").toFile()
         val doc = File(root, "doc.txt")
@@ -637,8 +696,8 @@ class AttachmentStorageManagerPathTest {
         val img = File(root, "photo.jpg")
         img.writeText("image bytes")
         val candidates = listOf(
-            AttachmentRecord("doc.txt", "text/plain", doc.absolutePath),
-            AttachmentRecord("photo.jpg", "image/jpeg", img.absolutePath)
+            AttachmentCandidate("doc.txt", "text/plain", doc.absolutePath),
+            AttachmentCandidate("photo.jpg", "image/jpeg", img.absolutePath)
         )
         val validated = validateAttachmentBatch(candidates, root)!!
         val bodyText = "Hello from test"
@@ -663,7 +722,7 @@ class AttachmentStorageManagerPathTest {
         val doc = File(root, "snapshot_doc.txt")
         doc.writeText("data")
         val candidates = listOf(
-            AttachmentRecord("snapshot_doc.txt", "text/plain", doc.absolutePath)
+            AttachmentCandidate("snapshot_doc.txt", "text/plain", doc.absolutePath)
         )
         val validated = validateAttachmentBatch(candidates, root)!!
         val body = "Snapshot body"
