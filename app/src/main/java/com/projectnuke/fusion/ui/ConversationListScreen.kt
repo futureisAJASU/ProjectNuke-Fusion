@@ -391,7 +391,7 @@ fun ConversationListScreen(
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (_: Exception) {
-                                Toast.makeText(context, "채팅을 삭제하지 못했습니다. 잘� 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "채팅을 삭제하지 못했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                             } finally {
                                 if (deletingConversationId == targetId) {
                                     deletingConversationId = null

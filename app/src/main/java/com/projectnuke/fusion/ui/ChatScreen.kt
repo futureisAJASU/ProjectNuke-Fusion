@@ -67,6 +67,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -215,7 +216,7 @@ private data class ParsedAssistantOutput(
     val thinking: String?,
     val answer: String
 )
-private data class LocalAttachment(
+internal data class LocalAttachment(
     val name: String,
     val mimeType: String,
     val localPath: String
@@ -559,6 +560,11 @@ private val QuickPromptPresets = listOf(
     "표로 정리해 주세요.",
     "반박해 주세요."
 )
+internal data class MessageSubmissionOwner(
+    val token: String,
+    val sourceConversationId: Long
+)
+
 @Composable
 fun ChatScreen(
   conversationId: Long,
@@ -590,7 +596,9 @@ fun ChatScreen(
   var pickerOriginConversationId by remember { mutableStateOf<Long?>(null) }
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
-    var isSubmittingMessage by remember { mutableStateOf(false) }
+    var activeSubmission by remember { mutableStateOf<MessageSubmissionOwner?>(null) }
+    val isSubmittingMessage by derivedStateOf { activeSubmission != null }
+    var isImportingAttachments by remember { mutableStateOf(false) }
     var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }
     var streamingAssistantText by remember { mutableStateOf<String?>(null) }
     var streamingMetricsLine by remember { mutableStateOf<String?>(null) }
@@ -743,9 +751,12 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val currentConversationId by rememberUpdatedState(conversationId)
     BackHandler(
-        enabled = showModelDialog || showAdvancedSettingsDialog || showDeleteChatDialog || inChatSearchMode || isGenerating
+        enabled = showModelDialog || showAdvancedSettingsDialog || showDeleteChatDialog || inChatSearchMode || isGenerating || activeSubmission != null || isImportingAttachments
     ) {
         when {
+            activeSubmission != null || isImportingAttachments -> {
+                Toast.makeText(context, "처리 중입니다.", Toast.LENGTH_SHORT).show()
+            }
             showDeleteChatDialog -> showDeleteChatDialog = false
             showAdvancedSettingsDialog -> showAdvancedSettingsDialog = false
             showModelDialog -> showModelDialog = false
@@ -824,7 +835,6 @@ fun ChatScreen(
         // switch does not show the previous conversation's tokens.
         val saved = chatViewModel.state(conversationId)
         isGenerating = saved.isGenerating
-        isSubmittingMessage = false
         streamingAssistantText = saved.streamingText
         streamingMetricsLine = saved.streamingMetricsLine
         generationStatus = saved.generationStatus
@@ -847,7 +857,6 @@ fun ChatScreen(
             val cur = states[conversationId] ?: return@collect
             if (currentConversationId == conversationId) {
                 isGenerating = cur.isGenerating
-                isSubmittingMessage = false
                 streamingAssistantText = cur.streamingText
                 streamingMetricsLine = cur.streamingMetricsLine
                 generationStatus = cur.generationStatus
@@ -911,8 +920,16 @@ fun ChatScreen(
         val originalAssistantText = visibleSearchText(context, targetMessage.content)
         val isStyleRegeneration = action.instruction != null
         val attachmentsToSend = if (isStyleRegeneration) emptyList() else parsedUserMessage.attachments
-        if (!isStyleRegeneration && parsedUserMessage.unavailableAttachments.isNotEmpty()) {
+        if (shouldBlockRetryForUnavailableAttachments(parsedUserMessage.unavailableAttachments.size, isStyleRegeneration)) {
             Toast.makeText(context, "원본 첨부 파일을 찾을 수 없어 답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!isStyleRegeneration && shouldBlockExternalAttachments(generationMode, attachmentsToSend.isNotEmpty())) {
+            Toast.makeText(
+                context,
+                "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다.",
+                Toast.LENGTH_LONG
+            ).show()
             return
         }
         val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
@@ -939,9 +956,6 @@ fun ChatScreen(
             snapshot.take(previousUserIndex).map { ChatMessage(role = it.role, content = it.content) },
             historyAttachmentRoot
         )
-        val externalApiAttachmentBlocked = generationMode == ChatGenerationMode.EXTERNAL_AI_API &&
-            attachmentsToSend.isNotEmpty()
-
 if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
             val requestId = UUID.randomUUID().toString()
             val capturedSettings = generationSettings.copy(
@@ -1512,7 +1526,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 ),
                 reasoningEnabled = reasoningEnabled,
                 webSearchPolicy = GenerationRequestSnapshot.resolveWebSearchPolicy(
-                    externalApiAttachmentBlocked = externalApiAttachmentBlocked,
+                    externalApiAttachmentBlocked = false,
                     webSearchEnabled = webSearchEnabled,
                     autoWebSearchSuggested = shouldAutoUseWebSearch(previousUserText),
                 ),
@@ -2092,12 +2106,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        if (isImportingAttachments) return@rememberLauncherForActivityResult
+        isImportingAttachments = true
 
         val originConversationId = pickerOriginConversationId
         if (originConversationId != conversationId) {
-            // Conversation switched between launch and result. Refuse to append
-            // to a different conversation. Clean up the (possibly pending) URI
-            // grants we no longer intend to keep.
             uris.forEach { uri ->
                 runCatching {
                     context.contentResolver.releasePersistableUriPermission(
@@ -2107,68 +2120,77 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 }
             }
             Toast.makeText(context, "대화가 변경되어 첨부를 취소했습니다.", Toast.LENGTH_SHORT).show()
+            isImportingAttachments = false
             return@rememberLauncherForActivityResult
         }
 
         Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
 
         scope.launch {
-            val remainingSlots = (5 - pendingAttachments.size).coerceAtLeast(0)
-            val urisToProcess = uris.take(remainingSlots)
-            val skippedByLimit = (uris.size - urisToProcess.size).coerceAtLeast(0)
-
-            var success = 0
-            var failed = 0
-            urisToProcess.forEach { uri ->
-                try {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                } catch (_: SecurityException) {
-                }
-
-                val displayName = getDisplayNameFromUri(context, uri)
-                val mimeType = context.contentResolver.getType(uri)
-                    ?: "application/octet-stream"
-
-                val copiedFile = copyUriToAttachmentFile(
-                    context = context,
-                    uri = uri,
-                    displayName = displayName
+            try {
+                val capacity = computePickerCapacity(
+                    pendingCount = pendingAttachments.size,
+                    selectedCount = uris.size
                 )
+                val urisToProcess = uris.take(capacity.toProcess)
+                val skippedByLimit = capacity.skipped
 
-                if (conversationId != originConversationId) {
-                    // Conversation switched during copy; delete the orphan.
-                    copiedFile?.delete()
-                    return@launch
-                }
-
-                if (copiedFile != null) {
-                    pendingAttachments.add(
-                        LocalAttachment(
-                            name = displayName,
-                            mimeType = mimeType,
-                            localPath = copiedFile.absolutePath
+                var success = 0
+                var failed = 0
+                urisToProcess.forEach { uri ->
+                    try {
+                        context.contentResolver.takePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
                         )
-                    )
-                    success++
-                } else {
-                    failed++
-                }
-            }
+                    } catch (_: SecurityException) {
+                    }
 
-            when {
-                success > 0 && failed == 0 && skippedByLimit == 0 ->
-                    Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
-                success > 0 && failed > 0 && skippedByLimit == 0 ->
-                    Toast.makeText(context, "첨부 일부 실패 ($success 성공, $failed 실패)", Toast.LENGTH_SHORT).show()
-                success > 0 && skippedByLimit > 0 ->
-                    Toast.makeText(context, "최대 5개까지 첨부할 수 있어 ${skippedByLimit}개를 제외했습니다. (${success}개 추가)", Toast.LENGTH_LONG).show()
-                skippedByLimit > 0 && success == 0 ->
-                    Toast.makeText(context, "최대 5개까지 첨부할 수 있어 ${skippedByLimit}개를 제외했습니다.", Toast.LENGTH_LONG).show()
-                else ->
-                    Toast.makeText(context, "첨부 실패", Toast.LENGTH_SHORT).show()
+                    val displayName = getDisplayNameFromUri(context, uri)
+                    val mimeType = context.contentResolver.getType(uri)
+                        ?: "application/octet-stream"
+
+                    val copiedFile = copyUriToAttachmentFile(
+                        context = context,
+                        uri = uri,
+                        displayName = displayName
+                    )
+
+                    if (conversationId != originConversationId) {
+                        copiedFile?.delete()
+                        return@launch
+                    }
+
+                    if (copiedFile != null) {
+                        pendingAttachments.add(
+                            LocalAttachment(
+                                name = displayName,
+                                mimeType = mimeType,
+                                localPath = copiedFile.absolutePath
+                            )
+                        )
+                        success++
+                    } else {
+                        failed++
+                    }
+                }
+
+                when {
+                    success > 0 && failed == 0 && skippedByLimit == 0 ->
+                        Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
+                    success > 0 && failed > 0 && skippedByLimit == 0 ->
+                        Toast.makeText(context, "첨부 일부 실패 ($success 성공, $failed 실패)", Toast.LENGTH_SHORT).show()
+                    success > 0 && failed == 0 && skippedByLimit > 0 ->
+                        Toast.makeText(context, "최대 5개까지 첨부할 수 있어 ${skippedByLimit}개를 제외했습니다. (${success}개 추가)", Toast.LENGTH_LONG).show()
+                    success > 0 && failed > 0 && skippedByLimit > 0 ->
+                        Toast.makeText(context, "첨부 일부 실패 ($success 성공, $failed 실패), ${skippedByLimit}개는 최대 한도로 제외", Toast.LENGTH_LONG).show()
+                    skippedByLimit > 0 && success == 0 ->
+                        Toast.makeText(context, "최대 5개까지 첨부할 수 있어 ${skippedByLimit}개를 제외했습니다.", Toast.LENGTH_LONG).show()
+                    else ->
+                        Toast.makeText(context, "첨부 실패", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                isImportingAttachments = false
             }
         }
     }
@@ -2262,22 +2284,24 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 ChatInputBar(
                     value = input,
                     onValueChange = { input = it },
-                    enabled = !isGenerating && !isSubmittingMessage,
+                    enabled = !isGenerating && !isSubmittingMessage && !isImportingAttachments,
                     isGenerating = isGenerating,
                     isSubmittingMessage = isSubmittingMessage,
+                    hasAttachments = pendingAttachments.isNotEmpty(),
+                    isImportingAttachments = isImportingAttachments,
                     pendingAttachments = pendingAttachments,
                     onRemoveAttachment = { attachment ->
-                        if (isGenerating || isSubmittingMessage) return@ChatInputBar
+                        if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
                         AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
                         pendingAttachments.remove(attachment)
                     },
                     onAppendQuickPrompt = { preset ->
-                        if (isGenerating || isSubmittingMessage) return@ChatInputBar
+                        if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
                         input = appendQuickPrompt(input, preset)
                     },
                     onPlusClick = {
-                        if (isGenerating || isSubmittingMessage) return@ChatInputBar
-                        if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+                        if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
+                        if (shouldBlockExternalAttachments(generationMode, hasAttachments = true)) {
                             Toast.makeText(
                                 context,
                                 "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다.",
@@ -2308,7 +2332,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         }
                     },
                     onSendClick = sendClick@ {
-                        val userInput = input.trim()
+                        if (activeSubmission != null) return@sendClick
+                        val capturedRawInput = input
+                        val capturedMessageText = capturedRawInput.trim()
+                        val userInput = capturedMessageText
                         val pendingList = pendingAttachments.toList()
 
                         if (userInput.isNotEmpty() || pendingList.isNotEmpty()) {
@@ -2368,21 +2395,24 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 attachments = attachmentsToSend
                             )
 
-                            val capturedDraftText = userInput
                             val capturedDraftAttachments = attachmentsToSend.toList()
-                            val capturedPendingIdentities = pendingList.toList()
 
-                            isSubmittingMessage = true
+                            val owner = MessageSubmissionOwner(
+                                token = UUID.randomUUID().toString(),
+                                sourceConversationId = conversationId
+                            )
+                            activeSubmission = owner
 
                             scope.launch {
                                 var activeConversationId = conversationId
                                 var userMessageInserted = false
+                                var conversationWasCreated = false
 
                                 try {
                                     val now = System.currentTimeMillis()
 
                                     if (activeConversationId == 0L) {
-                                        val title = capturedDraftText.take(24).ifBlank { "새 대화" }
+                                        val title = capturedMessageText.take(24).ifBlank { "새 대화" }
 
                                         activeConversationId = dao.insertConversation(
                                             ConversationEntity(
@@ -2391,8 +2421,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 updatedAt = now
                                             )
                                         )
-
-                                        onConversationCreated(activeConversationId)
+                                        conversationWasCreated = true
                                     }
 
                                     dao.insertMessage(
@@ -2404,21 +2433,28 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         )
                                     )
                                     userMessageInserted = true
+
+                                    if (conversationWasCreated) {
+                                        onConversationCreated(activeConversationId)
+                                    }
                                     capturedDraftAttachments.forEach { attachment ->
                                         AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
                                     }
 
-                                    dao.updateConversationTime(activeConversationId, now)
+                                    try {
+                                        dao.updateConversationTime(activeConversationId, now)
+                                    } catch (e: Exception) {
+                                        Log.e("FusionEngine", "Failed to update conversation time", e)
+                                    }
 
-                                    if (input == capturedDraftText) {
+                                    if (input == capturedRawInput) {
                                         input = ""
                                     }
-                                    if (pendingAttachments.toList() == capturedPendingIdentities) {
-                                        pendingAttachments.clear()
+                                    capturedDraftAttachments.map { LocalAttachment(it.name, it.mimeType, it.localPath) }.forEach { attachment ->
+                                        pendingAttachments.remove(attachment)
                                     }
 
                                     isGenerating = true
-                                    isSubmittingMessage = false
                                     streamingAssistantText = null
                                     streamingMetricsLine = null
                                     generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
@@ -2605,6 +2641,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                             }
                                         }
+                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
                                         return@launch
                                     }
 
@@ -2877,6 +2914,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             chatViewModel.finishRequestState(s.conversationId, snapshot.requestId)
                                         }
                                     }
+                                    if (activeSubmission?.token == owner.token) { activeSubmission = null }
                                 } catch (e: Exception) {
                                     if (!userMessageInserted && attachmentsToSend.isNotEmpty()) {
                                         attachmentsToSend.forEach { attachment ->
@@ -2890,11 +2928,20 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     Log.e("FusionEngine", "Chat generation failed", e)
                                     if (e is kotlinx.coroutines.CancellationException) throw e
                                     isGenerating = false
-                                    isSubmittingMessage = false
+                                    if (activeSubmission?.token == owner.token) { activeSubmission = null }
                                     generationStatus = null
                                     streamingAssistantText = null
                                     streamingMetricsLine = null
                                     if (!userMessageInserted) {
+                                        if (conversationWasCreated) {
+                                            withContext(NonCancellable) {
+                                                try {
+                                                    dao.deleteConversation(activeConversationId)
+                                                } catch (inner: Exception) {
+                                                    Log.e("FusionEngine", "Failed to delete orphan conversation", inner)
+                                                }
+                                            }
+                                        }
                                         Toast.makeText(context, "메시지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                     }
                                 }
@@ -4613,6 +4660,8 @@ private fun ChatInputBar(
     enabled: Boolean,
     isGenerating: Boolean,
     isSubmittingMessage: Boolean,
+    hasAttachments: Boolean,
+    isImportingAttachments: Boolean,
     onPlusClick: () -> Unit,
     onMicClick: () -> Unit,
     onVoiceModeClick: () -> Unit,
@@ -4659,10 +4708,14 @@ private fun ChatInputBar(
                     )
                 }
             }
+            if (quickPromptExpanded && !enabled) {
+                quickPromptExpanded = false
+            }
             if (quickPromptExpanded) {
                 QuickPromptChips(
                     presets = QuickPromptPresets,
-                    onChipClick = onAppendQuickPrompt
+                    onChipClick = onAppendQuickPrompt,
+                    enabled = enabled
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -4685,7 +4738,8 @@ private fun ChatInputBar(
                 ) {
                         CircleMiniButton(
                             text = "+",
-                            onClick = onPlusClick
+                            onClick = onPlusClick,
+                            enabled = enabled
                         )
 
                         Spacer(modifier = Modifier.width(8.dp))
@@ -4717,57 +4771,89 @@ private fun ChatInputBar(
 
                         Spacer(modifier = Modifier.width(8.dp))
 
-                        if (isSubmittingMessage) {
-                            Surface(
-                                modifier = Modifier.size(42.dp),
-                                shape = CircleShape,
-                                color = PanelBg
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize(),
-                                    contentAlignment = Alignment.Center
+                        when (resolveComposerPrimaryAction(
+                            isGenerating = isGenerating,
+                            isSubmittingMessage = isSubmittingMessage,
+                            isImportingAttachments = isImportingAttachments,
+                            composerText = value,
+                            hasAttachments = hasAttachments
+                        )) {
+                            ComposerPrimaryAction.ImportProgress,
+                            ComposerPrimaryAction.SubmitProgress -> {
+                                Surface(
+                                    modifier = Modifier.size(42.dp),
+                                    shape = CircleShape,
+                                    color = PanelBg
                                 ) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(22.dp),
-                                        color = TextSecondary,
-                                        strokeWidth = 2.dp
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize(),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(22.dp),
+                                            color = TextSecondary,
+                                            strokeWidth = 2.dp
+                                        )
+                                    }
                                 }
                             }
-                        } else if (isGenerating) {
-                            Surface(
-                                modifier = Modifier.size(42.dp),
-                                shape = CircleShape,
-                                color = DangerRed
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clickable { onStopClick() },
-                                    contentAlignment = Alignment.Center
+                            ComposerPrimaryAction.Stop -> {
+                                Surface(
+                                    modifier = Modifier.size(42.dp),
+                                    shape = CircleShape,
+                                    color = DangerRed
                                 ) {
-                                    Text(
-                                        text = "■",
-                                        color = Color.White,
-                                        fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .clickable { onStopClick() },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = "■",
+                                            color = Color.White,
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
                                 }
                             }
-                        } else if (value.isBlank() && pendingAttachments.isEmpty()) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                CircleMiniIconButton(
-                                    icon = Icons.Rounded.Mic,
-                                    contentDescription = "음성 입력",
-                                    onClick = onMicClick,
-                                    enabled = enabled
-                                )
+                            ComposerPrimaryAction.VoiceActions -> {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    CircleMiniIconButton(
+                                        icon = Icons.Rounded.Mic,
+                                        contentDescription = "음성 입력",
+                                        onClick = onMicClick,
+                                        enabled = enabled
+                                    )
 
-                                Spacer(modifier = Modifier.width(8.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
 
+                                    Surface(
+                                        modifier = Modifier.size(42.dp),
+                                        shape = CircleShape,
+                                        color = Color.White
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .clickable(enabled = enabled) { onVoiceModeClick() },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(
+                                                text = "◉",
+                                                color = Color.Black,
+                                                fontSize = 18.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            ComposerPrimaryAction.Send -> {
                                 Surface(
                                     modifier = Modifier.size(42.dp),
                                     shape = CircleShape,
@@ -4776,38 +4862,18 @@ private fun ChatInputBar(
                                     Box(
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .clickable(enabled = enabled) { onVoiceModeClick() },
+                                            .clickable(enabled = enabled) {
+                                                onSendClick()
+                                            },
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = "◉",
+                                            text = "↑",
                                             color = Color.Black,
-                                            fontSize = 18.sp,
+                                            fontSize = 20.sp,
                                             fontWeight = FontWeight.Bold
                                         )
                                     }
-                                }
-                            }
-                        } else {
-                            Surface(
-                                modifier = Modifier.size(42.dp),
-                                shape = CircleShape,
-                                color = Color.White
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clickable(enabled = enabled) {
-                                            onSendClick()
-                                        },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "↑",
-                                        color = Color.Black,
-                                        fontSize = 20.sp,
-                                        fontWeight = FontWeight.Bold
-                                    )
                                 }
                             }
                         }
@@ -4822,7 +4888,8 @@ private fun ChatInputBar(
 @Composable
 private fun QuickPromptChips(
     presets: List<String>,
-    onChipClick: (String) -> Unit
+    onChipClick: (String) -> Unit,
+    enabled: Boolean = true
 ) {
     Row(
         modifier = Modifier
@@ -4834,12 +4901,12 @@ private fun QuickPromptChips(
         presets.forEach { preset ->
             Surface(
                 shape = RoundedCornerShape(16.dp),
-                color = PanelBg,
-                modifier = Modifier.clickable { onChipClick(preset) }
+                color = if (enabled) PanelBg else PanelBg.copy(alpha = 0.5f),
+                modifier = Modifier.clickable(enabled = enabled) { onChipClick(preset) }
             ) {
                 Text(
                     text = preset,
-                    color = TextPrimary,
+                    color = if (enabled) TextPrimary else TextSecondary,
                     fontSize = 12.sp,
                     maxLines = 1,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
@@ -4852,6 +4919,7 @@ private fun QuickPromptChips(
 internal enum class ComposerPrimaryAction {
     Stop,
     SubmitProgress,
+    ImportProgress,
     VoiceActions,
     Send
 }
@@ -4859,9 +4927,11 @@ internal enum class ComposerPrimaryAction {
 internal fun resolveComposerPrimaryAction(
     isGenerating: Boolean,
     isSubmittingMessage: Boolean,
+    isImportingAttachments: Boolean,
     composerText: String,
     hasAttachments: Boolean
 ): ComposerPrimaryAction {
+    if (isImportingAttachments) return ComposerPrimaryAction.ImportProgress
     if (isSubmittingMessage) return ComposerPrimaryAction.SubmitProgress
     if (isGenerating) return ComposerPrimaryAction.Stop
     if (composerText.isBlank() && !hasAttachments) return ComposerPrimaryAction.VoiceActions
