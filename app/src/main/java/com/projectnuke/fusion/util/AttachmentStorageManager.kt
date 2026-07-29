@@ -4,6 +4,7 @@ import android.content.Context
 import com.projectnuke.fusion.data.ChatDao
 import com.projectnuke.fusion.util.AttachmentMessageCodec
 import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,7 +26,7 @@ data class CleanupResult(
     val deletedFiles: Int
 )
 
-fun extractReferencedAttachmentPaths(
+internal fun extractReferencedAttachmentPaths(
     contents: List<String>,
     attachmentRoot: File
 ): Set<String> {
@@ -77,8 +78,9 @@ object AttachmentStorageManager {
         targetFile.exists() && targetFile.delete()
     }
 
-fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassification {
+    internal fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassification {
         if (path.isBlank()) return AttachmentClassification.Suspicious
+        if (Files.isSymbolicLink(File(path).toPath())) return AttachmentClassification.Suspicious
         val targetCanonical = safeCanonicalPath(path) ?: return AttachmentClassification.Suspicious
         val dirCanonical = safeCanonicalPath(attachmentRoot.absolutePath)
             ?: return AttachmentClassification.Suspicious
@@ -91,7 +93,7 @@ fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassifica
         return AttachmentClassification.Trusted(targetFile)
     }
 
-    fun resolveManagedAttachment(attachmentRoot: File, path: String): File? {
+    internal fun resolveManagedAttachment(attachmentRoot: File, path: String): File? {
         return when (val result = classifyAttachment(attachmentRoot, path)) {
             is AttachmentClassification.Trusted -> result.file
             else -> null
@@ -170,4 +172,24 @@ fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassifica
     private fun isInAttachmentDirectory(path: String, attachmentDirCanonical: String): Boolean {
         return path == attachmentDirCanonical || path.startsWith("$attachmentDirCanonical${File.separator}")
     }
+}
+
+internal fun validateAttachmentBatch(
+    candidates: List<AttachmentRecord>,
+    attachmentRoot: File
+): List<AttachmentRecord>? {
+    val result = mutableListOf<AttachmentRecord>()
+    for (candidate in candidates) {
+        when (val classification = AttachmentStorageManager.classifyAttachment(attachmentRoot, candidate.localPath)) {
+            is AttachmentClassification.Trusted -> {
+                result.add(AttachmentRecord(
+                    name = candidate.name,
+                    mimeType = candidate.mimeType,
+                    localPath = classification.file.canonicalPath
+                ))
+            }
+            else -> return null
+        }
+    }
+    return result
 }

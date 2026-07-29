@@ -2,6 +2,7 @@ package com.projectnuke.fusion.util
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -333,7 +334,7 @@ class AttachmentStorageManagerPathTest {
             false
         }
         if (created) {
-            val tag = makeV3Tag(AttachmentRecord("evil_link", "text/plain", symlink.canonicalPath))
+            val tag = makeV3Tag(AttachmentRecord("evil_link", "text/plain", symlink.absolutePath))
             val contents = listOf("$tag body")
             val result = extractReferencedAttachmentPaths(contents, root)
             assertTrue(result.isEmpty())
@@ -382,20 +383,295 @@ class AttachmentStorageManagerPathTest {
         val outsideDir = Files.createTempDirectory("outside").toFile()
         val outsideFile = File(outsideDir, "secret.txt")
         outsideFile.writeText("secret data")
-        val symlinkTarget = outsideFile.canonicalPath
         val symlink = File(root, "evil_link")
         val created = try {
-            Files.createSymbolicLink(symlink.toPath(), Path.of(symlinkTarget))
+            Files.createSymbolicLink(symlink.toPath(), Path.of(outsideFile.canonicalPath))
             true
         } catch (_: Exception) {
             false
         }
         if (created) {
-            val result = AttachmentStorageManager.resolveManagedAttachment(root, symlink.canonicalPath)
+            val result = AttachmentStorageManager.resolveManagedAttachment(root, symlink.absolutePath)
             assertNull(result)
             Files.delete(symlink.toPath())
         }
         root.deleteRecursively()
         outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `existing symlink to outside regular file returns Suspicious`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val outsideFile = File(outsideDir, "secret.txt")
+        outsideFile.writeText("secret data")
+        val symlink = File(root, "evil_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(outsideFile.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val result = AttachmentStorageManager.classifyAttachment(root, symlink.absolutePath)
+            assertTrue("expected Suspicious for existing symlink to outside file", result is AttachmentClassification.Suspicious)
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `broken symlink to outside missing file returns Suspicious`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val missingFile = File(outsideDir, "nonexistent.txt")
+        val symlink = File(root, "broken_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(missingFile.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val result = AttachmentStorageManager.classifyAttachment(root, symlink.absolutePath)
+            assertTrue("expected Suspicious for broken symlink", result is AttachmentClassification.Suspicious)
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `symlink to outside directory returns Suspicious`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val symlink = File(root, "dir_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(outsideDir.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val result = AttachmentStorageManager.classifyAttachment(root, symlink.absolutePath)
+            assertTrue("expected Suspicious for symlink to directory", result is AttachmentClassification.Suspicious)
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `non-symlink missing managed file remains Unavailable`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val missing = File(root, "normal_missing.txt")
+        val result = AttachmentStorageManager.classifyAttachment(root, missing.absolutePath)
+        assertTrue("expected Unavailable for regular missing managed file", result is AttachmentClassification.Unavailable)
+        assertEquals(missing.canonicalPath, (result as AttachmentClassification.Unavailable).canonicalPath)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `cleanup helper excludes symlink v3 record`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val outsideFile = File(outsideDir, "secret.txt")
+        outsideFile.writeText("secret data")
+        val symlink = File(root, "evil_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(outsideFile.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val tag = makeV3Tag(AttachmentRecord("evil_link", "text/plain", symlink.absolutePath))
+            val contents = listOf("$tag body")
+            val result = extractReferencedAttachmentPaths(contents, root)
+            assertTrue("expected empty references for symlink v3 record", result.isEmpty())
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch all trusted returns canonical records in order`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val a = File(root, "a.txt")
+        a.writeText("data")
+        val b = File(root, "b.txt")
+        b.writeText("data")
+        val candidates = listOf(
+            AttachmentRecord("a.txt", "text/plain", a.absolutePath),
+            AttachmentRecord("b.txt", "text/plain", b.absolutePath)
+        )
+        val result = validateAttachmentBatch(candidates, root)
+        assertNotNull(result)
+        assertEquals(2, result!!.size)
+        assertEquals(a.canonicalPath, result[0].localPath)
+        assertEquals(b.canonicalPath, result[1].localPath)
+        assertEquals("a.txt", result[0].name)
+        assertEquals("b.txt", result[1].name)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch one unavailable rejects whole batch`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val valid = File(root, "valid.txt")
+        valid.writeText("data")
+        val missing = File(root, "missing.txt")
+        val candidates = listOf(
+            AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
+            AttachmentRecord("missing.txt", "text/plain", missing.absolutePath)
+        )
+        val result = validateAttachmentBatch(candidates, root)
+        assertNull("expected null batch when one item is unavailable", result)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch one directory rejects whole batch`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val valid = File(root, "valid.txt")
+        valid.writeText("data")
+        val dir = File(root, "subdir")
+        dir.mkdirs()
+        val candidates = listOf(
+            AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
+            AttachmentRecord("subdir", "inode/directory", dir.absolutePath)
+        )
+        val result = validateAttachmentBatch(candidates, root)
+        assertNull("expected null batch when one item is a directory", result)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch one symlink rejects whole batch`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val valid = File(root, "valid.txt")
+        valid.writeText("data")
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val outsideFile = File(outsideDir, "secret.txt")
+        outsideFile.writeText("data")
+        val symlink = File(root, "evil_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(outsideFile.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val candidates = listOf(
+                AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
+                AttachmentRecord("evil_link", "text/plain", symlink.absolutePath)
+            )
+            val result = validateAttachmentBatch(candidates, root)
+            assertNull("expected null batch when one item is a symlink", result)
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch one outside-root item rejects whole batch`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val valid = File(root, "valid.txt")
+        valid.writeText("data")
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val outsideFile = File(outsideDir, "outside.txt")
+        outsideFile.writeText("data")
+        val candidates = listOf(
+            AttachmentRecord("valid.txt", "text/plain", valid.absolutePath),
+            AttachmentRecord("outside.txt", "text/plain", outsideFile.absolutePath)
+        )
+        val result = validateAttachmentBatch(candidates, root)
+        assertNull("expected null batch when one item is outside root", result)
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch duplicate valid candidates remain deterministic`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val f = File(root, "dup.txt")
+        f.writeText("data")
+        val candidates = listOf(
+            AttachmentRecord("dup.txt", "text/plain", f.absolutePath),
+            AttachmentRecord("dup.txt", "text/plain", f.absolutePath)
+        )
+        val result = validateAttachmentBatch(candidates, root)
+        assertNotNull(result)
+        assertEquals(2, result!!.size)
+        assertEquals(f.canonicalPath, result[0].localPath)
+        assertEquals(f.canonicalPath, result[1].localPath)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `validateAttachmentBatch no candidate silently omitted`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val files = (1..5).map { i ->
+            File(root, "f$i.txt").also { it.writeText("data$i") }
+        }
+        val candidates = files.mapIndexed { i, f ->
+            AttachmentRecord("f${i+1}.txt", "text/plain", f.absolutePath)
+        }
+        val result = validateAttachmentBatch(candidates, root)
+        assertNotNull(result)
+        assertEquals(5, result!!.size)
+        candidates.zip(result).forEach { (expected, actual) ->
+            assertEquals(expected.name, actual.name)
+        }
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `stored v3 message paths match canonical records attachment IDs and multimodal paths`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val doc = File(root, "doc.txt")
+        doc.writeText("data")
+        val img = File(root, "photo.jpg")
+        img.writeText("image bytes")
+        val candidates = listOf(
+            AttachmentRecord("doc.txt", "text/plain", doc.absolutePath),
+            AttachmentRecord("photo.jpg", "image/jpeg", img.absolutePath)
+        )
+        val validated = validateAttachmentBatch(candidates, root)!!
+        val bodyText = "Hello from test"
+        val serialized = AttachmentMessageCodec.serializeAttachmentMessage(validated, bodyText)
+        assertFalse("v3 message must not contain v2 tag", serialized.contains("fusion_attachment_v2"))
+        val parsed = AttachmentMessageCodec.parseTrustedAttachmentMessage(serialized, root)
+        assertFalse("envelope must not be suspicious", parsed.suspiciousEnvelope)
+        assertEquals("parsed record count matches validated", validated.size, parsed.records.size)
+        validated.zip(parsed.records).forEach { (expected, actual) ->
+            assertEquals("canonical path match", expected.localPath, actual.localPath)
+        }
+        val attachmentIds = validated.map { it.localPath }
+        assertEquals("attachment IDs match validated canonical paths", validated.map { it.localPath }, attachmentIds)
+        val multimodalImagePaths = validated.filter { it.mimeType.startsWith("image/") }.map { it.localPath }
+        assertEquals("multimodal image paths match image record canonical paths", listOf(img.canonicalPath), multimodalImagePaths)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `stored v3 message round-trip preserves snapshot paths`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val doc = File(root, "snapshot_doc.txt")
+        doc.writeText("data")
+        val candidates = listOf(
+            AttachmentRecord("snapshot_doc.txt", "text/plain", doc.absolutePath)
+        )
+        val validated = validateAttachmentBatch(candidates, root)!!
+        val body = "Snapshot body"
+        val serialized = AttachmentMessageCodec.serializeAttachmentMessage(validated, body)
+        val parsed = AttachmentMessageCodec.parseTrustedAttachmentMessage(serialized, root)
+        assertEquals(1, parsed.records.size)
+        assertEquals(validated[0].localPath, parsed.records[0].localPath)
+        assertEquals(body, parsed.body.trim())
+        root.deleteRecursively()
     }
 }

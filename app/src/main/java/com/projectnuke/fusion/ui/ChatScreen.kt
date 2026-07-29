@@ -125,6 +125,7 @@ import com.projectnuke.fusion.util.AttachmentMessageCodec
 import com.projectnuke.fusion.util.AttachmentRecord
 import com.projectnuke.fusion.util.AttachmentClassification
 import com.projectnuke.fusion.util.AttachmentStorageManager
+import com.projectnuke.fusion.util.validateAttachmentBatch
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryRiskLevel
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
@@ -2287,23 +2288,15 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             }
 
                             val attachmentDir = AttachmentStorageManager.getAttachmentDirectory(context)
-                            val classificationResults = pendingList.map { attachment ->
-                                attachment to AttachmentStorageManager.classifyAttachment(attachmentDir, attachment.localPath)
-                            }
-                            if (classificationResults.any { it.second !is AttachmentClassification.Trusted }) {
+                            val pendingRecords = pendingList.map { AttachmentRecord(it.name, it.mimeType, it.localPath) }
+                            val attachmentsToSend = validateAttachmentBatch(pendingRecords, attachmentDir)
+                            if (attachmentsToSend == null) {
                                 Toast.makeText(
                                     context,
                                     "일부 첨부 파일을 찾을 수 없습니다. 다시 첨부해 주세요.",
                                     Toast.LENGTH_SHORT
                                 ).show()
                                 return@sendClick
-                            }
-                            val attachmentsToSend = classificationResults.map { (attachment, classification) ->
-                                AttachmentRecord(
-                                    name = attachment.name,
-                                    mimeType = attachment.mimeType,
-                                    localPath = (classification as AttachmentClassification.Trusted).file.canonicalPath
-                                )
                             }
                             val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
                             val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
