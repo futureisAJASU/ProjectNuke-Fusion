@@ -263,10 +263,21 @@ class AttachmentMessageCodecTest {
 
     @Test
     fun `dangling escape in v2 rejected`() {
-        val body = "<fusion_attachment_v2>name\\|mime|path</fusion_attachment_v2> after"
+        val body = "<fusion_attachment_v2>name|mime|path\\</fusion_attachment_v2> after"
         val parsed = codec.parseAttachmentMessage(body)
         assertEquals(0, parsed.records.size)
         assertEquals(body, parsed.body)
+    }
+
+    @Test
+    fun `trailing garbage in v3 JSON rejected`() {
+        val payload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+            """{"n":"a","t":"b","p":"/path"}extra""".toByteArray(Charsets.UTF_8)
+        )
+        val serialized = "<fusion_attachment_v3>$payload</fusion_attachment_v3> body"
+        val parsed = codec.parseAttachmentMessage(serialized)
+        assertEquals(0, parsed.records.size)
+        assertEquals(serialized, parsed.body)
     }
 
     @Test

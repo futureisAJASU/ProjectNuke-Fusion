@@ -927,7 +927,14 @@ fun ChatScreen(
         }
         val historyBeforeUser = snapshot
             .take(previousUserIndex)
-            .map { message -> ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content) }
+            .map { message ->
+                val content = when (message.role) {
+                    "user" -> AttachmentMessageCodec.parseAttachmentMessage(message.content).body
+                    "assistant" -> visibleAssistantHistoryText(message.content)
+                    else -> message.content
+                }
+                ChatMessage(role = message.role, content = content)
+            }
         val externalApiAttachmentBlocked = generationMode == ChatGenerationMode.EXTERNAL_AI_API &&
             attachmentsToSend.isNotEmpty()
 
@@ -2282,7 +2289,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             userInput
                         }
                         val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
-                        val capturedMessages = messages
+                        val capturedMessages = sanitizeUserHistory(messages)
                         val capturedGenerationMode = generationMode
                         val capturedSelectedModel = selectedModel
                         val capturedSelectedModelPath = selectedModelPath
@@ -10007,6 +10014,16 @@ private fun parseMemoryCandidateLines(raw: String): List<String> {
         }
         .filter { it.isNotBlank() }
         .distinct()
+}
+
+private fun sanitizeUserHistory(messages: List<ChatMessage>): List<ChatMessage> {
+    return messages.map { message ->
+        if (message.role == "user") {
+            ChatMessage(role = "user", content = AttachmentMessageCodec.parseAttachmentMessage(message.content).body)
+        } else {
+            message
+        }
+    }
 }
 
 private fun String.unescapeAttachmentField(): String {

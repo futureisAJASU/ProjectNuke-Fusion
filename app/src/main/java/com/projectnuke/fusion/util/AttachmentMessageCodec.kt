@@ -3,6 +3,7 @@ package com.projectnuke.fusion.util
 import java.util.Base64
 import java.io.File
 import org.json.JSONObject
+import org.json.JSONTokener
 
 data class AttachmentRecord(
     val name: String,
@@ -178,11 +179,17 @@ object AttachmentMessageCodec {
         } catch (_: Exception) {
             return null
         }
-        val jsonObj = try {
-            JSONObject(json)
+        val tokener = JSONTokener(json)
+        val parsed = try {
+            tokener.nextValue()
         } catch (_: Exception) {
             return null
         }
+        if (parsed !is JSONObject) return null
+        while (tokener.more()) {
+            if (!tokener.next().isWhitespace()) return null
+        }
+        val jsonObj = parsed
         if (jsonObj.length() != 3) return null
         if (!jsonObj.has("n") || !jsonObj.has("t") || !jsonObj.has("p")) return null
         if (!(jsonObj.get("n") is String) || !(jsonObj.get("t") is String) || !(jsonObj.get("p") is String)) return null
@@ -196,46 +203,29 @@ object AttachmentMessageCodec {
         val parsed = parseAttachmentMessage(raw)
         if (parsed.records.isEmpty()) return parsed
 
-        val rootCanonical = try {
-            attachmentRoot.canonicalPath
-        } catch (_: Exception) {
-            return ParsedAttachments(emptyList(), raw, suspiciousEnvelope = true)
-        }
-
         val trustedRecords = mutableListOf<AttachmentRecord>()
         val unavailableRecords = mutableListOf<AttachmentRecord>()
         var anySuspicious = false
 
         for (record in parsed.records) {
-            val canonical = try {
-                File(record.localPath).canonicalPath
-            } catch (_: Exception) {
-                anySuspicious = true
-                continue
-            }
-
-            if (canonical == rootCanonical) {
-                anySuspicious = true
-                continue
-            }
-            val prefix = "$rootCanonical${File.separator}"
-            if (!canonical.startsWith(prefix)) {
-                anySuspicious = true
-                continue
-            }
-            val file = File(canonical)
-            if (file.exists() && file.isFile) {
-                trustedRecords.add(AttachmentRecord(
-                    name = record.name,
-                    mimeType = record.mimeType,
-                    localPath = canonical
-                ))
-            } else {
-                unavailableRecords.add(AttachmentRecord(
-                    name = record.name,
-                    mimeType = record.mimeType,
-                    localPath = canonical
-                ))
+            when (val classification = AttachmentStorageManager.classifyAttachment(attachmentRoot, record.localPath)) {
+                is AttachmentClassification.Trusted -> {
+                    trustedRecords.add(AttachmentRecord(
+                        name = record.name,
+                        mimeType = record.mimeType,
+                        localPath = classification.file.canonicalPath
+                    ))
+                }
+                is AttachmentClassification.Unavailable -> {
+                    unavailableRecords.add(AttachmentRecord(
+                        name = record.name,
+                        mimeType = record.mimeType,
+                        localPath = classification.canonicalPath
+                    ))
+                }
+                is AttachmentClassification.Suspicious -> {
+                    anySuspicious = true
+                }
             }
         }
 

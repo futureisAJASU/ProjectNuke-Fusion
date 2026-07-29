@@ -9,6 +9,12 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+sealed class AttachmentClassification {
+    data class Trusted(val file: File) : AttachmentClassification()
+    data class Unavailable(val canonicalPath: String) : AttachmentClassification()
+    data object Suspicious : AttachmentClassification()
+}
+
 data class AttachmentStorageStats(
     val totalBytes: Long,
     val totalFiles: Int,
@@ -57,18 +63,26 @@ object AttachmentStorageManager {
         targetFile.exists() && targetFile.delete()
     }
 
-fun resolveManagedAttachment(attachmentRoot: File, path: String): File? {
-        if (path.isBlank()) return null
-        val targetCanonical = safeCanonicalPath(path) ?: return null
+fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassification {
+        if (path.isBlank()) return AttachmentClassification.Suspicious
+        val targetCanonical = safeCanonicalPath(path) ?: return AttachmentClassification.Suspicious
         val dirCanonical = safeCanonicalPath(attachmentRoot.absolutePath)
-            ?: return null
-        if (targetCanonical == dirCanonical) return null
+            ?: return AttachmentClassification.Suspicious
+        if (targetCanonical == dirCanonical) return AttachmentClassification.Suspicious
         val prefix = "$dirCanonical${File.separator}"
-        if (!targetCanonical.startsWith(prefix)) return null
+        if (!targetCanonical.startsWith(prefix)) return AttachmentClassification.Suspicious
         val targetFile = File(targetCanonical)
-        if (!targetFile.exists()) return null
-        if (!targetFile.isFile) return null
-        return targetFile
+        if (!targetFile.exists() || !targetFile.isFile) {
+            return AttachmentClassification.Unavailable(targetCanonical)
+        }
+        return AttachmentClassification.Trusted(targetFile)
+    }
+
+    fun resolveManagedAttachment(attachmentRoot: File, path: String): File? {
+        return when (val result = classifyAttachment(attachmentRoot, path)) {
+            is AttachmentClassification.Trusted -> result.file
+            else -> null
+        }
     }
 
     fun resolveManagedAttachment(context: Context, path: String): File? {

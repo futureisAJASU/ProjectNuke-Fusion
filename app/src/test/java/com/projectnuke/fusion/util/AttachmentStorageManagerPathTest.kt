@@ -209,6 +209,46 @@ class AttachmentStorageManagerPathTest {
     }
 
     @Test
+    fun `classifyAttachment returns Trusted for valid managed file`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val child = File(root, "photo.jpg")
+        child.writeText("image data")
+        val result = AttachmentStorageManager.classifyAttachment(root, child.absolutePath)
+        assertTrue(result is AttachmentClassification.Trusted)
+        assertEquals(child.canonicalPath, (result as AttachmentClassification.Trusted).file.canonicalPath)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `classifyAttachment returns Unavailable for missing managed file`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val missing = File(root, "missing.txt")
+        val result = AttachmentStorageManager.classifyAttachment(root, missing.absolutePath)
+        assertTrue(result is AttachmentClassification.Unavailable)
+        assertEquals(missing.canonicalPath, (result as AttachmentClassification.Unavailable).canonicalPath)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `classifyAttachment returns Suspicious for outside-root record`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outside = Files.createTempFile("outside", ".txt").toFile()
+        outside.writeText("data")
+        val result = AttachmentStorageManager.classifyAttachment(root, outside.canonicalPath)
+        assertTrue(result is AttachmentClassification.Suspicious)
+        root.deleteRecursively()
+        outside.delete()
+    }
+
+    @Test
+    fun `classifyAttachment returns Suspicious for blank path`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val result = AttachmentStorageManager.classifyAttachment(root, "")
+        assertTrue(result is AttachmentClassification.Suspicious)
+        root.deleteRecursively()
+    }
+
+    @Test
     fun `symlink escape rejected where supported`() {
         val root = Files.createTempDirectory("test_attachments").toFile()
         val outsideDir = Files.createTempDirectory("outside").toFile()
