@@ -3,7 +3,6 @@ package com.projectnuke.fusion.util
 import android.content.Context
 import com.projectnuke.fusion.data.ChatDao
 import com.projectnuke.fusion.util.AttachmentMessageCodec
-import com.projectnuke.fusion.util.ParsedAttachments
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +24,21 @@ data class AttachmentStorageStats(
 data class CleanupResult(
     val deletedFiles: Int
 )
+
+fun extractReferencedAttachmentPaths(
+    contents: List<String>,
+    attachmentRoot: File
+): Set<String> {
+    val result = mutableSetOf<String>()
+    contents.forEach { raw ->
+        val parsed = AttachmentMessageCodec.parseTrustedAttachmentMessage(raw, attachmentRoot)
+        if (parsed.suspiciousEnvelope) return@forEach
+        parsed.records.forEach { record ->
+            result.add(record.localPath)
+        }
+    }
+    return result
+}
 
 object AttachmentStorageManager {
     private const val recentFileGracePeriodMs = 5 * 60 * 1000L
@@ -72,9 +86,8 @@ fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassifica
         val prefix = "$dirCanonical${File.separator}"
         if (!targetCanonical.startsWith(prefix)) return AttachmentClassification.Suspicious
         val targetFile = File(targetCanonical)
-        if (!targetFile.exists() || !targetFile.isFile) {
-            return AttachmentClassification.Unavailable(targetCanonical)
-        }
+        if (!targetFile.exists()) return AttachmentClassification.Unavailable(targetCanonical)
+        if (!targetFile.isFile) return AttachmentClassification.Suspicious
         return AttachmentClassification.Trusted(targetFile)
     }
 
@@ -147,17 +160,7 @@ fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassifica
         contents: List<String>
     ): Set<String> {
         val attachmentRoot = getAttachmentDirectory(context)
-        val result = mutableSetOf<String>()
-        contents.forEach { raw ->
-            val parsed = AttachmentMessageCodec.parseTrustedAttachmentMessage(raw, attachmentRoot)
-            parsed.records.forEach { record ->
-                val resolved = resolveManagedAttachment(attachmentRoot, record.localPath)
-                if (resolved != null) {
-                    result.add(resolved.canonicalPath)
-                }
-            }
-        }
-        return result
+        return extractReferencedAttachmentPaths(contents, attachmentRoot)
     }
 
     private fun safeCanonicalPath(path: String): String? {

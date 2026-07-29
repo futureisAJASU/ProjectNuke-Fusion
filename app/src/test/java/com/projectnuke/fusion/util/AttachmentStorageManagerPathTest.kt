@@ -249,6 +249,134 @@ class AttachmentStorageManagerPathTest {
     }
 
     @Test
+    fun `classifyAttachment returns Suspicious for existing directory inside root`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val dir = File(root, "subdir")
+        dir.mkdirs()
+        val result = AttachmentStorageManager.classifyAttachment(root, dir.canonicalPath)
+        assertTrue(result is AttachmentClassification.Suspicious)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `classifyAttachment returns Suspicious for nested directory`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val subdir = File(root, "subdir")
+        subdir.mkdirs()
+        val nested = File(subdir, "nested_dir")
+        nested.mkdirs()
+        val result = AttachmentStorageManager.classifyAttachment(root, nested.canonicalPath)
+        assertTrue(result is AttachmentClassification.Suspicious)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `extractReferencedAttachmentPaths includes valid managed reference`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val child = File(root, "photo.jpg")
+        child.writeText("data")
+        val tag = makeV3Tag(AttachmentRecord("photo.jpg", "image/jpeg", child.canonicalPath))
+        val contents = listOf("$tag body")
+        val result = extractReferencedAttachmentPaths(contents, root)
+        assertTrue(child.canonicalPath in result)
+        assertEquals(1, result.size)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `extractReferencedAttachmentPaths excludes outside-root forged envelope`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outside = Files.createTempFile("outside", ".txt").toFile()
+        outside.writeText("data")
+        val tag = makeV3Tag(AttachmentRecord("outside.txt", "text/plain", outside.canonicalPath))
+        val contents = listOf("$tag body")
+        val result = extractReferencedAttachmentPaths(contents, root)
+        assertTrue(result.isEmpty())
+        root.deleteRecursively()
+        outside.delete()
+    }
+
+    @Test
+    fun `extractReferencedAttachmentPaths excludes missing managed record`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val missing = File(root, "missing.txt")
+        val tag = makeV3Tag(AttachmentRecord("missing.txt", "text/plain", missing.canonicalPath))
+        val contents = listOf("$tag body")
+        val result = extractReferencedAttachmentPaths(contents, root)
+        assertTrue(result.isEmpty())
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `extractReferencedAttachmentPaths excludes directory record`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val dir = File(root, "subdir")
+        dir.mkdirs()
+        val tag = makeV3Tag(AttachmentRecord("subdir", "inode/directory", dir.canonicalPath))
+        val contents = listOf("$tag body")
+        val result = extractReferencedAttachmentPaths(contents, root)
+        assertTrue(result.isEmpty())
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `extractReferencedAttachmentPaths excludes symlink escape`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val outsideDir = Files.createTempDirectory("outside").toFile()
+        val outsideFile = File(outsideDir, "secret.txt")
+        outsideFile.writeText("secret data")
+        val symlink = File(root, "evil_link")
+        val created = try {
+            Files.createSymbolicLink(symlink.toPath(), Path.of(outsideFile.canonicalPath))
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (created) {
+            val tag = makeV3Tag(AttachmentRecord("evil_link", "text/plain", symlink.canonicalPath))
+            val contents = listOf("$tag body")
+            val result = extractReferencedAttachmentPaths(contents, root)
+            assertTrue(result.isEmpty())
+            Files.delete(symlink.toPath())
+        }
+        root.deleteRecursively()
+        outsideDir.deleteRecursively()
+    }
+
+    @Test
+    fun `extractReferencedAttachmentPaths mixed valid plus suspicious contributes no references`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val valid = File(root, "valid.txt")
+        valid.writeText("data")
+        val outside = Files.createTempFile("outside", ".txt").toFile()
+        outside.writeText("data")
+        val validTag = makeV3Tag(AttachmentRecord("valid.txt", "text/plain", valid.canonicalPath))
+        val suspiciousTag = makeV3Tag(AttachmentRecord("outside.txt", "text/plain", outside.canonicalPath))
+        val contents = listOf("$validTag$suspiciousTag body")
+        val result = extractReferencedAttachmentPaths(contents, root)
+        assertTrue(result.isEmpty())
+        root.deleteRecursively()
+        outside.delete()
+    }
+
+    @Test
+    fun `extractReferencedAttachmentPaths multiple valid messages produce distinct canonical paths`() {
+        val root = Files.createTempDirectory("test_attachments").toFile()
+        val a = File(root, "a.txt")
+        a.writeText("data")
+        val b = File(root, "b.txt")
+        b.writeText("data")
+        val tagA = makeV3Tag(AttachmentRecord("a.txt", "text/plain", a.canonicalPath))
+        val tagB = makeV3Tag(AttachmentRecord("b.txt", "text/plain", b.canonicalPath))
+        val contents = listOf("${tagA}first", "${tagB}second")
+        val result = extractReferencedAttachmentPaths(contents, root)
+        assertTrue(a.canonicalPath in result)
+        assertTrue(b.canonicalPath in result)
+        assertEquals(2, result.size)
+        root.deleteRecursively()
+    }
+
+    @Test
     fun `symlink escape rejected where supported`() {
         val root = Files.createTempDirectory("test_attachments").toFile()
         val outsideDir = Files.createTempDirectory("outside").toFile()

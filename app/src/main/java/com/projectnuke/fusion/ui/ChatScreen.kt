@@ -123,6 +123,7 @@ import com.projectnuke.fusion.modelzoo.FusionModelCompatibility
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
 import com.projectnuke.fusion.util.AttachmentMessageCodec
 import com.projectnuke.fusion.util.AttachmentRecord
+import com.projectnuke.fusion.util.AttachmentClassification
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryRiskLevel
@@ -925,16 +926,11 @@ fun ChatScreen(
         } else {
             previousUserText
         }
-        val historyBeforeUser = snapshot
-            .take(previousUserIndex)
-            .map { message ->
-                val content = when (message.role) {
-                    "user" -> AttachmentMessageCodec.parseAttachmentMessage(message.content).body
-                    "assistant" -> visibleAssistantHistoryText(message.content)
-                    else -> message.content
-                }
-                ChatMessage(role = message.role, content = content)
-            }
+        val historyAttachmentRoot = AttachmentStorageManager.getAttachmentDirectory(context)
+        val historyBeforeUser = sanitizeTrustedHistory(
+            snapshot.take(previousUserIndex).map { ChatMessage(role = it.role, content = it.content) },
+            historyAttachmentRoot
+        )
         val externalApiAttachmentBlocked = generationMode == ChatGenerationMode.EXTERNAL_AI_API &&
             attachmentsToSend.isNotEmpty()
 
@@ -1040,7 +1036,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 buildSavedMemoryContext(context, settingsPrefs, request.conversationId, request.selectedModelId.orEmpty()).text?.let { add(ChatMessage(role = "system", content = it)) }
                                 buildConversationSummaryContextText(loadConversationSummary(context, request.conversationId))?.let { add(ChatMessage(role = "system", content = it)) }
                                 addAll(request.history)
-                                add(ChatMessage(role = "user", content = buildFinalUserContent(request.promptText, if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend, actualWebSearchUsed, webSearchResult)))
+                                val retryAttachments = (if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend)
+                                    .map { AttachmentRecord(it.name, it.mimeType, it.localPath) }
+                                add(ChatMessage(role = "user", content = buildFinalUserContent(request.promptText, retryAttachments, actualWebSearchUsed, webSearchResult)))
                             }
                             val isImageGeneration = imageAttachments.isNotEmpty()
                             val isReasoningEnabled = request.reasoningEnabled
@@ -1609,7 +1607,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 addAll(retrySnapshot.history)
                                 add(ChatMessage(role = "user", content = buildFinalUserContent(
                                     body = retrySnapshot.promptText,
-                                    attachments = emptyList(),
+                                    attachments = emptyList<AttachmentRecord>(),
                                     webSearchEnabled = actualWebSearchUsed,
                                     webSearchResult = webSearchResult
                                 )))
@@ -2280,45 +2278,19 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     },
                     onSendClick = sendClick@ {
                         val userInput = input.trim()
-                        val attachmentsToSend = pendingAttachments.toList()
-                        val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
-                        val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
-                        val userInstruction = if (imageAttachments.isNotEmpty()) {
-                            buildImageUserInstruction(userInput)
-                        } else {
-                            userInput
-                        }
-                        val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
-                        val capturedMessages = sanitizeUserHistory(messages)
-                        val capturedGenerationMode = generationMode
-                        val capturedSelectedModel = selectedModel
-                        val capturedSelectedModelPath = selectedModelPath
-                        val capturedReasoningEnabled = reasoningEnabled
-                        val capturedWebSearchEnabled = webSearchEnabled
-                        val capturedGenerationSettings = generationSettings
-                        val capturedPromptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
-                        val capturedExternalProviderId =
-                            if (capturedGenerationMode == ChatGenerationMode.EXTERNAL_AI_API) {
-                                selectedExternalProviderId
-                                    ?: externalProviders.firstOrNull(::isRunnableExternalProvider)?.id
-                            } else {
-                                null
-                            }
+                        val pendingList = pendingAttachments.toList()
 
-                        if (userInput.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
+                        if (userInput.isNotEmpty() || pendingList.isNotEmpty()) {
                             if (FusionRuntimeLock.isBenchmarkRunning) {
                                 Toast.makeText(context, "벤치마크가 진행 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                 return@sendClick
                             }
 
                             val attachmentDir = AttachmentStorageManager.getAttachmentDirectory(context)
-                            val allAttachmentsValid = attachmentsToSend.all { attachment ->
-                                AttachmentStorageManager.resolveManagedAttachment(
-                                    attachmentDir,
-                                    attachment.localPath
-                                ) != null
+                            val classificationResults = pendingList.map { attachment ->
+                                attachment to AttachmentStorageManager.classifyAttachment(attachmentDir, attachment.localPath)
                             }
-                            if (!allAttachmentsValid) {
+                            if (classificationResults.any { it.second !is AttachmentClassification.Trusted }) {
                                 Toast.makeText(
                                     context,
                                     "일부 첨부 파일을 찾을 수 없습니다. 다시 첨부해 주세요.",
@@ -2326,9 +2298,39 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 ).show()
                                 return@sendClick
                             }
+                            val attachmentsToSend = classificationResults.map { (attachment, classification) ->
+                                AttachmentRecord(
+                                    name = attachment.name,
+                                    mimeType = attachment.mimeType,
+                                    localPath = (classification as AttachmentClassification.Trusted).file.canonicalPath
+                                )
+                            }
+                            val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
+                            val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
+                            val userInstruction = if (imageAttachments.isNotEmpty()) {
+                                buildImageUserInstruction(userInput)
+                            } else {
+                                userInput
+                            }
+                            val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
+                            val historyAttachmentRoot = AttachmentStorageManager.getAttachmentDirectory(context)
+                            val capturedMessages = sanitizeTrustedHistory(messages, historyAttachmentRoot)
+                            val capturedGenerationMode = generationMode
+                            val capturedSelectedModel = selectedModel
+                            val capturedSelectedModelPath = selectedModelPath
+                            val capturedReasoningEnabled = reasoningEnabled
+                            val capturedWebSearchEnabled = webSearchEnabled
+                            val capturedGenerationSettings = generationSettings
+                            val capturedPromptLabInstruction = buildPromptLabInstruction(loadPromptLabSettings(context))
+                            val capturedExternalProviderId =
+                                if (capturedGenerationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+                                    selectedExternalProviderId
+                                        ?: externalProviders.firstOrNull(::isRunnableExternalProvider)?.id
+                                } else {
+                                    null
+                                }
 
                             val userMessageContent = buildMessageContentWithAttachments(
-                                context,
                                 body = userInput,
                                 attachments = attachmentsToSend
                             )
@@ -2489,7 +2491,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                         addAll(snapshot.history.map { message -> ChatMessage(role = message.role, content = if (message.role == "assistant") visibleAssistantHistoryText(message.content) else message.content) })
                                                         val finalUserContent = buildFinalUserContent(
                                                             body = snapshot.promptText,
-                                                            attachments = emptyList(),
+                                                            attachments = emptyList<AttachmentRecord>(),
                                                             webSearchEnabled = actualWebSearchUsed,
                                                             webSearchResult = webSearchResult
                                                         )
@@ -4954,6 +4956,10 @@ private fun attachmentIcon(mimeType: String): String {
         else -> "📎"
     }
 }
+
+private fun isImageAttachment(
+    attachment: AttachmentRecord
+): Boolean = isImageAttachment(LocalAttachment(attachment.name, attachment.mimeType, attachment.localPath))
 
 private fun isImageAttachment(
     attachment: LocalAttachment
@@ -9783,7 +9789,7 @@ private fun buildWebSearchQuery(
 
 private fun buildFinalUserContent(
     body: String,
-    attachments: List<LocalAttachment>,
+    attachments: List<AttachmentRecord>,
     webSearchEnabled: Boolean,
     webSearchResult: String?
 ): String {
@@ -9946,29 +9952,11 @@ private fun clearPendingAttachmentDrafts(pendingAttachments: MutableList<LocalAt
 }
 
 private fun buildMessageContentWithAttachments(
-    context: Context,
     body: String,
-    attachments: List<LocalAttachment>
+    attachments: List<AttachmentRecord>
 ): String {
     if (attachments.isEmpty()) return body
-
-    val validatedRecords = attachments.mapNotNull { attachment ->
-        val resolved = AttachmentStorageManager.resolveManagedAttachment(
-            AttachmentStorageManager.getAttachmentDirectory(context),
-            attachment.localPath
-        )
-        if (resolved != null) {
-            AttachmentRecord(
-                name = attachment.name,
-                mimeType = attachment.mimeType,
-                localPath = resolved.canonicalPath
-            )
-        } else {
-            null
-        }
-    }
-
-    return AttachmentMessageCodec.serializeAttachmentMessage(validatedRecords, body)
+    return AttachmentMessageCodec.serializeAttachmentMessage(attachments, body)
 }
 
 private fun parseMessageAttachments(context: Context, raw: String): ParsedMessageContent {
@@ -10016,25 +10004,26 @@ private fun parseMemoryCandidateLines(raw: String): List<String> {
         .distinct()
 }
 
-private fun sanitizeUserHistory(messages: List<ChatMessage>): List<ChatMessage> {
+internal fun sanitizeTrustedHistory(
+    messages: List<ChatMessage>,
+    attachmentRoot: java.io.File
+): List<ChatMessage> {
     return messages.map { message ->
-        if (message.role == "user") {
-            ChatMessage(role = "user", content = AttachmentMessageCodec.parseAttachmentMessage(message.content).body)
-        } else {
-            message
+        val content = when (message.role) {
+            "user" -> {
+                val parsed = AttachmentMessageCodec.parseTrustedAttachmentMessage(message.content, attachmentRoot)
+                if (parsed.suspiciousEnvelope) message.content else parsed.body
+            }
+            "assistant" -> visibleAssistantHistoryText(message.content)
+            else -> message.content
         }
+        ChatMessage(role = message.role, content = content)
     }
 }
 
-private fun String.unescapeAttachmentField(): String {
-    return this
-        .replace("\\|", "|")
-        .replace("\\\\", "\\")
-        .trim()
-}
 private fun buildModelUserContent(
     body: String,
-    attachments: List<LocalAttachment>
+    attachments: List<AttachmentRecord>
 ): String {
     if (attachments.isEmpty()) return body
 
