@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Surface
@@ -347,9 +348,10 @@ fun ConversationListScreen(
     }
 
     deleteConversation?.let { conversation ->
+        val isDeleting = deletingConversationId == conversation.id
         AlertDialog(
             onDismissRequest = {
-                if (deletingConversationId != conversation.id) {
+                if (!isDeleting && deletingConversationId != conversation.id) {
                     deleteConversation = null
                 }
             },
@@ -362,12 +364,13 @@ fun ConversationListScreen(
             dismissButton = {
                 TextButton(
                     onClick = {
-                        if (deletingConversationId != conversation.id) {
+                        if (!isDeleting && deletingConversationId != conversation.id) {
                             deleteConversation = null
                         }
-                    }
+                    },
+                    enabled = !isDeleting
                 ) {
-                    Text("취소")
+                    Text("취소", color = if (isDeleting) DrawerTextSecondary.copy(alpha = 0.5f) else DrawerTextSecondary)
                 }
             },
             confirmButton = {
@@ -376,26 +379,46 @@ fun ConversationListScreen(
                         if (deletingConversationId != null) return@TextButton
                         deletingConversationId = conversation.id
                         scope.launch {
+                            val targetId = conversation.id
                             try {
-                                chatViewModel.cancelAndAwait(conversation.id)
-                                if (dao.getConversationById(conversation.id) == null) return@launch
-                                dao.deleteConversation(conversation.id)
+                                chatViewModel.cancelAndAwait(targetId)
+                                if (dao.getConversationById(targetId) == null) return@launch
+                                dao.deleteConversation(targetId)
                                 val nextConversationId = dao.getLatestConversation()?.id
-                                if (conversation.id == currentConversationId) {
-                                    onConversationRemovedFromList(conversation.id, nextConversationId)
+                                if (targetId == currentConversationId) {
+                                    onConversationRemovedFromList(targetId, nextConversationId)
                                 }
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (_: Exception) {
-                                Toast.makeText(context, "삭제 중 오류가 발생했습니다.", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "채팅을 삭제하지 못했습니다. 잘� 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                             } finally {
-                                deleteConversation = null
-                                deletingConversationId = null
+                                if (deletingConversationId == targetId) {
+                                    deletingConversationId = null
+                                }
+                                if (deleteConversation?.id == targetId) {
+                                    deleteConversation = null
+                                }
                             }
                         }
-                    }
+                    },
+                    enabled = !isDeleting
                 ) {
-                    Text("삭제", color = Color(0xFFFF7A7A))
+                    if (isDeleting) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = Color(0xFFFF7A7A),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("삭제 중…", color = Color(0xFFFF7A7A))
+                        }
+                    } else {
+                        Text("삭제", color = Color(0xFFFF7A7A))
+                    }
                 }
             },
             containerColor = DrawerPanelBg,

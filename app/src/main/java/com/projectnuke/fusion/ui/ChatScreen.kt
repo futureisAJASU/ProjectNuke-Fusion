@@ -590,6 +590,7 @@ fun ChatScreen(
   var pickerOriginConversationId by remember { mutableStateOf<Long?>(null) }
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
+    var isSubmittingMessage by remember { mutableStateOf(false) }
     var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }
     var streamingAssistantText by remember { mutableStateOf<String?>(null) }
     var streamingMetricsLine by remember { mutableStateOf<String?>(null) }
@@ -823,6 +824,7 @@ fun ChatScreen(
         // switch does not show the previous conversation's tokens.
         val saved = chatViewModel.state(conversationId)
         isGenerating = saved.isGenerating
+        isSubmittingMessage = false
         streamingAssistantText = saved.streamingText
         streamingMetricsLine = saved.streamingMetricsLine
         generationStatus = saved.generationStatus
@@ -845,6 +847,7 @@ fun ChatScreen(
             val cur = states[conversationId] ?: return@collect
             if (currentConversationId == conversationId) {
                 isGenerating = cur.isGenerating
+                isSubmittingMessage = false
                 streamingAssistantText = cur.streamingText
                 streamingMetricsLine = cur.streamingMetricsLine
                 generationStatus = cur.generationStatus
@@ -908,6 +911,10 @@ fun ChatScreen(
         val originalAssistantText = visibleSearchText(context, targetMessage.content)
         val isStyleRegeneration = action.instruction != null
         val attachmentsToSend = if (isStyleRegeneration) emptyList() else parsedUserMessage.attachments
+        if (!isStyleRegeneration && parsedUserMessage.unavailableAttachments.isNotEmpty()) {
+            Toast.makeText(context, "원본 첨부 파일을 찾을 수 없어 답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
         val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
         val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
         val userInstruction = if (isStyleRegeneration) {
@@ -2106,9 +2113,13 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
 
         scope.launch {
+            val remainingSlots = (5 - pendingAttachments.size).coerceAtLeast(0)
+            val urisToProcess = uris.take(remainingSlots)
+            val skippedByLimit = (uris.size - urisToProcess.size).coerceAtLeast(0)
+
             var success = 0
             var failed = 0
-            uris.take(5).forEach { uri ->
+            urisToProcess.forEach { uri ->
                 try {
                     context.contentResolver.takePersistableUriPermission(
                         uri,
@@ -2148,9 +2159,16 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
             }
 
             when {
-                success > 0 && failed == 0 -> Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
-                success > 0 && failed > 0 -> Toast.makeText(context, "첨부 일부 실패 ($success 성공, $failed 실패)", Toast.LENGTH_SHORT).show()
-                else -> Toast.makeText(context, "첨부 실패", Toast.LENGTH_SHORT).show()
+                success > 0 && failed == 0 && skippedByLimit == 0 ->
+                    Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
+                success > 0 && failed > 0 && skippedByLimit == 0 ->
+                    Toast.makeText(context, "첨부 일부 실패 ($success 성공, $failed 실패)", Toast.LENGTH_SHORT).show()
+                success > 0 && skippedByLimit > 0 ->
+                    Toast.makeText(context, "최대 5개까지 첨부할 수 있어 ${skippedByLimit}개를 제외했습니다. (${success}개 추가)", Toast.LENGTH_LONG).show()
+                skippedByLimit > 0 && success == 0 ->
+                    Toast.makeText(context, "최대 5개까지 첨부할 수 있어 ${skippedByLimit}개를 제외했습니다.", Toast.LENGTH_LONG).show()
+                else ->
+                    Toast.makeText(context, "첨부 실패", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -2217,7 +2235,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         selectedProviderName = selectedExternalProviderName,
                         selectedProviderId = selectedExternalProviderId,
                         externalProviders = externalProviders,
-                        enabled = !isGenerating,
+                    enabled = !isGenerating && !isSubmittingMessage,
                         onOpenApiSettings = {
                             showAdvancedSettingsDialog = true
                         },
@@ -2244,17 +2262,29 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 ChatInputBar(
                     value = input,
                     onValueChange = { input = it },
-                    enabled = !isGenerating,
+                    enabled = !isGenerating && !isSubmittingMessage,
                     isGenerating = isGenerating,
+                    isSubmittingMessage = isSubmittingMessage,
                     pendingAttachments = pendingAttachments,
                     onRemoveAttachment = { attachment ->
+                        if (isGenerating || isSubmittingMessage) return@ChatInputBar
                         AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
                         pendingAttachments.remove(attachment)
                     },
                     onAppendQuickPrompt = { preset ->
+                        if (isGenerating || isSubmittingMessage) return@ChatInputBar
                         input = appendQuickPrompt(input, preset)
                     },
                     onPlusClick = {
+                        if (isGenerating || isSubmittingMessage) return@ChatInputBar
+                        if (generationMode == ChatGenerationMode.EXTERNAL_AI_API) {
+                            Toast.makeText(
+                                context,
+                                "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            return@ChatInputBar
+                        }
                         pickerOriginConversationId = conversationId
                         attachmentPickerLauncher.launch(
                             arrayOf(
@@ -2298,6 +2328,16 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 ).show()
                                 return@sendClick
                             }
+
+                            if (generationMode == ChatGenerationMode.EXTERNAL_AI_API && attachmentsToSend.isNotEmpty()) {
+                                Toast.makeText(
+                                    context,
+                                    "현재 외부 AI API 모드에서는 첨부 파일을 전송할 수 없습니다.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                return@sendClick
+                            }
+
                             val imageAttachments = attachmentsToSend.filter { isImageAttachment(it) }
                             val nonImageAttachments = attachmentsToSend.filterNot { isImageAttachment(it) }
                             val userInstruction = if (imageAttachments.isNotEmpty()) {
@@ -2328,13 +2368,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 attachments = attachmentsToSend
                             )
 
-                            input = ""
-                            pendingAttachments.clear()
+                            val capturedDraftText = userInput
+                            val capturedDraftAttachments = attachmentsToSend.toList()
+                            val capturedPendingIdentities = pendingList.toList()
 
-                            isGenerating = true
-                            streamingAssistantText = null
-                            streamingMetricsLine = null
-                            generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
+                            isSubmittingMessage = true
 
                             scope.launch {
                                 var activeConversationId = conversationId
@@ -2344,7 +2382,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     val now = System.currentTimeMillis()
 
                                     if (activeConversationId == 0L) {
-                                        val title = userInput.take(24).ifBlank { "새 대화" }
+                                        val title = capturedDraftText.take(24).ifBlank { "새 대화" }
 
                                         activeConversationId = dao.insertConversation(
                                             ConversationEntity(
@@ -2366,11 +2404,24 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         )
                                     )
                                     userMessageInserted = true
-                                    attachmentsToSend.forEach { attachment ->
+                                    capturedDraftAttachments.forEach { attachment ->
                                         AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
                                     }
 
                                     dao.updateConversationTime(activeConversationId, now)
+
+                                    if (input == capturedDraftText) {
+                                        input = ""
+                                    }
+                                    if (pendingAttachments.toList() == capturedPendingIdentities) {
+                                        pendingAttachments.clear()
+                                    }
+
+                                    isGenerating = true
+                                    isSubmittingMessage = false
+                                    streamingAssistantText = null
+                                    streamingMetricsLine = null
+                                    generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
 
                                     val requestId = UUID.randomUUID().toString()
                                     val snapshot = GenerationRequestSnapshot(
@@ -2382,7 +2433,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         settings = capturedGenerationSettings,
                                         reasoningEnabled = capturedReasoningEnabled,
                                         webSearchPolicy = GenerationRequestSnapshot.resolveWebSearchPolicy(
-                                            externalApiAttachmentBlocked = capturedGenerationMode == ChatGenerationMode.EXTERNAL_AI_API && attachmentsToSend.isNotEmpty(),
+                                            externalApiAttachmentBlocked = false,
                                             webSearchEnabled = capturedWebSearchEnabled,
                                             autoWebSearchSuggested = shouldAutoUseWebSearch(userInput),
                                         ),
@@ -2839,9 +2890,13 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     Log.e("FusionEngine", "Chat generation failed", e)
                                     if (e is kotlinx.coroutines.CancellationException) throw e
                                     isGenerating = false
+                                    isSubmittingMessage = false
                                     generationStatus = null
                                     streamingAssistantText = null
                                     streamingMetricsLine = null
+                                    if (!userMessageInserted) {
+                                        Toast.makeText(context, "메시지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
                         }
@@ -4557,6 +4612,7 @@ private fun ChatInputBar(
     onValueChange: (String) -> Unit,
     enabled: Boolean,
     isGenerating: Boolean,
+    isSubmittingMessage: Boolean,
     onPlusClick: () -> Unit,
     onMicClick: () -> Unit,
     onVoiceModeClick: () -> Unit,
@@ -4578,7 +4634,8 @@ private fun ChatInputBar(
             if (pendingAttachments.isNotEmpty()) {
                 PendingAttachmentTray(
                     attachments = pendingAttachments,
-                    onRemove = onRemoveAttachment
+                    onRemove = onRemoveAttachment,
+                    enabled = enabled
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -4592,11 +4649,11 @@ private fun ChatInputBar(
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = PanelBg,
-                    modifier = Modifier.clickable { quickPromptExpanded = !quickPromptExpanded }
+                    modifier = Modifier.clickable(enabled = enabled) { quickPromptExpanded = !quickPromptExpanded }
                 ) {
                     Text(
                         text = if (quickPromptExpanded) "빠른 입력 닫기" else "빠른 입력",
-                        color = TextSecondary,
+                        color = if (enabled) TextSecondary else TextSecondary.copy(alpha = 0.5f),
                         fontSize = 12.sp,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
@@ -4660,14 +4717,53 @@ private fun ChatInputBar(
 
                         Spacer(modifier = Modifier.width(8.dp))
 
-                        if (value.isBlank() && pendingAttachments.isEmpty()) {
+                        if (isSubmittingMessage) {
+                            Surface(
+                                modifier = Modifier.size(42.dp),
+                                shape = CircleShape,
+                                color = PanelBg
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(22.dp),
+                                        color = TextSecondary,
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                            }
+                        } else if (isGenerating) {
+                            Surface(
+                                modifier = Modifier.size(42.dp),
+                                shape = CircleShape,
+                                color = DangerRed
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clickable { onStopClick() },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "■",
+                                        color = Color.White,
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        } else if (value.isBlank() && pendingAttachments.isEmpty()) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 CircleMiniIconButton(
                                     icon = Icons.Rounded.Mic,
                                     contentDescription = "음성 입력",
-                                    onClick = onMicClick
+                                    onClick = onMicClick,
+                                    enabled = enabled
                                 )
 
                                 Spacer(modifier = Modifier.width(8.dp))
@@ -4680,7 +4776,7 @@ private fun ChatInputBar(
                                     Box(
                                         modifier = Modifier
                                             .fillMaxSize()
-                                            .clickable { onVoiceModeClick() },
+                                            .clickable(enabled = enabled) { onVoiceModeClick() },
                                         contentAlignment = Alignment.Center
                                     ) {
                                         Text(
@@ -4693,47 +4789,25 @@ private fun ChatInputBar(
                                 }
                             }
                         } else {
-                            if (isGenerating) {
-                                Surface(
-                                    modifier = Modifier.size(42.dp),
-                                    shape = CircleShape,
-                                    color = DangerRed
+                            Surface(
+                                modifier = Modifier.size(42.dp),
+                                shape = CircleShape,
+                                color = Color.White
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clickable(enabled = enabled) {
+                                            onSendClick()
+                                        },
+                                    contentAlignment = Alignment.Center
                                 ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .clickable { onStopClick() },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = "■",
-                                            color = Color.White,
-                                            fontSize = 16.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
-                            } else {
-                                Surface(
-                                    modifier = Modifier.size(42.dp),
-                                    shape = CircleShape,
-                                    color = Color.White
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .clickable(enabled = !isGenerating) {
-                                                onSendClick()
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Text(
-                                            text = if (isGenerating) "…" else "↑",
-                                            color = Color.Black,
-                                            fontSize = 20.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
+                                    Text(
+                                        text = "↑",
+                                        color = Color.Black,
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }
@@ -4744,6 +4818,7 @@ private fun ChatInputBar(
     }
 
 }
+
 @Composable
 private fun QuickPromptChips(
     presets: List<String>,
@@ -4772,6 +4847,60 @@ private fun QuickPromptChips(
             }
         }
     }
+}
+
+internal enum class ComposerPrimaryAction {
+    Stop,
+    SubmitProgress,
+    VoiceActions,
+    Send
+}
+
+internal fun resolveComposerPrimaryAction(
+    isGenerating: Boolean,
+    isSubmittingMessage: Boolean,
+    composerText: String,
+    hasAttachments: Boolean
+): ComposerPrimaryAction {
+    if (isSubmittingMessage) return ComposerPrimaryAction.SubmitProgress
+    if (isGenerating) return ComposerPrimaryAction.Stop
+    if (composerText.isBlank() && !hasAttachments) return ComposerPrimaryAction.VoiceActions
+    return ComposerPrimaryAction.Send
+}
+
+internal fun computePickerCapacity(
+    pendingCount: Int,
+    selectedCount: Int,
+    maxTotal: Int = 5
+): PickerCapacity {
+    val remainingSlots = (maxTotal - pendingCount).coerceAtLeast(0)
+    val toProcess = minOf(selectedCount, remainingSlots)
+    val skipped = (selectedCount - toProcess).coerceAtLeast(0)
+    return PickerCapacity(
+        remainingSlots = remainingSlots,
+        toProcess = toProcess,
+        skipped = skipped
+    )
+}
+
+internal data class PickerCapacity(
+    val remainingSlots: Int,
+    val toProcess: Int,
+    val skipped: Int
+)
+
+internal fun shouldBlockExternalAttachments(
+    generationMode: ChatGenerationMode,
+    hasAttachments: Boolean
+): Boolean {
+    return generationMode == ChatGenerationMode.EXTERNAL_AI_API && hasAttachments
+}
+
+internal fun shouldBlockRetryForUnavailableAttachments(
+    unavailableCount: Int,
+    isStyleRegeneration: Boolean
+): Boolean {
+    return !isStyleRegeneration && unavailableCount > 0
 }
 
 private fun appendQuickPrompt(currentInput: String, preset: String): String {
@@ -4804,7 +4933,8 @@ private fun CircleTextButton(
 @Composable
 private fun PendingAttachmentTray(
     attachments: List<LocalAttachment>,
-    onRemove: (LocalAttachment) -> Unit
+    onRemove: (LocalAttachment) -> Unit,
+    enabled: Boolean
 ) {
     Column(
         modifier = Modifier
@@ -4815,7 +4945,7 @@ private fun PendingAttachmentTray(
         attachments.forEach { attachment ->
             AttachmentCard(
                 attachment = attachment,
-                onRemove = { onRemove(attachment) }
+                onRemove = if (enabled) { { onRemove(attachment) } } else null
             )
         }
     }
@@ -5043,19 +5173,20 @@ private fun CircleIconButton(
 @Composable
 private fun CircleMiniButton(
     text: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true
 ) {
     Box(
         modifier = Modifier
             .size(38.dp)
             .clip(CircleShape)
             .background(Color.Transparent)
-            .clickable { onClick() },
+            .clickable(enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = text,
-            color = TextPrimary,
+            color = if (enabled) TextPrimary else TextSecondary,
             fontSize = 22.sp
         )
     }
@@ -5064,20 +5195,21 @@ private fun CircleMiniButton(
 private fun CircleMiniIconButton(
     icon: ImageVector,
     contentDescription: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true
 ) {
     Box(
         modifier = Modifier
             .size(38.dp)
             .clip(CircleShape)
             .background(Color.Transparent)
-            .clickable { onClick() },
+            .clickable(enabled = enabled) { onClick() },
         contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = TextPrimary,
+            tint = if (enabled) TextPrimary else TextSecondary,
             modifier = Modifier.size(23.dp)
         )
     }
