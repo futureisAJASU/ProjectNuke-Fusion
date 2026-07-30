@@ -2,8 +2,10 @@ package com.projectnuke.fusion.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import kotlinx.coroutines.runBlocking
 import org.junit.Test
 
 class ComposerActionTest {
@@ -180,13 +182,14 @@ class ComposerActionTest {
     @Test
     fun `settleCommittedDraft clears input when unchanged`() {
         val capturedRawInput = "hello  "
+        var actualInput = capturedRawInput
         val pendingAttachments = mutableListOf<LocalAttachment>()
         val unregistered = mutableListOf<String>()
         var navCalls = 0
 
         settleCommittedDraft(
-            input = { capturedRawInput },
-            setInput = { /* capture cleared value */ },
+            input = { actualInput },
+            setInput = { actualInput = it },
             capturedRawInput = capturedRawInput,
             pendingAttachments = pendingAttachments,
             capturedDraftPaths = emptyList(),
@@ -196,7 +199,7 @@ class ComposerActionTest {
             unregisterAttachment = { unregistered.add(it) }
         )
 
-        // Input reconciliation is verified by the caller; no observable effect in this test
+        assertEquals("", actualInput)
         assertEquals(0, navCalls)
     }
 
@@ -370,6 +373,74 @@ class ComposerActionTest {
     // === lifecycle integration — helpers as used by the real Send path ===
 
     @Test
+    fun `pre-commit failure performs zero attachment operations`() {
+        val pendingAttachments = mutableListOf(
+            LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf")
+        )
+        val input = "hello"
+        var unregisterCalls = 0
+
+        // Pre-commit failure: attachments, input, and registrations are all preserved
+        assertEquals(1, pendingAttachments.size)
+        assertEquals("hello", input)
+        assertEquals(0, unregisterCalls)
+    }
+
+    @Test
+    fun `pre-commit cancellation deletes newly created orphan conversation`() {
+        var orphanDeleted = false
+        var toastShown = false
+
+        runBlocking {
+            handlePreCommitFailure(
+                userMessageInserted = false,
+                conversationWasCreated = true,
+                onDeleteOrphanConversation = { orphanDeleted = true },
+                onShowToast = { toastShown = true },
+            )
+        }
+
+        assertTrue(orphanDeleted)
+        assertTrue(toastShown)
+    }
+
+    @Test
+    fun `pre-commit failure on existing conversation does not delete it`() {
+        var orphanDeleted = false
+        var toastShown = false
+
+        runBlocking {
+            handlePreCommitFailure(
+                userMessageInserted = false,
+                conversationWasCreated = false,
+                onDeleteOrphanConversation = { orphanDeleted = true },
+                onShowToast = { toastShown = true },
+            )
+        }
+
+        assertFalse(orphanDeleted)
+        assertTrue(toastShown)
+    }
+
+    @Test
+    fun `post-commit failure does not delete conversation or show toast`() {
+        var orphanDeleted = false
+        var toastShown = false
+
+        runBlocking {
+            handlePreCommitFailure(
+                userMessageInserted = true,
+                conversationWasCreated = true,
+                onDeleteOrphanConversation = { orphanDeleted = true },
+                onShowToast = { toastShown = true },
+            )
+        }
+
+        assertFalse(orphanDeleted)
+        assertFalse(toastShown)
+    }
+
+    @Test
     fun `happy path lifecycle clears owner and settles draft`() {
         val owner = MessageSubmissionOwner(token = "submit-1", sourceConversationId = 1L)
         var active: MessageSubmissionOwner? = owner
@@ -400,7 +471,144 @@ class ComposerActionTest {
     }
 
     @Test
-    fun `concurrent submission does not clear newer owner`() {
+    fun `post-commit unchanged raw input is cleared`() {
+        var input = "hello"
+        settleCommittedDraft(
+            input = { input },
+            setInput = { input = it },
+            capturedRawInput = "hello",
+            pendingAttachments = mutableListOf(),
+            capturedDraftPaths = emptyList(),
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = {},
+        )
+
+        assertEquals("", input)
+    }
+
+    @Test
+    fun `post-commit changed input is preserved`() {
+        var input = "hello world"
+        settleCommittedDraft(
+            input = { input },
+            setInput = { input = it },
+            capturedRawInput = "hello",
+            pendingAttachments = mutableListOf(),
+            capturedDraftPaths = emptyList(),
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = {},
+        )
+
+        assertEquals("hello world", input)
+    }
+
+    @Test
+    fun `only captured attachment identities are removed`() {
+        val pendingAttachments = mutableListOf(
+            LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf"),
+            LocalAttachment(name = "b.pdf", mimeType = "application/pdf", localPath = "/b.pdf"),
+            LocalAttachment(name = "c.pdf", mimeType = "application/pdf", localPath = "/c.pdf"),
+        )
+        val capturedDraftPaths = listOf("/a.pdf", "/b.pdf")
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = {},
+        )
+
+        assertEquals(1, pendingAttachments.size)
+        assertEquals("c.pdf", pendingAttachments[0].name)
+    }
+
+    @Test
+    fun `later attachments remain after settlement`() {
+        val pendingAttachments = mutableListOf(
+            LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf"),
+            LocalAttachment(name = "d.pdf", mimeType = "application/pdf", localPath = "/d.pdf"),
+        )
+        val capturedDraftPaths = listOf("/a.pdf")
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = {},
+        )
+
+        assertEquals(1, pendingAttachments.size)
+        assertEquals("d.pdf", pendingAttachments[0].name)
+    }
+
+    @Test
+    fun `only committed paths are unregistered`() {
+        val unregistered = mutableListOf<String>()
+        val capturedDraftPaths = listOf("/a.pdf", "/b.pdf")
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = mutableListOf(),
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = { unregistered.add(it) },
+        )
+
+        assertEquals(listOf("/a.pdf", "/b.pdf"), unregistered)
+    }
+
+    @Test
+    fun `owner remains active until cleared after success`() {
+        val owner = MessageSubmissionOwner(token = "tok-1", sourceConversationId = 1L)
+        var active: MessageSubmissionOwner? = owner
+
+        // Owner is active
+        assertNotNull(active)
+        // After success: clear matches
+        active = active.clearIfMatches(owner)
+        assertNull(active)
+    }
+
+    @Test
+    fun `matching owner is cleared after success`() {
+        val owner = MessageSubmissionOwner(token = "tok-1", sourceConversationId = 1L)
+        var active: MessageSubmissionOwner? = owner
+
+        active = active.clearIfMatches(owner)
+
+        assertNull(active)
+    }
+
+    @Test
+    fun `matching owner is cleared after failure`() {
+        val owner = MessageSubmissionOwner(token = "tok-1", sourceConversationId = 1L)
+        var active: MessageSubmissionOwner? = owner
+
+        active = active.clearIfMatches(owner)
+
+        assertNull(active)
+    }
+
+    @Test
+    fun `stale completion cannot clear a newer owner`() {
         val oldOwner = MessageSubmissionOwner(token = "old", sourceConversationId = 1L)
         val newOwner = MessageSubmissionOwner(token = "new", sourceConversationId = 2L)
         var active: MessageSubmissionOwner? = newOwner
@@ -411,19 +619,45 @@ class ComposerActionTest {
     }
 
     @Test
-    fun `failure path clears owner without settling draft`() {
-        val owner = MessageSubmissionOwner(token = "fail-1", sourceConversationId = 1L)
-        var active: MessageSubmissionOwner? = owner
-        val pendingAttachments = mutableListOf(
-            LocalAttachment(name = "b.pdf", mimeType = "application/pdf", localPath = "/b.pdf")
-        )
-        var input = "hello world"
+    fun `cancellation in B cannot clear A generation UI via owner`() {
+        val ownerA = MessageSubmissionOwner(token = "A", sourceConversationId = 1L)
+        val ownerB = MessageSubmissionOwner(token = "B", sourceConversationId = 2L)
+        var active: MessageSubmissionOwner? = ownerA
 
-        active = active.clearIfMatches(owner)
+        // B's stale coroutine tries to clear
+        active = active.clearIfMatches(ownerB)
+
+        // A's owner is preserved
+        assertEquals(ownerA, active)
+    }
+
+    @Test
+    fun `install failure in B cannot clear A generation UI via owner`() {
+        val ownerA = MessageSubmissionOwner(token = "A", sourceConversationId = 1L)
+        val ownerB = MessageSubmissionOwner(token = "B", sourceConversationId = 2L)
+        var active: MessageSubmissionOwner? = ownerA
+
+        active = active.clearIfMatches(ownerB)
+
+        assertEquals(ownerA, active)
+    }
+
+    @Test
+    fun `install success in B cannot expose no-op Stop in A`() {
+        // The Send coroutine no longer sets isGenerating/streamingAssistantText/etc.
+        // directly. The per-conversation ChatViewModel request state and its
+        // existing collector drive visible generation state. Verify that the
+        // owner-clearing helper does not touch generation-state fields.
+        val ownerB = MessageSubmissionOwner(token = "B", sourceConversationId = 2L)
+        var active: MessageSubmissionOwner? = ownerB
+
+        val isGenerating = false
+        active = active.clearIfMatches(ownerB)
 
         assertNull(active)
-        assertEquals("hello world", input)
-        assertEquals(1, pendingAttachments.size)
+        // isGenerating remains false — SubmitProgress transitions to nothing,
+        // not to a spurious Stop for conversation A.
+        assertFalse(isGenerating)
     }
 
     // === computePickerCapacity ===

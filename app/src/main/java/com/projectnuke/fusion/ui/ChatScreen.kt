@@ -2157,7 +2157,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     )
 
                     if (conversationId != originConversationId) {
-                        copiedFile?.let { rollbackPendingAttachment(it.absolutePath) }
+                        copiedFile?.let { discardPendingImport(context, it.absolutePath) }
                         return@launch
                     }
 
@@ -2629,22 +2629,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 }
                                             }
                                             // Install succeeded — transition from SubmitProgress to Stop
-                                            if (currentConversationId == snapshot.conversationId) {
-                                                isGenerating = true
-                                                streamingAssistantText = null
-                                                streamingMetricsLine = null
-                                                generationStatus = if (snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) "인터넷 검색 중..." else "외부 AI API 응답을 기다리는 중..."
-                                            }
                                             activeSubmission = activeSubmission.clearIfMatches(owner)
                                         } catch (e: Exception) {
                                             chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
                                             activeSubmission = activeSubmission.clearIfMatches(owner)
-                                            if (currentConversationId == snapshot.conversationId) {
-                                                isGenerating = false
-                                                generationStatus = null
-                                                streamingAssistantText = null
-                                                streamingMetricsLine = null
-                                            }
                                             if (e is CancellationException) throw e
                                             if (currentConversationId == snapshot.conversationId) {
                                                 Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
@@ -2924,38 +2912,19 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         }
                                         }
                                         // Install succeeded — transition from SubmitProgress to Stop
-                                        if (currentConversationId == snapshot.conversationId) {
-                                            isGenerating = true
-                                            streamingAssistantText = null
-                                            streamingMetricsLine = null
-                                            generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
-                                        }
                                         activeSubmission = activeSubmission.clearIfMatches(owner)
                                     } catch (e: Exception) {
                                         chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
                                         activeSubmission = activeSubmission.clearIfMatches(owner)
-                                        if (currentConversationId == snapshot.conversationId) {
-                                            isGenerating = false
-                                            generationStatus = null
-                                            streamingAssistantText = null
-                                            streamingMetricsLine = null
-                                        }
                                         if (e is kotlinx.coroutines.CancellationException) throw e
                                     }
                                 } catch (e: Exception) {
                                     Log.e("FusionEngine", "Chat generation failed", e)
                                     activeSubmission = activeSubmission.clearIfMatches(owner)
-                                    isGenerating = false
-                                    generationStatus = null
-                                    streamingAssistantText = null
-                                    streamingMetricsLine = null
-                                    if (!userMessageInserted) {
-                                        withContext(NonCancellable) {
-                                            capturedDraftAttachments.forEach { 
-                                                rollbackPendingAttachment(it.localPath)
-                                            }
-                                        }
-                                        if (conversationWasCreated) {
+                                    handlePreCommitFailure(
+                                        userMessageInserted = userMessageInserted,
+                                        conversationWasCreated = conversationWasCreated,
+                                        onDeleteOrphanConversation = {
                                             withContext(NonCancellable) {
                                                 try {
                                                     dao.deleteConversation(activeConversationId)
@@ -2963,9 +2932,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                     Log.e("FusionEngine", "Failed to delete orphan conversation", inner)
                                                 }
                                             }
-                                        }
-                                        Toast.makeText(context, "메시지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
-                                    }
+                                        },
+                                        onShowToast = {
+                                            Toast.makeText(context, "메시지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
+                                        },
+                                    )
                                     if (e is kotlinx.coroutines.CancellationException) throw e
                                 }
                             }
@@ -10291,10 +10262,44 @@ internal fun settleCommittedDraft(
     }
 }
 
-internal fun rollbackPendingAttachment(absolutePath: String) {
-    AttachmentStorageManager.unregisterPendingAttachment(absolutePath)
-    try {
-        File(absolutePath).delete()
-    } catch (_: Exception) {
+internal sealed class DiscardImportResult {
+    data class Success(val path: String) : DiscardImportResult()
+    data class FileAlreadyAbsent(val path: String) : DiscardImportResult()
+    data class DeletionFailed(val path: String) : DiscardImportResult()
+    data class InvalidPath(val path: String) : DiscardImportResult()
+}
+
+internal suspend fun discardPendingImport(
+    context: Context,
+    absolutePath: String
+): DiscardImportResult = withContext(Dispatchers.IO) {
+    val root = AttachmentStorageManager.getAttachmentDirectory(context)
+    if (!File(absolutePath).absolutePath.startsWith(root.absolutePath)) {
+        return@withContext DiscardImportResult.InvalidPath(absolutePath)
+    }
+    val file = File(absolutePath)
+    if (!file.exists()) {
+        AttachmentStorageManager.unregisterPendingAttachment(absolutePath)
+        return@withContext DiscardImportResult.FileAlreadyAbsent(absolutePath)
+    }
+    if (file.delete()) {
+        AttachmentStorageManager.unregisterPendingAttachment(absolutePath)
+        return@withContext DiscardImportResult.Success(absolutePath)
+    } else {
+        return@withContext DiscardImportResult.DeletionFailed(absolutePath)
+    }
+}
+
+internal suspend fun handlePreCommitFailure(
+    userMessageInserted: Boolean,
+    conversationWasCreated: Boolean,
+    onDeleteOrphanConversation: suspend () -> Unit,
+    onShowToast: () -> Unit,
+) {
+    if (!userMessageInserted) {
+        if (conversationWasCreated) {
+            onDeleteOrphanConversation()
+        }
+        onShowToast()
     }
 }
