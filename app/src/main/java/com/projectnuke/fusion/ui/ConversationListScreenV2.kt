@@ -1190,7 +1190,7 @@ fun ConversationListScreenV2(
             title = { Text("앱 정보") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Fusion Beta", color = DrawerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text("Fusion 1.0 Beta Stable", color = DrawerTextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                     Text("버전 이름: ${appInfo.versionName}", color = DrawerTextPrimary, fontSize = 13.sp)
                     Text("버전 코드: ${appInfo.versionCode}", color = DrawerTextPrimary, fontSize = 13.sp)
                     Text("기기: ${Build.MANUFACTURER} ${Build.MODEL}", color = DrawerTextPrimary, fontSize = 13.sp)

@@ -1,5 +1,6 @@
 package com.projectnuke.fusion.ui
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.SharedPreferences
 import android.app.ActivityManager
@@ -71,6 +72,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -98,7 +100,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.room.withTransaction
 import androidx.core.net.toUri
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import com.projectnuke.fusion.ai.buildExternalAiMessages
 import com.projectnuke.fusion.ai.ExternalAiChatResult
 import com.projectnuke.fusion.ai.ExternalAiChatRunner
@@ -125,6 +131,8 @@ import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
 import com.projectnuke.fusion.util.AttachmentMessageCodec
 import com.projectnuke.fusion.util.AttachmentRecord
 import com.projectnuke.fusion.util.AttachmentStorageManager
+import com.projectnuke.fusion.util.FusionThumbnailCache
+import com.projectnuke.fusion.util.PendingAttachmentDiscardResult
 import com.projectnuke.fusion.util.AttachmentCandidate
 import com.projectnuke.fusion.util.validateAttachmentBatch
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
@@ -176,7 +184,6 @@ import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ActivityNotFoundException
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -611,6 +618,7 @@ fun ChatScreen(
     var showModelDialog by remember { mutableStateOf(false) }
     var showAdvancedSettingsDialog by remember { mutableStateOf(false) }
     var showDeleteChatDialog by remember { mutableStateOf(false) }
+    var deletingCurrentConversationId by remember { mutableStateOf<Long?>(null) }
     var showConversationSummaryDialog by remember { mutableStateOf(false) }
     var showConversationSummaryEditor by remember { mutableStateOf(false) }
     var showConversationSummaryDeleteConfirm by remember { mutableStateOf(false) }
@@ -750,12 +758,26 @@ fun ChatScreen(
 
     val scope = rememberCoroutineScope()
     val currentConversationId by rememberUpdatedState(conversationId)
+    var attachmentLifecycleRefreshKey by remember { mutableStateOf(0) }
+    val lifecycleOwner = remember(context) { context.findLifecycleOwner() }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                attachmentLifecycleRefreshKey++
+            }
+        }
+        lifecycleOwner?.lifecycle?.addObserver(observer)
+        onDispose { lifecycleOwner?.lifecycle?.removeObserver(observer) }
+    }
     BackHandler(
         enabled = showModelDialog || showAdvancedSettingsDialog || showDeleteChatDialog || inChatSearchMode || isGenerating || activeSubmission != null || isImportingAttachments
     ) {
         when {
             activeSubmission != null || isImportingAttachments -> {
                 Toast.makeText(context, "처리 중입니다.", Toast.LENGTH_SHORT).show()
+            }
+            deletingCurrentConversationId != null -> {
+                Toast.makeText(context, "채팅을 삭제하는 중입니다.", Toast.LENGTH_SHORT).show()
             }
             showDeleteChatDialog -> showDeleteChatDialog = false
             showAdvancedSettingsDialog -> showAdvancedSettingsDialog = false
@@ -873,13 +895,33 @@ fun ChatScreen(
         )
     }
     val listState = rememberLazyListState()
-    val inChatSearchResults = remember(activeMessageEntities, inChatSearchQuery) {
+    val inChatSearchIndex by produceState<Map<Long, String>?>(
+        initialValue = if (inChatSearchMode) null else emptyMap(),
+        key1 = inChatSearchMode,
+        key2 = activeMessageEntities,
+        key3 = attachmentLifecycleRefreshKey,
+    ) {
+        if (!inChatSearchMode) {
+            value = emptyMap()
+            return@produceState
+        }
+        value = null
+        val snapshot = activeMessageEntities.toList()
+        value = withContext(Dispatchers.IO) {
+            snapshot.associate { message ->
+                message.id to visibleSearchText(context, message.content)
+            }
+        }
+    }
+    val isInChatSearchIndexing = inChatSearchMode && inChatSearchIndex == null
+    val inChatSearchResults = remember(activeMessageEntities, inChatSearchQuery, inChatSearchIndex) {
         val query = inChatSearchQuery.trim()
         if (query.isBlank()) {
             emptyList()
         } else {
+            val index = inChatSearchIndex.orEmpty()
             activeMessageEntities.filter { message ->
-                visibleSearchText(context, message.content).contains(query, ignoreCase = true)
+                index[message.id]?.contains(query, ignoreCase = true) == true
             }
         }
     }
@@ -2111,14 +2153,6 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
         val originConversationId = pickerOriginConversationId
         if (originConversationId != conversationId) {
-            uris.forEach { uri ->
-                runCatching {
-                    context.contentResolver.releasePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    )
-                }
-            }
             Toast.makeText(context, "대화가 변경되어 첨부를 취소했습니다.", Toast.LENGTH_SHORT).show()
             isImportingAttachments = false
             return@rememberLauncherForActivityResult
@@ -2138,14 +2172,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 var success = 0
                 var failed = 0
                 urisToProcess.forEach { uri ->
-                    try {
-                        context.contentResolver.takePersistableUriPermission(
-                            uri,
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        )
-                    } catch (_: SecurityException) {
-                    }
-
+                    // The document is copied into app-managed storage immediately. Persisting the
+                    // source URI would only consume the platform's persisted-grant quota.
                     val displayName = getDisplayNameFromUri(context, uri)
                     val mimeType = context.contentResolver.getType(uri)
                         ?: "application/octet-stream"
@@ -2157,7 +2185,16 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     )
 
                     if (conversationId != originConversationId) {
-                        copiedFile?.let { discardPendingImport(context, it.absolutePath) }
+                        copiedFile?.let { file ->
+                            when (AttachmentStorageManager.discardPendingAttachmentFile(context, file.absolutePath)) {
+                                PendingAttachmentDiscardResult.DeletionFailed ->
+                                    Log.w("FusionAttachment", "Copied attachment could not be deleted after conversation switch")
+                                PendingAttachmentDiscardResult.InvalidPath,
+                                PendingAttachmentDiscardResult.InvalidTarget ->
+                                    Log.e("FusionAttachment", "Rejected copied attachment discard target")
+                                else -> Unit
+                            }
+                        }
                         return@launch
                     }
 
@@ -2220,7 +2257,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     },
                     onDeleteChat = {
                         chatMenuExpanded = false
-                        showDeleteChatDialog = true
+                        if (activeSubmission != null || isImportingAttachments) {
+                            Toast.makeText(context, "현재 작업이 끝난 뒤 채팅을 삭제해 주세요.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            showDeleteChatDialog = true
+                        }
                     },
                     onChatOption = { option ->
                         chatMenuExpanded = false
@@ -2290,10 +2331,20 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     hasAttachments = pendingAttachments.isNotEmpty(),
                     isImportingAttachments = isImportingAttachments,
                     pendingAttachments = pendingAttachments,
+                    attachmentRefreshKey = attachmentLifecycleRefreshKey,
                     onRemoveAttachment = { attachment ->
                         if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
-                        AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
                         pendingAttachments.remove(attachment)
+                        scope.launch {
+                            when (AttachmentStorageManager.discardPendingAttachmentFile(context, attachment.localPath)) {
+                                PendingAttachmentDiscardResult.DeletionFailed ->
+                                    Log.w("FusionAttachment", "Pending attachment deletion failed; registration retained")
+                                PendingAttachmentDiscardResult.InvalidPath,
+                                PendingAttachmentDiscardResult.InvalidTarget ->
+                                    Log.e("FusionAttachment", "Rejected pending attachment deletion target")
+                                else -> Unit
+                            }
+                        }
                     },
                     onAppendQuickPrompt = { preset ->
                         if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
@@ -2374,7 +2425,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             }
                             val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
                             val historyAttachmentRoot = AttachmentStorageManager.getAttachmentDirectory(context)
-                            val capturedMessages = sanitizeTrustedHistory(messages, historyAttachmentRoot)
+                            val capturedRawMessages = messages.toList()
                             val capturedGenerationMode = generationMode
                             val capturedSelectedModel = selectedModel
                             val capturedSelectedModelPath = selectedModelPath
@@ -2404,53 +2455,83 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             activeSubmission = owner
 
                             scope.launch {
-                                var activeConversationId = conversationId
-                                var userMessageInserted = false
-                                var conversationWasCreated = false
+                                val commitState = SubmissionCommitState(conversationId = conversationId)
 
                                 try {
-                                    val now = System.currentTimeMillis()
-
-                                    if (activeConversationId == 0L) {
-                                        val title = capturedMessageText.take(24).ifBlank { "새 대화" }
-
-                                        activeConversationId = dao.insertConversation(
-                                            ConversationEntity(
-                                                title = title,
-                                                createdAt = now,
-                                                updatedAt = now
-                                            )
-                                        )
-                                        conversationWasCreated = true
+                                    val capturedMessages = withContext(Dispatchers.IO) {
+                                        sanitizeTrustedHistory(capturedRawMessages, historyAttachmentRoot)
                                     }
+                                    val now = System.currentTimeMillis()
+                                    val newConversationTitle = capturedMessageText.take(24).ifBlank { "새 대화" }
 
-                                    dao.insertMessage(
-                                        MessageEntity(
-                                            conversationId = activeConversationId,
-                                            role = "user",
-                                            content = userMessageContent,
-                                            createdAt = now
-                                        )
+                                    val commitResult = commitAndSettleUserSubmission(
+                                        state = commitState,
+                                        parentJob = coroutineContext[kotlinx.coroutines.Job],
+                                        runInTransaction = { block ->
+                                            db.withTransaction { block() }
+                                        },
+                                        createConversation = {
+                                            dao.insertConversation(
+                                                ConversationEntity(
+                                                    title = newConversationTitle,
+                                                    createdAt = now,
+                                                    updatedAt = now,
+                                                )
+                                            )
+                                        },
+                                        insertUserMessage = { committedConversationId ->
+                                            dao.insertMessage(
+                                                MessageEntity(
+                                                    conversationId = committedConversationId,
+                                                    role = "user",
+                                                    content = userMessageContent,
+                                                    createdAt = now,
+                                                )
+                                            )
+                                        },
+                                        publishConversation = { createdConversationId ->
+                                            if (currentConversationId == owner.sourceConversationId) {
+                                                onConversationCreated(createdConversationId)
+                                            }
+                                        },
+                                        reconcileCommittedDraft = {
+                                            val reconciliation = reconcileCommittedDraft(
+                                                currentInput = input,
+                                                capturedRawInput = capturedRawInput,
+                                                pendingAttachments = pendingAttachments.toList(),
+                                                capturedDraftPaths = capturedDraftAttachments.map { it.localPath },
+                                            )
+                                            if (reconciliation.shouldClearInput) {
+                                                input = ""
+                                            }
+                                            pendingAttachments.clear()
+                                            pendingAttachments.addAll(reconciliation.remainingAttachments)
+                                            reconciliation.committedPaths.forEach { committedPath ->
+                                                runCatching {
+                                                    AttachmentStorageManager.unregisterPendingAttachment(committedPath)
+                                                }.onFailure { failure ->
+                                                    Log.e("FusionEngine", "Failed to release committed attachment registration", failure)
+                                                }
+                                            }
+                                        },
+                                        updateConversationTimestamp = { committedConversationId ->
+                                            dao.updateConversationTime(committedConversationId, now)
+                                        },
+                                        onPublicationFailure = { failure ->
+                                            Log.e("FusionEngine", "Failed to publish newly created conversation", failure)
+                                        },
+                                        onTimestampFailure = { failure ->
+                                            Log.e("FusionEngine", "Failed to update conversation time", failure)
+                                        },
                                     )
-                                    userMessageInserted = true
+                                    val activeConversationId = commitResult.conversationId
 
-                                    withContext(NonCancellable) {
-                                        settleCommittedDraft(
-                                            input = { input },
-                                            setInput = { input = it },
-                                            capturedRawInput = capturedRawInput,
-                                            pendingAttachments = pendingAttachments,
-                                            capturedDraftPaths = capturedDraftAttachments.map { it.localPath },
-                                            conversationWasCreated = conversationWasCreated,
-                                            activeConversationId = activeConversationId,
-                                            onConversationCreated = onConversationCreated,
-                                            unregisterAttachment = { AttachmentStorageManager.unregisterPendingAttachment(it) }
-                                        )
-                                        try {
-                                            dao.updateConversationTime(activeConversationId, now)
-                                        } catch (e: Exception) {
-                                            Log.e("FusionEngine", "Failed to update conversation time", e)
-                                        }
+                                    if (commitResult.publicationFailure != null) {
+                                        Toast.makeText(
+                                            context,
+                                            "메시지는 저장했지만 새 대화를 바로 열지 못했습니다. 대화 목록에서 다시 열어 주세요.",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
                                     }
 
                                     val requestId = UUID.randomUUID().toString()
@@ -2491,7 +2572,12 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         }
 
                                         try {
-                                            chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
+                                            installGenerationRequestAndSettleOwner(
+                                                owner = owner,
+                                                getActiveOwner = { activeSubmission },
+                                                setActiveOwner = { activeSubmission = it },
+                                            ) {
+                                                chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
                                                 if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
                                                 try {
                                                     if (snapshot.attachmentIds.isNotEmpty()) {
@@ -2627,12 +2713,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 } finally {
                                                     chatViewModel.finishRequestState(s.conversationId, snapshot.requestId)
                                                 }
+                                                }
                                             }
-                                            // Install succeeded — transition from SubmitProgress to Stop
-                                            activeSubmission = activeSubmission.clearIfMatches(owner)
                                         } catch (e: Exception) {
                                             chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
-                                            activeSubmission = activeSubmission.clearIfMatches(owner)
                                             if (e is CancellationException) throw e
                                             if (currentConversationId == snapshot.conversationId) {
                                                 Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
@@ -2653,7 +2737,12 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     }
 
                                     try {
-                                        chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
+                                        installGenerationRequestAndSettleOwner(
+                                            owner = owner,
+                                            getActiveOwner = { activeSubmission },
+                                            setActiveOwner = { activeSubmission = it },
+                                        ) {
+                                            chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
                                         if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
                                         try {
                                             // === WEB SEARCH ===
@@ -2713,8 +2802,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             val missingImage = snapshot.multimodalImagePaths.firstOrNull { !File(it).exists() }
                                             if (missingImage != null) {
                                                 if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                    Toast.makeText(context, "이미지 파일을 찾을 수 없습니다: $missingImage", Toast.LENGTH_LONG).show()
-                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다.\n$missingImage", createdAt = System.currentTimeMillis()))
+                                                    Toast.makeText(context, "이미지 파일을 찾을 수 없습니다. 다시 첨부해 주세요.", Toast.LENGTH_LONG).show()
+                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다. 다시 첨부해 주세요.", createdAt = System.currentTimeMillis()))
                                                     dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
                                                 }
                                                 return@start
@@ -2910,34 +2999,30 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         } finally {
                                             chatViewModel.finishRequestState(s.conversationId, snapshot.requestId)
                                         }
+                                            }
                                         }
-                                        // Install succeeded — transition from SubmitProgress to Stop
-                                        activeSubmission = activeSubmission.clearIfMatches(owner)
                                     } catch (e: Exception) {
                                         chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
-                                        activeSubmission = activeSubmission.clearIfMatches(owner)
                                         if (e is kotlinx.coroutines.CancellationException) throw e
+                                        if (currentConversationId == snapshot.conversationId) {
+                                            Toast.makeText(
+                                                context,
+                                                "메시지는 저장했지만 답변 생성을 시작하지 못했습니다. 다시 시도해 주세요.",
+                                                Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
                                     }
                                 } catch (e: Exception) {
-                                    Log.e("FusionEngine", "Chat generation failed", e)
+                                    Log.e("FusionEngine", "Message submission failed", e)
                                     activeSubmission = activeSubmission.clearIfMatches(owner)
-                                    handlePreCommitFailure(
-                                        userMessageInserted = userMessageInserted,
-                                        conversationWasCreated = conversationWasCreated,
-                                        onDeleteOrphanConversation = {
-                                            withContext(NonCancellable) {
-                                                try {
-                                                    dao.deleteConversation(activeConversationId)
-                                                } catch (inner: Exception) {
-                                                    Log.e("FusionEngine", "Failed to delete orphan conversation", inner)
-                                                }
-                                            }
-                                        },
-                                        onShowToast = {
-                                            Toast.makeText(context, "메시지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
-                                        },
-                                    )
                                     if (e is kotlinx.coroutines.CancellationException) throw e
+
+                                    val message = if (commitState.messageInserted) {
+                                        "메시지는 저장했지만 답변 생성을 시작하지 못했습니다. 다시 시도해 주세요."
+                                    } else {
+                                        "메시지를 저장하지 못했습니다. 입력 내용과 첨부 파일은 그대로 유지했습니다."
+                                    }
+                                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                                 }
                             }
                         }
@@ -2981,7 +3066,20 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 if (messageEntities.isEmpty() && !isGenerating) {
                     EmptyChatBody(bottomPadding = chatContentBottomPadding)
                 } else if (inChatSearchMode) {
-                    if (inChatSearchQuery.trim().isNotEmpty() && inChatSearchResults.isEmpty()) {
+                    if (inChatSearchQuery.trim().isNotEmpty() && isInChatSearchIndexing) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.dp,
+                                color = AccentBlue,
+                            )
+                        }
+                    } else if (inChatSearchQuery.trim().isNotEmpty() && inChatSearchResults.isEmpty()) {
                         EmptyInChatSearchResults()
                     } else {
                         LazyColumn(
@@ -2997,7 +3095,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             ) { result ->
                                 InChatSearchResultRow(
                                     role = if (result.role == "user") "사용자" else "Fusion",
-                                    preview = visibleSearchText(context, result.content),
+                                    preview = inChatSearchIndex?.get(result.id).orEmpty(),
                                     onClick = {
                                         scope.launch {
                                             val idx = activeMessageEntities.indexOfFirst { it.id == result.id }
@@ -3025,7 +3123,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             key = { it.id }
                         ) { message ->
                             when (message.role) {
-                                "user" -> UserMessageBubble(message.content)
+                                "user" -> UserMessageBubble(
+                                    content = message.content,
+                                    attachmentRefreshKey = attachmentLifecycleRefreshKey,
+                                )
                                 else -> {
                                     val versionGroup = chatTimeline
                                         .filterIsInstance<ChatTimelineItem.AssistantVersions>()
@@ -3414,42 +3515,86 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
     }
 
     if (showDeleteChatDialog) {
+        val deleteTargetId = conversationId
+        val isDeletingCurrentChat = deletingCurrentConversationId == deleteTargetId
+        val deletionBusy = deletingCurrentConversationId != null
         AlertDialog(
-            onDismissRequest = { showDeleteChatDialog = false },
+            onDismissRequest = {
+                if (!deletionBusy) showDeleteChatDialog = false
+            },
             title = {
                 Text("채팅 삭제")
             },
             text = {
-                Text("이 채팅을 삭제할까요?")
+                if (isDeletingCurrentChat) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = DangerRed,
+                        )
+                        Text("채팅을 삭제하는 중입니다…")
+                    }
+                } else {
+                    Text("이 채팅을 삭제할까요?")
+                }
             },
             dismissButton = {
-                TextButton(onClick = { showDeleteChatDialog = false }) {
+                TextButton(
+                    enabled = !deletionBusy,
+                    onClick = { showDeleteChatDialog = false },
+                ) {
                     Text("취소")
                 }
             },
             confirmButton = {
                 TextButton(
-                    onClick = {
-                        showDeleteChatDialog = false
+                    enabled = !deletionBusy,
+                    onClick = deleteClick@{
+                        if (deletingCurrentConversationId != null) return@deleteClick
+                        val targetId = deleteTargetId
+                        deletingCurrentConversationId = targetId
                         scope.launch {
-                            val targetId = conversationId
-                            if (targetId != 0L) {
-                                chatViewModel.cancelAndAwait(targetId, reason = "delete-conversation")
-                                // Re-check existence: a race could have removed it.
-                                if (dao.getConversationById(targetId) != null) {
-                                    dao.deleteConversation(targetId)
+                            try {
+                                if (targetId != 0L) {
+                                    chatViewModel.cancelAndAwait(targetId, reason = "delete-conversation")
+                                    withContext(NonCancellable) {
+                                        // Re-check existence: another deletion path may have won the race.
+                                        if (dao.getConversationById(targetId) != null) {
+                                            dao.deleteConversation(targetId)
+                                        }
+                                    }
+                                }
+                                input = ""
+                                clearPendingAttachmentDrafts(context, pendingAttachments)
+                                streamingAssistantText = null
+                                streamingMetricsLine = null
+                                generationStatus = null
+                                showDeleteChatDialog = false
+                                onNewChat()
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                Log.e("FusionDelete", "Failed to delete current conversation", e)
+                                Toast.makeText(
+                                    context,
+                                    "채팅을 삭제하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            } finally {
+                                if (deletingCurrentConversationId == targetId) {
+                                    deletingCurrentConversationId = null
                                 }
                             }
-                            input = ""
-                            clearPendingAttachmentDrafts(pendingAttachments)
-                            streamingAssistantText = null
-                            streamingMetricsLine = null
-                            generationStatus = null
-                            onNewChat()
                         }
-                    }
+                    },
                 ) {
-                    Text("삭제", color = DangerRed)
+                    Text(
+                        text = if (isDeletingCurrentChat) "삭제 중…" else "삭제",
+                        color = if (deletionBusy) DangerRed.copy(alpha = 0.4f) else DangerRed,
+                    )
                 }
             },
             containerColor = PanelBg,
@@ -4598,10 +4743,11 @@ private fun ActionIcon(
 }
 @Composable
 private fun UserMessageBubble(
-    content: String
+    content: String,
+    attachmentRefreshKey: Int,
 ) {
     val context = LocalContext.current
-    val parsed = remember(content) {
+    val parsed = remember(content, attachmentRefreshKey) {
         parseMessageAttachments(context, content)
     }
 
@@ -4617,7 +4763,8 @@ private fun UserMessageBubble(
             ) {
                 AttachmentCard(
                     attachment = attachment,
-                    onRemove = null
+                    onRemove = null,
+                    lifecycleRefreshKey = attachmentRefreshKey,
                 )
             }
         }
@@ -4662,6 +4809,7 @@ private fun ChatInputBar(
     onSendClick: () -> Unit,
     onStopClick: () -> Unit,
     pendingAttachments: List<LocalAttachment>,
+    attachmentRefreshKey: Int,
     onRemoveAttachment: (LocalAttachment) -> Unit,
     onAppendQuickPrompt: (String) -> Unit,
 ) {
@@ -4678,7 +4826,8 @@ private fun ChatInputBar(
                 PendingAttachmentTray(
                     attachments = pendingAttachments,
                     onRemove = onRemoveAttachment,
-                    enabled = enabled
+                    enabled = enabled,
+                    attachmentRefreshKey = attachmentRefreshKey,
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
@@ -4702,8 +4851,8 @@ private fun ChatInputBar(
                     )
                 }
             }
-            if (quickPromptExpanded && !enabled) {
-                quickPromptExpanded = false
+            LaunchedEffect(enabled) {
+                if (!enabled) quickPromptExpanded = false
             }
             if (quickPromptExpanded) {
                 QuickPromptChips(
@@ -4998,7 +5147,8 @@ private fun CircleTextButton(
 private fun PendingAttachmentTray(
     attachments: List<LocalAttachment>,
     onRemove: (LocalAttachment) -> Unit,
-    enabled: Boolean
+    enabled: Boolean,
+    attachmentRefreshKey: Int,
 ) {
     Column(
         modifier = Modifier
@@ -5009,7 +5159,8 @@ private fun PendingAttachmentTray(
         attachments.forEach { attachment ->
             AttachmentCard(
                 attachment = attachment,
-                onRemove = if (enabled) { { onRemove(attachment) } } else null
+                onRemove = if (enabled) { { onRemove(attachment) } } else null,
+                lifecycleRefreshKey = attachmentRefreshKey,
             )
         }
     }
@@ -5018,15 +5169,25 @@ private fun PendingAttachmentTray(
 @Composable
 private fun AttachmentCard(
     attachment: LocalAttachment,
-    onRemove: (() -> Unit)? = null
+    onRemove: (() -> Unit)? = null,
+    lifecycleRefreshKey: Int = 0,
 ) {
     val context = LocalContext.current
+    var localRefreshKey by remember(attachment.localPath) { mutableStateOf(0) }
+    val previewState by rememberAttachmentPreviewState(
+        attachment = attachment,
+        refreshKey = lifecycleRefreshKey to localRefreshKey,
+    )
+    val isAvailable = previewState !is AttachmentPreviewLoadState.Unavailable
+    val canOpen = isAvailable && previewState !is AttachmentPreviewLoadState.Loading
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable {
-                openAttachmentFile(context, attachment)
+            .clickable(enabled = canOpen) {
+                if (!openAttachmentFile(context, attachment)) {
+                    localRefreshKey++
+                }
             },
         shape = RoundedCornerShape(14.dp),
         color = Color(0xFF202020)
@@ -5035,28 +5196,29 @@ private fun AttachmentCard(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AttachmentPreview(attachment = attachment)
+            AttachmentPreview(
+                attachment = attachment,
+                state = previewState,
+            )
 
             Spacer(modifier = Modifier.width(10.dp))
 
-            Column(
-                modifier = Modifier.weight(1f)
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 val displayName = attachment.name.ifBlank {
                     attachment.localPath.substringAfterLast(File.separator).ifBlank { "첨부 파일" }
                 }
                 val displayMime = attachment.mimeType.ifBlank { "application/octet-stream" }
                 Text(
                     text = displayName,
-                    color = TextPrimary,
+                    color = if (isAvailable) TextPrimary else TextSecondary.copy(alpha = 0.5f),
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = displayMime,
-                    color = TextSecondary,
+                    text = if (isAvailable) displayMime else "첨부 파일을 찾을 수 없습니다.",
+                    color = if (isAvailable) TextSecondary else TextSecondary.copy(alpha = 0.4f),
                     fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -5168,50 +5330,106 @@ private fun buildImageUserInstruction(
         "이 이미지를 자세히 설명해 주세요."
     }
 }
-@Composable
-private fun AttachmentPreview(
-    attachment: LocalAttachment
-) {
-    val context = LocalContext.current
-    val resolvedFile = remember(attachment.localPath) {
-        AttachmentStorageManager.resolveManagedAttachment(
-            AttachmentStorageManager.getAttachmentDirectory(context),
-            attachment.localPath
-        )
-    }
-    val bitmap = remember(resolvedFile, attachment.mimeType) {
-        if (resolvedFile != null && attachment.mimeType.startsWith("image/")) {
-            loadAttachmentThumbnail(resolvedFile.canonicalPath)
-        } else {
-            null
-        }
-    }
+private sealed interface AttachmentPreviewLoadState {
+    data object Loading : AttachmentPreviewLoadState
+    data object Generic : AttachmentPreviewLoadState
+    data object Unavailable : AttachmentPreviewLoadState
+    data class Image(val bitmap: android.graphics.Bitmap) : AttachmentPreviewLoadState
+}
 
-    if (bitmap != null) {
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = attachment.name,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(46.dp)
-                .clip(RoundedCornerShape(8.dp))
-        )
-    } else {
-        Box(
-            modifier = Modifier
-                .size(46.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF2B2B2B)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = attachmentIcon(attachment.mimeType),
-                color = TextPrimary,
-                fontSize = 22.sp
+@Composable
+private fun rememberAttachmentPreviewState(
+    attachment: LocalAttachment,
+    refreshKey: Any,
+): androidx.compose.runtime.State<AttachmentPreviewLoadState> {
+    val context = LocalContext.current
+    return produceState<AttachmentPreviewLoadState>(
+        initialValue = AttachmentPreviewLoadState.Loading,
+        key1 = attachment.localPath,
+        key2 = attachment.mimeType,
+        key3 = refreshKey,
+    ) {
+        value = AttachmentPreviewLoadState.Loading
+        value = withContext(Dispatchers.IO) {
+            val resolvedFile = AttachmentStorageManager.resolveManagedAttachment(
+                AttachmentStorageManager.getAttachmentDirectory(context),
+                attachment.localPath,
             )
+            when {
+                resolvedFile == null -> AttachmentPreviewLoadState.Unavailable
+                !attachment.mimeType.startsWith("image/") -> AttachmentPreviewLoadState.Generic
+                else -> FusionThumbnailCache.get(resolvedFile.canonicalPath)
+                    ?.let(AttachmentPreviewLoadState::Image)
+                    ?: AttachmentPreviewLoadState.Unavailable
+            }
         }
     }
 }
+
+@Composable
+private fun AttachmentPreview(
+    attachment: LocalAttachment,
+    state: AttachmentPreviewLoadState,
+) {
+    when (state) {
+        is AttachmentPreviewLoadState.Image -> {
+            Image(
+                bitmap = state.bitmap.asImageBitmap(),
+                contentDescription = attachment.name.ifBlank { "첨부 이미지" },
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(8.dp)),
+            )
+        }
+        AttachmentPreviewLoadState.Loading -> {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF2B2B2B)),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = AccentBlue,
+                )
+            }
+        }
+        AttachmentPreviewLoadState.Unavailable -> {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF2B2B2B)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "⚠",
+                    color = TextSecondary,
+                    fontSize = 20.sp,
+                )
+            }
+        }
+        AttachmentPreviewLoadState.Generic -> {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF2B2B2B)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = attachmentIcon(attachment.mimeType),
+                    color = TextPrimary,
+                    fontSize = 22.sp,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun CircleIconButton(
     icon: ImageVector,
@@ -9681,46 +9899,10 @@ private fun cleanDuckDuckGoUrl(raw: String): String {
         .replace("&amp;", "&")
         .trim()
 }
-private fun loadAttachmentThumbnail(
-    path: String,
-    targetSize: Int = 160
-): android.graphics.Bitmap? {
-    return try {
-        val boundsOptions = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
-        }
-
-        BitmapFactory.decodeFile(path, boundsOptions)
-
-        val originalWidth = boundsOptions.outWidth
-        val originalHeight = boundsOptions.outHeight
-
-        if (originalWidth <= 0 || originalHeight <= 0) {
-            return null
-        }
-
-        var sampleSize = 1
-        while (
-            originalWidth / sampleSize > targetSize * 2 ||
-            originalHeight / sampleSize > targetSize * 2
-        ) {
-            sampleSize *= 2
-        }
-
-        val decodeOptions = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-        }
-
-        BitmapFactory.decodeFile(path, decodeOptions)
-    } catch (_: Exception) {
-        null
-    }
-}
-
 private fun openAttachmentFile(
     context: Context,
     attachment: LocalAttachment
-) {
+): Boolean {
     val resolved = AttachmentStorageManager.resolveManagedAttachment(
         AttachmentStorageManager.getAttachmentDirectory(context),
         attachment.localPath
@@ -9732,31 +9914,28 @@ private fun openAttachmentFile(
             "첨부 파일을 찾을 수 없습니다.",
             Toast.LENGTH_SHORT
         ).show()
-        return
+        return false
     }
 
-    try {
+    return try {
         val uri = FusionFileProvider.uriFor(context, resolved)
-
         val intent = Intent(Intent.ACTION_VIEW).apply {
             val mime = attachment.mimeType.ifBlank { "application/octet-stream" }
             setDataAndType(uri, mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-
-        context.startActivity(
-            Intent.createChooser(intent, "파일 열기")
-        )
+        context.startActivity(Intent.createChooser(intent, "파일 열기"))
+        true
     } catch (_: ActivityNotFoundException) {
         Toast.makeText(context, "이 파일을 열 수 있는 앱이 없습니다.", Toast.LENGTH_SHORT).show()
+        true
     } catch (e: Exception) {
-        Toast.makeText(
-            context,
-            "파일을 열 수 없습니다.",
-            Toast.LENGTH_SHORT
-        ).show()
+        Log.e("FusionAttachment", "Failed to open attachment", e)
+        Toast.makeText(context, "파일을 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+        false
     }
 }
+
 private fun shortModelName(name: String): String {
     return when {
         name.contains("Gemma 4 E2B", ignoreCase = true) -> "Gemma 4 E2B"
@@ -10095,6 +10274,21 @@ Do not output hidden reasoning.
         .filter { it.isNotBlank() }
         .joinToString("\n\n")
 }
+private fun Context.findLifecycleOwner(): LifecycleOwner? {
+    var current: Context = this
+    while (true) {
+        when (current) {
+            is LifecycleOwner -> return current
+            is ContextWrapper -> {
+                val base = current.baseContext
+                if (base === current) return null
+                current = base
+            }
+            else -> return null
+        }
+    }
+}
+
 private fun getAttachmentDirectory(context: Context): File {
     return AttachmentStorageManager.getAttachmentDirectory(context)
 }
@@ -10105,39 +10299,58 @@ private suspend fun copyUriToAttachmentFile(
     displayName: String
 ): File? {
     return withContext(Dispatchers.IO) {
+        var outputFile: File? = null
         try {
             val safeName = displayName
                 .replace(Regex("""[\\/:*?"<>|]"""), "_")
+                .take(48)
                 .ifBlank { "attachment" }
 
-            val outputFile = File(
+            val targetFile = File(
                 getAttachmentDirectory(context),
-                "${System.currentTimeMillis()}_$safeName"
+                "${UUID.randomUUID()}_$safeName"
             )
+            outputFile = targetFile
 
             context.contentResolver.openInputStream(uri)?.use { input ->
-                outputFile.outputStream().use { output ->
+                targetFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
             } ?: return@withContext null
 
-            if (outputFile.exists() && outputFile.length() > 0L) {
-                AttachmentStorageManager.registerPendingAttachment(outputFile)
-                outputFile
+            if (targetFile.exists() && targetFile.length() > 0L) {
+                AttachmentStorageManager.registerPendingAttachment(targetFile)
+                targetFile
             } else {
+                targetFile.delete()
                 null
             }
+        } catch (cancellation: CancellationException) {
+            outputFile?.delete()
+            throw cancellation
         } catch (_: Exception) {
+            outputFile?.delete()
             null
         }
     }
 }
 
-private fun clearPendingAttachmentDrafts(pendingAttachments: MutableList<LocalAttachment>) {
-    pendingAttachments.forEach { attachment ->
-        AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
-    }
+private suspend fun clearPendingAttachmentDrafts(
+    context: Context,
+    pendingAttachments: MutableList<LocalAttachment>,
+) {
+    val paths = pendingAttachments.map { it.localPath }
     pendingAttachments.clear()
+    paths.forEach { path ->
+        when (AttachmentStorageManager.discardPendingAttachmentFile(context, path)) {
+            PendingAttachmentDiscardResult.DeletionFailed ->
+                Log.w("FusionAttachment", "Pending draft cleanup could not delete a file; registration retained")
+            PendingAttachmentDiscardResult.InvalidPath,
+            PendingAttachmentDiscardResult.InvalidTarget ->
+                Log.e("FusionAttachment", "Rejected pending draft cleanup target")
+            else -> Unit
+        }
+    }
 }
 
 private fun buildMessageContentWithAttachments(
@@ -10238,68 +10451,4 @@ private fun buildModelUserContent(
 internal fun MessageSubmissionOwner?.clearIfMatches(owner: MessageSubmissionOwner): MessageSubmissionOwner? {
     if (this?.token == owner.token) return null
     return this
-}
-
-internal fun settleCommittedDraft(
-    input: () -> String,
-    setInput: (String) -> Unit,
-    capturedRawInput: String,
-    pendingAttachments: MutableList<LocalAttachment>,
-    capturedDraftPaths: List<String>,
-    conversationWasCreated: Boolean,
-    activeConversationId: Long,
-    onConversationCreated: (Long) -> Unit,
-    unregisterAttachment: (String) -> Unit,
-) {
-    if (input() == capturedRawInput) {
-        setInput("")
-    }
-    val committed = capturedDraftPaths.toSet()
-    pendingAttachments.removeAll { it.localPath in committed }
-    capturedDraftPaths.forEach(unregisterAttachment)
-    if (conversationWasCreated) {
-        onConversationCreated(activeConversationId)
-    }
-}
-
-internal sealed class DiscardImportResult {
-    data class Success(val path: String) : DiscardImportResult()
-    data class FileAlreadyAbsent(val path: String) : DiscardImportResult()
-    data class DeletionFailed(val path: String) : DiscardImportResult()
-    data class InvalidPath(val path: String) : DiscardImportResult()
-}
-
-internal suspend fun discardPendingImport(
-    context: Context,
-    absolutePath: String
-): DiscardImportResult = withContext(Dispatchers.IO) {
-    val root = AttachmentStorageManager.getAttachmentDirectory(context)
-    if (!File(absolutePath).absolutePath.startsWith(root.absolutePath)) {
-        return@withContext DiscardImportResult.InvalidPath(absolutePath)
-    }
-    val file = File(absolutePath)
-    if (!file.exists()) {
-        AttachmentStorageManager.unregisterPendingAttachment(absolutePath)
-        return@withContext DiscardImportResult.FileAlreadyAbsent(absolutePath)
-    }
-    if (file.delete()) {
-        AttachmentStorageManager.unregisterPendingAttachment(absolutePath)
-        return@withContext DiscardImportResult.Success(absolutePath)
-    } else {
-        return@withContext DiscardImportResult.DeletionFailed(absolutePath)
-    }
-}
-
-internal suspend fun handlePreCommitFailure(
-    userMessageInserted: Boolean,
-    conversationWasCreated: Boolean,
-    onDeleteOrphanConversation: suspend () -> Unit,
-    onShowToast: () -> Unit,
-) {
-    if (!userMessageInserted) {
-        if (conversationWasCreated) {
-            onDeleteOrphanConversation()
-        }
-        onShowToast()
-    }
 }

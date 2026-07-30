@@ -3,6 +3,7 @@ package com.projectnuke.fusion.util
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import java.io.File
 
 object FusionThumbnailCache {
     private const val DefaultTargetSize = 160
@@ -11,9 +12,11 @@ object FusionThumbnailCache {
     }
 
     fun get(path: String, targetSize: Int = DefaultTargetSize): Bitmap? {
-        val key = "$path:$targetSize"
+        val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return null
+        if (!file.isFile) return null
+        val key = "${file.path}:${file.lastModified()}:${file.length()}:$targetSize"
         cache.get(key)?.takeIf { !it.isRecycled }?.let { return it }
-        val bitmap = decodeThumbnail(path, targetSize) ?: return null
+        val bitmap = decodeThumbnail(file.path, targetSize) ?: return null
         cache.put(key, bitmap)
         return bitmap
     }

@@ -26,6 +26,14 @@ data class CleanupResult(
     val deletedFiles: Int
 )
 
+internal sealed class PendingAttachmentDiscardResult {
+    data object Deleted : PendingAttachmentDiscardResult()
+    data object AlreadyAbsent : PendingAttachmentDiscardResult()
+    data object InvalidPath : PendingAttachmentDiscardResult()
+    data object InvalidTarget : PendingAttachmentDiscardResult()
+    data object DeletionFailed : PendingAttachmentDiscardResult()
+}
+
 internal data class AttachmentCandidate(
     val name: String,
     val mimeType: String,
@@ -68,20 +76,72 @@ object AttachmentStorageManager {
         safeCanonicalPath(path)?.let { pendingAttachmentPaths.remove(it) }
     }
 
+    internal suspend fun discardPendingAttachmentFile(
+        context: Context,
+        path: String?
+    ): PendingAttachmentDiscardResult = withContext(Dispatchers.IO) {
+        discardPendingAttachmentFile(
+            attachmentRoot = getAttachmentDirectory(context),
+            path = path,
+        )
+    }
+
     suspend fun deletePendingAttachmentFile(
         context: Context,
         path: String?
-    ): Boolean = withContext(Dispatchers.IO) {
-        if (path.isNullOrBlank()) return@withContext false
-        val attachmentDirCanonical = safeCanonicalPath(getAttachmentDirectory(context).absolutePath)
-            ?: return@withContext false
-        val targetFile = File(path)
-        val targetCanonical = safeCanonicalPath(targetFile.absolutePath) ?: return@withContext false
-        if (!isInAttachmentDirectory(targetCanonical, attachmentDirCanonical)) {
-            return@withContext false
+    ): Boolean {
+        return when (discardPendingAttachmentFile(context, path)) {
+            PendingAttachmentDiscardResult.Deleted,
+            PendingAttachmentDiscardResult.AlreadyAbsent -> true
+            else -> false
         }
-        unregisterPendingAttachment(targetCanonical)
-        targetFile.exists() && targetFile.delete()
+    }
+
+    internal fun discardPendingAttachmentFile(
+        attachmentRoot: File,
+        path: String?,
+        deleteFile: (File) -> Boolean = { it.delete() },
+    ): PendingAttachmentDiscardResult {
+        if (path.isNullOrBlank()) return PendingAttachmentDiscardResult.InvalidPath
+
+        val rootCanonical = runCatching { attachmentRoot.canonicalFile }.getOrNull()
+            ?: return PendingAttachmentDiscardResult.InvalidPath
+        val suppliedFile = runCatching { File(path) }.getOrNull()
+            ?: return PendingAttachmentDiscardResult.InvalidPath
+        val suppliedPath = runCatching { suppliedFile.toPath() }.getOrNull()
+            ?: return PendingAttachmentDiscardResult.InvalidPath
+        if (Files.isSymbolicLink(suppliedPath)) {
+            return PendingAttachmentDiscardResult.InvalidTarget
+        }
+
+        val targetCanonical = runCatching { suppliedFile.canonicalFile }.getOrNull()
+            ?: return PendingAttachmentDiscardResult.InvalidPath
+        if (targetCanonical.parentFile?.canonicalPath != rootCanonical.canonicalPath) {
+            return PendingAttachmentDiscardResult.InvalidPath
+        }
+
+        val targetPath = targetCanonical.canonicalPath
+        if (!targetCanonical.exists()) {
+            unregisterPendingAttachment(targetPath)
+            return PendingAttachmentDiscardResult.AlreadyAbsent
+        }
+        if (!targetCanonical.isFile) {
+            return PendingAttachmentDiscardResult.InvalidTarget
+        }
+
+        return if (deleteFile(targetCanonical)) {
+            unregisterPendingAttachment(targetPath)
+            PendingAttachmentDiscardResult.Deleted
+        } else {
+            // Keep the registration so cleanup cannot race a file that failed to delete.
+            PendingAttachmentDiscardResult.DeletionFailed
+        }
+    }
+
+    internal fun isPendingAttachmentRegistered(path: String?): Boolean {
+        if (path.isNullOrBlank()) return false
+        val canonical = safeCanonicalPath(path) ?: return false
+        return canonical in pendingAttachmentPaths
     }
 
     internal fun classifyAttachment(attachmentRoot: File, path: String): AttachmentClassification {

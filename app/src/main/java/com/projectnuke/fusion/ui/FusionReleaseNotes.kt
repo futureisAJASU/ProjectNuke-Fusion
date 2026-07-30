@@ -1,4 +1,4 @@
-﻿package com.projectnuke.fusion.ui
+package com.projectnuke.fusion.ui
 
 import android.content.Context
 import android.os.Build
@@ -248,17 +248,71 @@ private fun releaseNoteGroupKey(version: String): String {
 
 private fun releaseNoteGroupOrder(groupKey: String): Int {
     return when (groupKey) {
-        "0.4.x" -> 0
-        "0.3.x" -> 1
-        "0.2.x" -> 2
-        "0.1.x" -> 3
-        "기타" -> 4
-        else -> 5
+        "1.0.x" -> 0
+        "0.4.x" -> 1
+        "0.3.x" -> 2
+        "0.2.x" -> 3
+        "0.1.x" -> 4
+        "기타" -> 5
+        else -> 6
     }
 }
 
 private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
     return listOf(
+        FusionReleaseNote(
+            version = "1.0.0-beta-stable",
+            status = "Beta Stable",
+            summary = "일상 사용을 목표로 메시지 전송, 생성 세션, 첨부 파일과 대화 삭제 흐름을 전면 안정화했습니다.",
+            sections = listOf(
+                FusionReleaseNoteSection(
+                    title = "메시지 전송과 대화 안정성",
+                    items = listOf(
+                        "빠른 연속 전송과 오래된 coroutine 종료가 새 전송 상태를 덮어쓰는 문제를 차단했습니다.",
+                        "새 대화와 사용자 메시지 저장을 Room transaction 기반 cancellation-safe commit으로 묶어 빈 대화와 중복 메시지가 생길 수 있는 경계를 줄였습니다.",
+                        "메시지 저장 후에만 새 대화를 공개하고, 저장된 초안과 첨부 항목을 정확히 한 번 정리하도록 개선했습니다.",
+                        "대화를 전환해도 다른 대화의 Stop 버튼과 생성 상태가 잘못 나타나거나 사라지지 않도록 수정했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "생성·중단·재시도",
+                    items = listOf(
+                        "대화별 생성 세션 소유권과 request identity를 분리해 stale 응답과 잘못된 상태 정리를 방지했습니다.",
+                        "생성 요청이 실제로 취소 가능한 상태가 된 뒤에만 Stop 버튼으로 전환하도록 정리했습니다.",
+                        "로컬 모델과 외부 AI API의 설치 실패, 취소, 빈 응답과 저장 실패 안내를 더 일관되게 처리했습니다.",
+                        "첨부 파일이 누락된 재시도와 외부 API 첨부 재시도를 request 생성 전에 차단합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "첨부 파일 안전성과 성능",
+                    items = listOf(
+                        "첨부 metadata를 엄격한 v3 envelope로 저장하고 로컬 경로와 Base64 정보가 모델 또는 외부 API 기록에 노출되지 않도록 정리했습니다.",
+                        "관리 저장소 밖 경로, traversal, directory와 symlink를 신뢰하지 않으며 누락 파일은 별도 unavailable 상태로 표시합니다.",
+                        "첨부 가져오기와 삭제를 직렬화하고 최대 5개 제한, 일부 실패와 제한 제외 개수를 정확히 안내합니다.",
+                        "이미지 thumbnail의 파일 검사와 downsample decode를 IO dispatcher로 옮기고 RGB_565를 사용해 입력창 멈춤과 메모리 사용량을 줄였습니다.",
+                        "앱 복귀와 파일 열기 실패 시 첨부 상태를 재검증해 사라진 파일을 즉시 unavailable 카드로 전환합니다.",
+                        "대화 검색용 본문 색인을 백그라운드에서 한 번 생성해 검색어를 입력할 때마다 파일 시스템을 다시 검사하지 않도록 개선했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "대화 삭제와 UI 일관성",
+                    items = listOf(
+                        "모든 대화 삭제 진입점에서 진행 중인 생성을 먼저 취소하고 완료를 기다린 뒤 삭제하도록 통일했습니다.",
+                        "삭제 중 dialog dismiss, 취소와 삭제 버튼을 실제로 잠그고 진행 상태와 오류 문구를 일관되게 표시합니다.",
+                        "생성·전송·첨부 가져오기 중 composer 변경, 빠른 프롬프트, 모드 변경과 첨부 제거를 일관되게 잠급니다.",
+                        "사용할 수 없는 첨부와 실패 상태가 활성 control처럼 보이지 않도록 시각 상태를 정리했습니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "Beta Stable 안내",
+                    items = listOf(
+                        "핵심 채팅 기능을 일상적으로 시험할 수 있는 1.0.0 Beta Stable 기준으로 버전 체계를 올렸습니다.",
+                        "로컬 모델의 실제 속도와 메모리 사용량은 기기, 모델 형식과 런타임 backend에 따라 달라질 수 있습니다.",
+                        "음성 입력과 보이스 모드는 아직 안내 단계이며 이번 버전의 안정화 범위에 포함되지 않습니다."
+                    )
+                )
+            )
+        ),
         FusionReleaseNote(
             version = "0.4.23-alpha",
             status = "알파",

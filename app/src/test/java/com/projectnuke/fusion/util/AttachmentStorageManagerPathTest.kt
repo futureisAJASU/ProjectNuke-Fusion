@@ -733,4 +733,149 @@ class AttachmentStorageManagerPathTest {
         assertEquals(body, parsed.body.trim())
         root.deleteRecursively()
     }
+    @Test
+    fun `pending discard deletes direct managed file and unregisters it`() {
+        val root = Files.createTempDirectory("discard_root").toFile()
+        val file = File(root, "pending.txt").apply { writeText("data") }
+        AttachmentStorageManager.registerPendingAttachment(file)
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(root, file.absolutePath)
+
+        assertEquals(PendingAttachmentDiscardResult.Deleted, result)
+        assertFalse(file.exists())
+        assertFalse(AttachmentStorageManager.isPendingAttachmentRegistered(file.absolutePath))
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `pending discard treats absent managed file as settled and unregisters it`() {
+        val root = Files.createTempDirectory("discard_root").toFile()
+        val file = File(root, "pending.txt").apply { writeText("data") }
+        AttachmentStorageManager.registerPendingAttachment(file)
+        assertTrue(file.delete())
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(root, file.absolutePath)
+
+        assertEquals(PendingAttachmentDiscardResult.AlreadyAbsent, result)
+        assertFalse(AttachmentStorageManager.isPendingAttachmentRegistered(file.absolutePath))
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `pending discard failure preserves registration`() {
+        val root = Files.createTempDirectory("discard_root").toFile()
+        val file = File(root, "pending.txt").apply { writeText("data") }
+        AttachmentStorageManager.registerPendingAttachment(file)
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(
+            attachmentRoot = root,
+            path = file.absolutePath,
+            deleteFile = { false },
+        )
+
+        assertEquals(PendingAttachmentDiscardResult.DeletionFailed, result)
+        assertTrue(file.exists())
+        assertTrue(AttachmentStorageManager.isPendingAttachmentRegistered(file.absolutePath))
+        AttachmentStorageManager.unregisterPendingAttachment(file.absolutePath)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `pending discard rejects sibling prefix path`() {
+        val parent = Files.createTempDirectory("discard_parent").toFile()
+        val root = File(parent, "attachments").apply { mkdirs() }
+        val sibling = File(parent, "attachments_backup").apply { mkdirs() }
+        val file = File(sibling, "outside.txt").apply { writeText("data") }
+        AttachmentStorageManager.registerPendingAttachment(file)
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(root, file.absolutePath)
+
+        assertEquals(PendingAttachmentDiscardResult.InvalidPath, result)
+        assertTrue(file.exists())
+        assertTrue(AttachmentStorageManager.isPendingAttachmentRegistered(file.absolutePath))
+        AttachmentStorageManager.unregisterPendingAttachment(file.absolutePath)
+        parent.deleteRecursively()
+    }
+
+    @Test
+    fun `pending discard rejects nested target because imports are direct children`() {
+        val root = Files.createTempDirectory("discard_root").toFile()
+        val nestedDir = File(root, "nested").apply { mkdirs() }
+        val file = File(nestedDir, "pending.txt").apply { writeText("data") }
+        AttachmentStorageManager.registerPendingAttachment(file)
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(root, file.absolutePath)
+
+        assertEquals(PendingAttachmentDiscardResult.InvalidPath, result)
+        assertTrue(file.exists())
+        assertTrue(AttachmentStorageManager.isPendingAttachmentRegistered(file.absolutePath))
+        AttachmentStorageManager.unregisterPendingAttachment(file.absolutePath)
+        root.deleteRecursively()
+    }
+
+
+    @Test
+    fun `pending discard rejects a managed directory`() {
+        val root = Files.createTempDirectory("discard_root").toFile()
+        val directory = File(root, "not_a_file").apply { mkdirs() }
+        AttachmentStorageManager.registerPendingAttachment(directory)
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(root, directory.absolutePath)
+
+        assertEquals(PendingAttachmentDiscardResult.InvalidTarget, result)
+        assertTrue(directory.exists())
+        assertTrue(AttachmentStorageManager.isPendingAttachmentRegistered(directory.absolutePath))
+        AttachmentStorageManager.unregisterPendingAttachment(directory.absolutePath)
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `pending discard rejects final symlink`() {
+        val root = Files.createTempDirectory("discard_root")
+        val outside = Files.createTempFile("discard_outside", ".txt")
+        val link = root.resolve("link.txt")
+        try {
+            Files.createSymbolicLink(link, outside)
+        } catch (_: UnsupportedOperationException) {
+            root.toFile().deleteRecursively()
+            outside.toFile().delete()
+            return
+        }
+        AttachmentStorageManager.registerPendingAttachment(link.toFile())
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(root.toFile(), link.toString())
+
+        assertEquals(PendingAttachmentDiscardResult.InvalidTarget, result)
+        assertTrue(Files.exists(outside))
+        AttachmentStorageManager.unregisterPendingAttachment(link.toString())
+        root.toFile().deleteRecursively()
+        outside.toFile().delete()
+    }
+
+    @Test
+    fun `pending discard rejects intermediate symlink escape`() {
+        val root = Files.createTempDirectory("discard_root")
+        val outsideDir = Files.createTempDirectory("discard_outside")
+        val outsideFile = outsideDir.resolve("outside.txt")
+        Files.writeString(outsideFile, "data")
+        val linkDir = root.resolve("linked")
+        try {
+            Files.createSymbolicLink(linkDir, outsideDir)
+        } catch (_: UnsupportedOperationException) {
+            root.toFile().deleteRecursively()
+            outsideDir.toFile().deleteRecursively()
+            return
+        }
+        val escapedPath = linkDir.resolve("outside.txt")
+        AttachmentStorageManager.registerPendingAttachment(escapedPath.toFile())
+
+        val result = AttachmentStorageManager.discardPendingAttachmentFile(root.toFile(), escapedPath.toString())
+
+        assertEquals(PendingAttachmentDiscardResult.InvalidPath, result)
+        assertTrue(Files.exists(outsideFile))
+        AttachmentStorageManager.unregisterPendingAttachment(escapedPath.toString())
+        root.toFile().deleteRecursively()
+        outsideDir.toFile().deleteRecursively()
+    }
+
 }
