@@ -59,7 +59,8 @@ object FusionModelCompatibility {
         if (spec.availability == ModelAvailability.REMOTE_ONLY) return "원격 실행 필요"
         if (format == ModelRuntimeFormat.NEEDS_CONVERSION || spec.availability == ModelAvailability.NEEDS_CONVERSION) return "변환 필요"
         if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return "실행 준비 필요"
-        if (format == ModelRuntimeFormat.LITERT_LM || format == ModelRuntimeFormat.MEDIAPIPE_LLM) return "실행 가능"
+        if (format == ModelRuntimeFormat.LITERT_LM) return "실행 가능"
+        if (format == ModelRuntimeFormat.MEDIAPIPE_LLM) return "현재 실행 엔진 미지원"
         return "지원 확인 필요"
     }
 }

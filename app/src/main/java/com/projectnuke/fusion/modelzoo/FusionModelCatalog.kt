@@ -1,6 +1,7 @@
-﻿package com.projectnuke.fusion.modelzoo
+package com.projectnuke.fusion.modelzoo
 
 import android.content.Context
+import android.util.AtomicFile
 import com.projectnuke.fusion.model.AcceleratorMode
 import java.io.File
 import org.json.JSONArray
@@ -55,7 +56,7 @@ data class FusionModelSpec(
     val copiedInternally: Boolean = localPath != null
 ) {
     val isRemoteOnly: Boolean get() = availability == ModelAvailability.REMOTE_ONLY
-    val canRunLocalRuntime: Boolean get() = runtimeFormat == ModelRuntimeFormat.LITERT_LM || runtimeFormat == ModelRuntimeFormat.MEDIAPIPE_LLM
+    val canRunLocalRuntime: Boolean get() = runtimeFormat == ModelRuntimeFormat.LITERT_LM
 }
 
 object FusionModelCatalog {
@@ -220,25 +221,7 @@ object FusionModelCatalog {
 
     fun saveImported(context: Context, spec: FusionModelSpec) {
         val current = loadImported(context).filterNot { it.localPath == spec.localPath || it.id == spec.id }
-        val array = JSONArray()
-        (current + spec).forEach { model ->
-            array.put(JSONObject().apply {
-                put("id", model.id)
-                put("displayName", model.displayName)
-                put("family", model.family.name)
-                put("parameterLabel", model.parameterLabel)
-                put("path", model.localPath.orEmpty())
-                put("runtimeFormat", model.runtimeFormat.name)
-                put("originalFileName", model.originalFileName ?: model.fileName.orEmpty())
-                put("uri", model.uriString.orEmpty())
-                put("fileSizeBytes", model.fileSizeBytes ?: 0L)
-                put("addedAt", model.addedAt ?: System.currentTimeMillis())
-                put("lastCheckedAt", model.lastCheckedAt ?: System.currentTimeMillis())
-                put("externallyReferenced", model.externallyReferenced)
-                put("copiedInternally", model.copiedInternally)
-            })
-        }
-        importedMetadataFile(context).writeText(array.toString(2))
+        writeImportedModels(context, current + spec)
     }
 
     fun runtimeFormatForFile(pathOrName: String): ModelRuntimeFormat {
@@ -256,25 +239,7 @@ object FusionModelCatalog {
 
     fun removeImported(context: Context, spec: FusionModelSpec) {
         val current = loadImported(context).filterNot { it.id == spec.id }
-        val array = JSONArray()
-        current.forEach { model ->
-            array.put(JSONObject().apply {
-                put("id", model.id)
-                put("displayName", model.displayName)
-                put("family", model.family.name)
-                put("parameterLabel", model.parameterLabel)
-                put("path", model.localPath.orEmpty())
-                put("runtimeFormat", model.runtimeFormat.name)
-                put("originalFileName", model.originalFileName ?: model.fileName.orEmpty())
-                put("uri", model.uriString.orEmpty())
-                put("fileSizeBytes", model.fileSizeBytes ?: 0L)
-                put("addedAt", model.addedAt ?: System.currentTimeMillis())
-                put("lastCheckedAt", model.lastCheckedAt ?: System.currentTimeMillis())
-                put("externallyReferenced", model.externallyReferenced)
-                put("copiedInternally", model.copiedInternally)
-            })
-        }
-        importedMetadataFile(context).writeText(array.toString(2))
+        writeImportedModels(context, current)
     }
 
     fun importedSpec(displayName: String, path: String, family: ModelFamily): FusionModelSpec {
@@ -344,6 +309,38 @@ object FusionModelCatalog {
         )
     }
 
+    private fun writeImportedModels(context: Context, models: List<FusionModelSpec>) {
+        val array = JSONArray()
+        models.forEach { model ->
+            array.put(JSONObject().apply {
+                put("id", model.id)
+                put("displayName", model.displayName)
+                put("family", model.family.name)
+                put("parameterLabel", model.parameterLabel)
+                put("path", model.localPath.orEmpty())
+                put("runtimeFormat", model.runtimeFormat.name)
+                put("originalFileName", model.originalFileName ?: model.fileName.orEmpty())
+                put("uri", model.uriString.orEmpty())
+                put("fileSizeBytes", model.fileSizeBytes ?: 0L)
+                put("addedAt", model.addedAt ?: System.currentTimeMillis())
+                put("lastCheckedAt", model.lastCheckedAt ?: System.currentTimeMillis())
+                put("externallyReferenced", model.externallyReferenced)
+                put("copiedInternally", model.copiedInternally)
+            })
+        }
+
+        val atomicFile = AtomicFile(importedMetadataFile(context))
+        val stream = atomicFile.startWrite()
+        try {
+            stream.write(array.toString(2).toByteArray(Charsets.UTF_8))
+            stream.flush()
+            atomicFile.finishWrite(stream)
+        } catch (failure: Throwable) {
+            atomicFile.failWrite(stream)
+            throw failure
+        }
+    }
+
     private fun importedMetadataFile(context: Context): File = File(context.filesDir, "fusion_imported_models.json")
 
     private fun inferSpec(value: String): FusionModelSpec? {
@@ -373,17 +370,18 @@ object FusionModelCatalog {
 }
 
 private fun availabilityForImported(format: ModelRuntimeFormat): ModelAvailability = when (format) {
-    ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> ModelAvailability.CUSTOM_IMPORTED
+    ModelRuntimeFormat.LITERT_LM -> ModelAvailability.CUSTOM_IMPORTED
     ModelRuntimeFormat.NEEDS_CONVERSION -> ModelAvailability.NEEDS_CONVERSION
     else -> ModelAvailability.UNSUPPORTED_ON_DEVICE
 }
 
 private fun importedNotes(format: ModelRuntimeFormat, externallyReferenced: Boolean): String = when (format) {
-    ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> if (externallyReferenced) {
+    ModelRuntimeFormat.LITERT_LM -> if (externallyReferenced) {
         "외부 파일로 연결되었습니다. 실행 전 내부 복사가 필요할 수 있습니다."
     } else {
         "가져온 모델입니다."
     }
+    ModelRuntimeFormat.MEDIAPIPE_LLM -> "현재 빌드에는 MediaPipe LLM 실행 엔진이 없어 .task 파일을 직접 실행할 수 없습니다."
     ModelRuntimeFormat.NEEDS_CONVERSION -> "이 파일은 변환이 필요합니다."
     else -> "이 파일은 현재 직접 실행할 수 없습니다."
 }

@@ -978,7 +978,7 @@ fun ConversationListScreenV2(
             text = { Text("현재 설정이 백업 파일의 값으로 변경됩니다. 채팅 기록과 모델 파일은 삭제되지 않습니다.") },
             confirmButton = {
                 TextButton(onClick = {
-                    when (restoreSettingsBackupJson(prefs, raw)) {
+                    when (restoreSettingsBackupJson(context, prefs, raw)) {
                         SettingsRestoreResult.Success -> {
                             Toast.makeText(context, "설정을 복원했습니다.", Toast.LENGTH_SHORT).show()
                             Toast.makeText(context, "일부 설정은 화면을 다시 열면 반영됩니다.", Toast.LENGTH_SHORT).show()

@@ -5,7 +5,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.projectnuke.fusion.model.AcceleratorMode
-import java.io.File
+import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -73,6 +73,7 @@ fun buildSettingsBackupJson(context: Context, prefs: SharedPreferences): String 
 }
 
 fun restoreSettingsBackupJson(
+    context: Context,
     prefs: SharedPreferences,
     raw: String
 ): SettingsRestoreResult {
@@ -84,7 +85,12 @@ fun restoreSettingsBackupJson(
     val modelLibrary = root.optJSONObject("modelLibrary") ?: JSONObject()
     val restoredKeys = mutableListOf<String>()
     val editor = prefs.edit()
-    if (settings.has("accelerator")) { editor.putString(PrefAccelerator, settings.optString("accelerator", AcceleratorMode.GPU.name)); restoredKeys += PrefAccelerator }
+    if (settings.has("accelerator")) {
+        val rawAccelerator = settings.optString("accelerator", AcceleratorMode.GPU.name)
+        val accelerator = runCatching { AcceleratorMode.valueOf(rawAccelerator) }.getOrDefault(AcceleratorMode.GPU)
+        editor.putString(PrefAccelerator, accelerator.name)
+        restoredKeys += PrefAccelerator
+    }
     if (settings.has("maxTokens")) { editor.putInt(PrefMaxTokens, settings.optInt("maxTokens", 4000).coerceIn(2000, 32000)); restoredKeys += PrefMaxTokens }
     if (settings.has("temperature")) { editor.putFloat(PrefTemperature, settings.optDouble("temperature", 1.0).toFloat().coerceIn(0f, 2f)); restoredKeys += PrefTemperature }
     if (settings.has("topK")) { editor.putInt(PrefTopK, settings.optInt("topK", 64).coerceIn(5, 100)); restoredKeys += PrefTopK }
@@ -115,9 +121,10 @@ fun restoreSettingsBackupJson(
     val backupPath = settings.optString("selectedModelPath", currentSelectedModelPath)
     var modelPathMissing = false
     if (!backupPath.isNullOrBlank()) {
-        if (File(backupPath).exists()) {
+        val managedModel = ManagedModelPathPolicy.resolveRunnableModel(context, backupPath)
+        if (managedModel != null) {
             editor.putString(PrefSelectedModel, backupModel)
-            editor.putString(PrefSelectedModelPath, backupPath)
+            editor.putString(PrefSelectedModelPath, managedModel.absolutePath)
             restoredKeys += PrefSelectedModel
             restoredKeys += PrefSelectedModelPath
         } else {
@@ -138,7 +145,12 @@ fun restoreSettingsBackupJson(
     }
     modelLibrary.optJSONArray("recent")?.let { arr -> editor.putString(PrefRecentModels, arr.toString()); restoredKeys += PrefRecentModels }
     modelLibrary.optJSONObject("notes")?.let { notes -> editor.putString(PrefModelNotes, notes.toString()); restoredKeys += PrefModelNotes }
-    if (modelLibrary.has("sortMode")) { editor.putString(PrefModelLibrarySortMode, modelLibrary.optString("sortMode", "recommendation")); restoredKeys += PrefModelLibrarySortMode }
+    if (modelLibrary.has("sortMode")) {
+        val sortMode = modelLibrary.optString("sortMode", "recommendation")
+        val allowedSortModes = setOf("recommendation", "name", "lightweight", "memory_low", "local_execution", "favorites_first")
+        editor.putString(PrefModelLibrarySortMode, sortMode.takeIf { it in allowedSortModes } ?: "recommendation")
+        restoredKeys += PrefModelLibrarySortMode
+    }
     editor.apply()
     Log.d("FusionModelSelect", "settings_restore schema=${root.optInt("schemaVersion", -1)} keys=${restoredKeys.joinToString(",")} success=true")
     return if (modelPathMissing) SettingsRestoreResult.ModelPathMissing else SettingsRestoreResult.Success

@@ -41,14 +41,28 @@ internal fun saveResponseVersionState(
     conversationId: Long,
     state: ResponseVersionState
 ) {
-    val root = JSONObject()
-        .put("groups", state.groupByMessageId.toJsonObject())
-        .put("active", state.activeMessageIdByGroup.toJsonObject())
     context.getSharedPreferences(ResponseVersionPrefsName, Context.MODE_PRIVATE)
         .edit()
-        .putString(conversationId.toString(), root.toString())
+        .putString(conversationId.toString(), state.toStorageJson())
         .apply()
 }
+
+internal fun saveResponseVersionStateDurably(
+    context: Context,
+    conversationId: Long,
+    state: ResponseVersionState
+) {
+    val committed = context.getSharedPreferences(ResponseVersionPrefsName, Context.MODE_PRIVATE)
+        .edit()
+        .putString(conversationId.toString(), state.toStorageJson())
+        .commit()
+    check(committed) { "Failed to persist response version state" }
+}
+
+private fun ResponseVersionState.toStorageJson(): String = JSONObject()
+    .put("groups", groupByMessageId.toJsonObject())
+    .put("active", activeMessageIdByGroup.toJsonObject())
+    .toString()
 
 internal fun buildChatTimeline(
     messages: List<MessageEntity>,

@@ -212,3 +212,7 @@ git clone <repository-url>
 cd Fusion
 
 .\gradlew assembleDebug
+
+## 1.0.0 Beta Stable R2 적용
+
+최신 정적 안정화 수정본의 적용·빌드·수동 점검 순서는 `INSTALL_AND_TEST_1.0.0-beta-stable.md`를 참고하세요.

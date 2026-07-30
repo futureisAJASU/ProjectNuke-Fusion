@@ -162,10 +162,13 @@ import com.projectnuke.fusion.util.fusionNpuCandidateLabel
 import com.projectnuke.fusion.util.fusionNpuNoteText
 import com.projectnuke.fusion.util.fusionNpuNoteTitle
 import com.projectnuke.fusion.util.FusionMemoryManager
+import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import java.io.File
 import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
@@ -181,6 +184,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
 import org.json.JSONObject
 import android.content.ActivityNotFoundException
@@ -660,7 +665,12 @@ fun ChatScreen(
         mutableStateOf(settingsPrefs.getString(PrefSelectedModel, "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it")
     }
     var selectedModelPath by remember {
-        mutableStateOf(settingsPrefs.getString(PrefSelectedModelPath, null))
+        val storedPath = settingsPrefs.getString(PrefSelectedModelPath, null)
+        val validPath = ManagedModelPathPolicy.resolveRunnableModel(context, storedPath)?.absolutePath
+        if (storedPath != null && validPath == null) {
+            settingsPrefs.edit().remove(PrefSelectedModelPath).apply()
+        }
+        mutableStateOf(validPath)
     }
     var generationMode by remember {
         mutableStateOf(
@@ -726,7 +736,11 @@ fun ChatScreen(
                     selectedModel = prefs.getString(PrefSelectedModel, selectedModel) ?: selectedModel
                 }
                 PrefSelectedModelPath -> {
-                    selectedModelPath = prefs.getString(PrefSelectedModelPath, selectedModelPath)
+                    val storedPath = prefs.getString(PrefSelectedModelPath, null)
+                    selectedModelPath = ManagedModelPathPolicy.resolveRunnableModel(context, storedPath)?.absolutePath
+                    if (storedPath != null && selectedModelPath == null) {
+                        prefs.edit().remove(PrefSelectedModelPath).apply()
+                    }
                 }
                 PrefReasoningEnabled -> {
                     reasoningEnabled = prefs.getBoolean(PrefReasoningEnabled, reasoningEnabled)
@@ -823,6 +837,9 @@ fun ChatScreen(
     var responseVersionState by remember(conversationId) {
         mutableStateOf(loadResponseVersionState(context, conversationId))
     }
+    LaunchedEffect(conversationId, messageEntities.size, messageEntities.lastOrNull()?.id) {
+        responseVersionState = loadResponseVersionState(context, conversationId)
+    }
     val chatTimeline = remember(messageEntities, responseVersionState) {
         buildChatTimeline(messageEntities, responseVersionState)
     }
@@ -876,7 +893,8 @@ fun ChatScreen(
     }
     LaunchedEffect(chatViewModel, conversationId) {
         chatViewModel.states.collect { states ->
-            val cur = states[conversationId] ?: return@collect
+            val cur = states[conversationId]
+                ?: com.projectnuke.fusion.chat.ConversationGenerationState()
             if (currentConversationId == conversationId) {
                 isGenerating = cur.isGenerating
                 streamingAssistantText = cur.streamingText
@@ -1056,7 +1074,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             val actualWebSearchUsed = webSearchResponse != null
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(actualWebSearchUsed = actualWebSearchUsed) }
                             val webSearchResult = webSearchResponse?.toStructuredContext()
-                            val modelPath = request.selectedModelPath?.takeIf { File(it).exists() }
+                            val modelPath = ManagedModelPathPolicy.resolveRunnableModel(context, request.selectedModelPath)?.absolutePath
                                 ?: builtInModels.firstOrNull { it.name == request.selectedModelId && isModelDownloaded(context, it) }
                                     ?.let { getModelFile(context, it).absolutePath }
                             if (modelPath == null) {
@@ -1178,39 +1196,42 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
-                            val persistedUpdatedState = withContext(NonCancellable) {
-                                val previousVersionState = loadResponseVersionState(context, request.conversationId)
-                                var insertedMessageId: Long? = null
-                                var versionStateSaved = false
-                                try {
-                                    val newId = dao.insertMessage(MessageEntity(conversationId = request.conversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(reply, metrics), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
-                                    insertedMessageId = newId
+                            val persisted = persistAssistantVersion(
+                                loadPreviousState = { loadResponseVersionState(context, request.conversationId) },
+                                insertMessage = {
+                                    dao.insertMessage(
+                                        MessageEntity(
+                                            conversationId = request.conversationId,
+                                            role = "assistant",
+                                            content = appendSearchSourcesMetadata(
+                                                appendFusionMetrics(reply, metrics),
+                                                webSearchResponse?.sources.orEmpty(),
+                                            ),
+                                            createdAt = System.currentTimeMillis(),
+                                        )
+                                    )
+                                },
+                                buildUpdatedState = { previousVersionState, newId ->
                                     val groupId = previousUser.id
-                                    val updated = previousVersionState.copy(groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId), activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId))
-                                    saveResponseVersionState(context, request.conversationId, updated)
-                                    versionStateSaved = true
+                                    previousVersionState.copy(
+                                        groupByMessageId = previousVersionState.groupByMessageId +
+                                            (targetMessage.id to groupId) + (newId to groupId),
+                                        activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup +
+                                            (groupId to newId),
+                                    )
+                                },
+                                saveState = { saveResponseVersionStateDurably(context, request.conversationId, it) },
+                                restoreState = { saveResponseVersionStateDurably(context, request.conversationId, it) },
+                                deleteMessage = { dao.deleteMessageById(it) },
+                                updateConversationTimestamp = {
                                     dao.updateConversationTime(request.conversationId, System.currentTimeMillis())
-                                    updated
-                                } catch (e: Exception) {
-                                    if (insertedMessageId != null) {
-                                        try {
-                                            dao.deleteMessageById(insertedMessageId)
-                                        } catch (rollbackException: Exception) {
-                                            e.addSuppressed(rollbackException)
-                                        }
-                                    }
-                                    if (versionStateSaved) {
-                                        try {
-                                            saveResponseVersionState(context, request.conversationId, previousVersionState)
-                                        } catch (rollbackException: Exception) {
-                                            e.addSuppressed(rollbackException)
-                                        }
-                                    }
-                                    throw e
-                                }
-                            }
+                                },
+                                onTimestampFailure = {
+                                    Log.e("FusionEngine", "Failed to update conversation time after retry", it)
+                                },
+                            )
                             if (currentConversationId == request.conversationId) {
-                                responseVersionState = persistedUpdatedState
+                                responseVersionState = persisted.state
                             }
                         } catch (e: Exception) {
                             if (e is CancellationException) throw e
@@ -1275,7 +1296,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     chatViewModel.registry.start(chatViewModel.scope, styleSnapshot) { session ->
                         val request = styleSnapshot
                         try {
-                            val modelPath = request.selectedModelPath?.takeIf { File(it).exists() }
+                            val modelPath = ManagedModelPathPolicy.resolveRunnableModel(context, request.selectedModelPath)?.absolutePath
                                 ?: builtInModels.firstOrNull { it.name == request.selectedModelId && isModelDownloaded(context, it) }
                                     ?.let { getModelFile(context, it).absolutePath }
                             if (modelPath == null) {
@@ -1353,34 +1374,42 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
-                            val persistedUpdatedState = withContext(NonCancellable) {
-                                val previousVersionState = loadResponseVersionState(context, request.conversationId)
-                                var insertedMessageId: Long? = null
-                                var versionStateSaved = false
-                                try {
-                                    val newId = dao.insertMessage(MessageEntity(conversationId = request.conversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(reply, metrics), emptyList()), createdAt = System.currentTimeMillis()))
-                                    insertedMessageId = newId
-                                    val groupId = previousUser.id
-                                    val updated = previousVersionState.copy(
-                                        groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId),
-                                        activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId)
+                            val persisted = persistAssistantVersion(
+                                loadPreviousState = { loadResponseVersionState(context, request.conversationId) },
+                                insertMessage = {
+                                    dao.insertMessage(
+                                        MessageEntity(
+                                            conversationId = request.conversationId,
+                                            role = "assistant",
+                                            content = appendSearchSourcesMetadata(
+                                                appendFusionMetrics(reply, metrics),
+                                                emptyList(),
+                                            ),
+                                            createdAt = System.currentTimeMillis(),
+                                        )
                                     )
-                                    saveResponseVersionState(context, request.conversationId, updated)
-                                    versionStateSaved = true
+                                },
+                                buildUpdatedState = { previousVersionState, newId ->
+                                    val groupId = previousUser.id
+                                    previousVersionState.copy(
+                                        groupByMessageId = previousVersionState.groupByMessageId +
+                                            (targetMessage.id to groupId) + (newId to groupId),
+                                        activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup +
+                                            (groupId to newId),
+                                    )
+                                },
+                                saveState = { saveResponseVersionStateDurably(context, request.conversationId, it) },
+                                restoreState = { saveResponseVersionStateDurably(context, request.conversationId, it) },
+                                deleteMessage = { dao.deleteMessageById(it) },
+                                updateConversationTimestamp = {
                                     dao.updateConversationTime(request.conversationId, System.currentTimeMillis())
-                                    updated
-                                } catch (e: Exception) {
-                                    if (insertedMessageId != null) {
-                                        try { dao.deleteMessageById(insertedMessageId) } catch (rollbackException: Exception) { e.addSuppressed(rollbackException) }
-                                    }
-                                    if (versionStateSaved) {
-                                        try { saveResponseVersionState(context, request.conversationId, previousVersionState) } catch (rollbackException: Exception) { e.addSuppressed(rollbackException) }
-                                    }
-                                    throw e
-                                }
-                            }
+                                },
+                                onTimestampFailure = {
+                                    Log.e("FusionEngine", "Failed to update conversation time after style regeneration", it)
+                                },
+                            )
                             if (currentConversationId == request.conversationId) {
-                                responseVersionState = persistedUpdatedState
+                                responseVersionState = persisted.state
                             }
                         } catch (e: Exception) {
                             if (e is CancellationException) throw e
@@ -1479,35 +1508,39 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     refreshExternalProviderState()
                                     chatViewModel.updateRequestState(s.conversationId, request.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 저장 중...") }
                                     if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
-                                    withContext(NonCancellable) {
-                                        val previousVersionState = loadResponseVersionState(context, request.conversationId)
-                                        var insertedMessageId: Long? = null
-                                        var versionStateSaved = false
-                                        try {
-                                            val newId = dao.insertMessage(MessageEntity(conversationId = request.conversationId, role = "assistant", content = result.content, createdAt = System.currentTimeMillis()))
-                                            insertedMessageId = newId
-                                            val groupId = previousUser.id
-                                            val updated = previousVersionState.copy(
-                                                groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId),
-                                                activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId)
+                                    val persisted = persistAssistantVersion(
+                                        loadPreviousState = { loadResponseVersionState(context, request.conversationId) },
+                                        insertMessage = {
+                                            dao.insertMessage(
+                                                MessageEntity(
+                                                    conversationId = request.conversationId,
+                                                    role = "assistant",
+                                                    content = result.content,
+                                                    createdAt = System.currentTimeMillis(),
+                                                )
                                             )
-                                            saveResponseVersionState(context, request.conversationId, updated)
-                                            versionStateSaved = true
+                                        },
+                                        buildUpdatedState = { previousVersionState, newId ->
+                                            val groupId = previousUser.id
+                                            previousVersionState.copy(
+                                                groupByMessageId = previousVersionState.groupByMessageId +
+                                                    (targetMessage.id to groupId) + (newId to groupId),
+                                                activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup +
+                                                    (groupId to newId),
+                                            )
+                                        },
+                                        saveState = { saveResponseVersionStateDurably(context, request.conversationId, it) },
+                                        restoreState = { saveResponseVersionStateDurably(context, request.conversationId, it) },
+                                        deleteMessage = { dao.deleteMessageById(it) },
+                                        updateConversationTimestamp = {
                                             dao.updateConversationTime(request.conversationId, System.currentTimeMillis())
-                                            updated
-                                        } catch (e: Exception) {
-                                            if (insertedMessageId != null) {
-                                                try { dao.deleteMessageById(insertedMessageId) } catch (inner: Exception) { e.addSuppressed(inner) }
-                                            }
-                                            if (versionStateSaved) {
-                                                try { saveResponseVersionState(context, request.conversationId, previousVersionState) } catch (inner: Exception) { e.addSuppressed(inner) }
-                                            }
-                                            throw e
-                                        }
-                                    }.let { updated ->
-                                        if (currentConversationId == request.conversationId) {
-                                            responseVersionState = updated
-                                        }
+                                        },
+                                        onTimestampFailure = {
+                                            Log.e("FusionEngine", "Failed to update conversation time after external style regeneration", it)
+                                        },
+                                    )
+                                    if (currentConversationId == request.conversationId) {
+                                        responseVersionState = persisted.state
                                     }
                                 }
                                 is ExternalAiChatResult.BlockedAttachment -> {
@@ -1685,35 +1718,42 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     refreshExternalProviderState()
                                     chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 저장 중...") }
                                     if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
-                                    withContext(NonCancellable) {
-                                        val previousVersionState = loadResponseVersionState(context, retrySnapshot.conversationId)
-                                        var insertedMessageId: Long? = null
-                                        var versionStateSaved = false
-                                        try {
-                                            val newId = dao.insertMessage(MessageEntity(conversationId = retrySnapshot.conversationId, role = "assistant", content = appendSearchSourcesMetadata(result.content, webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
-                                            insertedMessageId = newId
-                                            val groupId = previousUser.id
-                                            val updated = previousVersionState.copy(
-                                                groupByMessageId = previousVersionState.groupByMessageId + (targetMessage.id to groupId) + (newId to groupId),
-                                                activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup + (groupId to newId)
+                                    val persisted = persistAssistantVersion(
+                                        loadPreviousState = { loadResponseVersionState(context, retrySnapshot.conversationId) },
+                                        insertMessage = {
+                                            dao.insertMessage(
+                                                MessageEntity(
+                                                    conversationId = retrySnapshot.conversationId,
+                                                    role = "assistant",
+                                                    content = appendSearchSourcesMetadata(
+                                                        result.content,
+                                                        webSearchResponse?.sources.orEmpty(),
+                                                    ),
+                                                    createdAt = System.currentTimeMillis(),
+                                                )
                                             )
-                                            saveResponseVersionState(context, retrySnapshot.conversationId, updated)
-                                            versionStateSaved = true
+                                        },
+                                        buildUpdatedState = { previousVersionState, newId ->
+                                            val groupId = previousUser.id
+                                            previousVersionState.copy(
+                                                groupByMessageId = previousVersionState.groupByMessageId +
+                                                    (targetMessage.id to groupId) + (newId to groupId),
+                                                activeMessageIdByGroup = previousVersionState.activeMessageIdByGroup +
+                                                    (groupId to newId),
+                                            )
+                                        },
+                                        saveState = { saveResponseVersionStateDurably(context, retrySnapshot.conversationId, it) },
+                                        restoreState = { saveResponseVersionStateDurably(context, retrySnapshot.conversationId, it) },
+                                        deleteMessage = { dao.deleteMessageById(it) },
+                                        updateConversationTimestamp = {
                                             dao.updateConversationTime(retrySnapshot.conversationId, System.currentTimeMillis())
-                                            updated
-                                        } catch (e: Exception) {
-                                            if (insertedMessageId != null) {
-                                                try { dao.deleteMessageById(insertedMessageId) } catch (inner: Exception) { e.addSuppressed(inner) }
-                                            }
-                                            if (versionStateSaved) {
-                                                try { saveResponseVersionState(context, retrySnapshot.conversationId, previousVersionState) } catch (inner: Exception) { e.addSuppressed(inner) }
-                                            }
-                                            throw e
-                                        }
-                                    }.let { updated ->
-                                        if (currentConversationId == retrySnapshot.conversationId) {
-                                            responseVersionState = updated
-                                        }
+                                        },
+                                        onTimestampFailure = {
+                                            Log.e("FusionEngine", "Failed to update conversation time after external retry", it)
+                                        },
+                                    )
+                                    if (currentConversationId == retrySnapshot.conversationId) {
+                                        responseVersionState = persisted.state
                                     }
                                 }
                                 is ExternalAiChatResult.BlockedAttachment -> {
@@ -1973,7 +2013,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
                     try {
                         val request = extractionSnapshot
-                        val activeModelPath = request.selectedModelPath?.takeIf { File(it).exists() }
+                        val activeModelPath = ManagedModelPathPolicy.resolveRunnableModel(context, request.selectedModelPath)?.absolutePath
                             ?: builtInModels
                                 .firstOrNull { it.name == request.selectedModelId && isModelDownloaded(context, it) }
                                 ?.let { getModelFile(context, it).absolutePath }
@@ -2147,13 +2187,17 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
     val attachmentPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
-        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        if (uris.isEmpty()) {
+            pickerOriginConversationId = null
+            return@rememberLauncherForActivityResult
+        }
         if (isImportingAttachments) return@rememberLauncherForActivityResult
         isImportingAttachments = true
 
         val originConversationId = pickerOriginConversationId
-        if (originConversationId != conversationId) {
+        if (originConversationId == null || originConversationId != currentConversationId) {
             Toast.makeText(context, "대화가 변경되어 첨부를 취소했습니다.", Toast.LENGTH_SHORT).show()
+            pickerOriginConversationId = null
             isImportingAttachments = false
             return@rememberLauncherForActivityResult
         }
@@ -2161,6 +2205,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
 
         scope.launch {
+            val copiedBatch = mutableListOf<LocalAttachment>()
             try {
                 val capacity = computePickerCapacity(
                     pendingCount = pendingAttachments.size,
@@ -2169,11 +2214,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 val urisToProcess = uris.take(capacity.toProcess)
                 val skippedByLimit = capacity.skipped
 
-                var success = 0
                 var failed = 0
                 urisToProcess.forEach { uri ->
-                    // The document is copied into app-managed storage immediately. Persisting the
-                    // source URI would only consume the platform's persisted-grant quota.
+                    currentCoroutineContext().ensureActive()
                     val displayName = getDisplayNameFromUri(context, uri)
                     val mimeType = context.contentResolver.getType(uri)
                         ?: "application/octet-stream"
@@ -2184,34 +2227,34 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         displayName = displayName
                     )
 
-                    if (conversationId != originConversationId) {
-                        copiedFile?.let { file ->
-                            when (AttachmentStorageManager.discardPendingAttachmentFile(context, file.absolutePath)) {
-                                PendingAttachmentDiscardResult.DeletionFailed ->
-                                    Log.w("FusionAttachment", "Copied attachment could not be deleted after conversation switch")
-                                PendingAttachmentDiscardResult.InvalidPath,
-                                PendingAttachmentDiscardResult.InvalidTarget ->
-                                    Log.e("FusionAttachment", "Rejected copied attachment discard target")
-                                else -> Unit
-                            }
-                        }
-                        return@launch
-                    }
-
                     if (copiedFile != null) {
-                        pendingAttachments.add(
-                            LocalAttachment(
-                                name = displayName,
-                                mimeType = mimeType,
-                                localPath = copiedFile.absolutePath
-                            )
+                        copiedBatch += LocalAttachment(
+                            name = displayName,
+                            mimeType = mimeType,
+                            localPath = copiedFile.absolutePath
                         )
-                        success++
                     } else {
                         failed++
                     }
                 }
 
+                if (currentConversationId != originConversationId) {
+                    copiedBatch.forEach { attachment ->
+                        when (AttachmentStorageManager.discardPendingAttachmentFile(context, attachment.localPath)) {
+                            PendingAttachmentDiscardResult.DeletionFailed ->
+                                Log.w("FusionAttachment", "Copied attachment could not be deleted after conversation switch")
+                            PendingAttachmentDiscardResult.InvalidPath,
+                            PendingAttachmentDiscardResult.InvalidTarget ->
+                                Log.e("FusionAttachment", "Rejected copied attachment discard target")
+                            else -> Unit
+                        }
+                    }
+                    Toast.makeText(context, "대화가 변경되어 첨부를 취소했습니다.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                pendingAttachments.addAll(copiedBatch)
+                val success = copiedBatch.size
                 when {
                     success > 0 && failed == 0 && skippedByLimit == 0 ->
                         Toast.makeText(context, "첨부 완료", Toast.LENGTH_SHORT).show()
@@ -2226,7 +2269,25 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     else ->
                         Toast.makeText(context, "첨부 실패", Toast.LENGTH_SHORT).show()
                 }
+            } catch (cancellation: CancellationException) {
+                withContext(NonCancellable) {
+                    copiedBatch.forEach { attachment ->
+                        AttachmentStorageManager.discardPendingAttachmentFile(context, attachment.localPath)
+                    }
+                }
+                throw cancellation
+            } catch (failure: Exception) {
+                withContext(NonCancellable) {
+                    copiedBatch.forEach { attachment ->
+                        AttachmentStorageManager.discardPendingAttachmentFile(context, attachment.localPath)
+                    }
+                }
+                Log.e("FusionAttachment", "Attachment import failed", failure)
+                if (currentConversationId == originConversationId) {
+                    Toast.makeText(context, "첨부 파일을 가져오지 못했습니다.", Toast.LENGTH_SHORT).show()
+                }
             } finally {
+                pickerOriginConversationId = null
                 isImportingAttachments = false
             }
         }
@@ -2298,7 +2359,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         selectedProviderName = selectedExternalProviderName,
                         selectedProviderId = selectedExternalProviderId,
                         externalProviders = externalProviders,
-                    enabled = !isGenerating && !isSubmittingMessage && !isImportingAttachments,
+                        enabled = !isGenerating && !isSubmittingMessage && !isImportingAttachments,
                         onOpenApiSettings = {
                             showAdvancedSettingsDialog = true
                         },
@@ -2666,22 +2727,27 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             refreshExternalProviderState()
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 저장 중...") }
                                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
-                                                            withContext(NonCancellable) {
-                                                                var insertedId = -1L
-                                                                try {
-                                                                    insertedId = dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = appendSearchSourcesMetadata(result.content, webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
+                                                            persistAssistantMessage(
+                                                                insertMessage = {
+                                                                    dao.insertMessage(
+                                                                        MessageEntity(
+                                                                            conversationId = s.conversationId,
+                                                                            role = "assistant",
+                                                                            content = appendSearchSourcesMetadata(
+                                                                                result.content,
+                                                                                webSearchResponse?.sources.orEmpty(),
+                                                                            ),
+                                                                            createdAt = System.currentTimeMillis(),
+                                                                        )
+                                                                    )
+                                                                },
+                                                                updateConversationTimestamp = {
                                                                     dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
-                                                                } catch (e: Exception) {
-                                                                    if (insertedId >= 0L) {
-                                                                        try {
-                                                                            dao.deleteMessageById(insertedId)
-                                                                        } catch (inner: Exception) {
-                                                                            e.addSuppressed(inner)
-                                                                        }
-                                                                    }
-                                                                    throw e
-                                                                }
-                                                            }
+                                                                },
+                                                                onTimestampFailure = {
+                                                                    Log.e("FusionEngine", "Failed to update conversation time after external response", it)
+                                                                },
+                                                            )
                                                         }
                                                         is ExternalAiChatResult.BlockedAttachment -> {
                                                             if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == snapshot.conversationId) {
@@ -2781,7 +2847,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
 
                                             // === MODEL PATH VALIDATION ===
-                                            var activeModelPath = snapshot.selectedModelPath?.takeIf { File(it).exists() }
+                                            var activeModelPath = ManagedModelPathPolicy.resolveRunnableModel(context, snapshot.selectedModelPath)?.absolutePath
                                                 ?: builtInModels
                                                     .firstOrNull {
                                                         it.name == snapshot.selectedModelId && isModelDownloaded(context, it)
@@ -2790,11 +2856,31 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                                             if (activeModelPath == null) {
                                                 snapshot.selectedModelPath?.takeIf { it.isNotBlank() }?.let {
-                                                    android.util.Log.e("FusionEngine", "Selected model file missing: $it")
+                                                    android.util.Log.e("FusionEngine", "Selected model file missing: ${File(it).name}")
                                                 }
                                                 if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = if (!snapshot.selectedModelPath.isNullOrBlank()) "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요." else "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요.", createdAt = System.currentTimeMillis()))
-                                                    dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                    persistAssistantMessage(
+                                                        insertMessage = {
+                                                            dao.insertMessage(
+                                                                MessageEntity(
+                                                                    conversationId = s.conversationId,
+                                                                    role = "assistant",
+                                                                    content = if (!snapshot.selectedModelPath.isNullOrBlank()) {
+                                                                        "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                                                                    } else {
+                                                                        "아직 사용할 모델이 없습니다. 위쪽 모델 칩에서 Gemma 모델을 다운로드하거나 커스텀 모델을 업로드해 주세요."
+                                                                    },
+                                                                    createdAt = System.currentTimeMillis(),
+                                                                )
+                                                            )
+                                                        },
+                                                        updateConversationTimestamp = {
+                                                            dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                        },
+                                                        onTimestampFailure = {
+                                                            Log.e("FusionEngine", "Failed to update conversation time after model error", it)
+                                                        },
+                                                    )
                                                 }
                                                 return@start
                                             }
@@ -2802,17 +2888,51 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             val missingImage = snapshot.multimodalImagePaths.firstOrNull { !File(it).exists() }
                                             if (missingImage != null) {
                                                 if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                    Toast.makeText(context, "이미지 파일을 찾을 수 없습니다. 다시 첨부해 주세요.", Toast.LENGTH_LONG).show()
-                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다. 다시 첨부해 주세요.", createdAt = System.currentTimeMillis()))
-                                                    dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                    if (currentConversationId == snapshot.conversationId) {
+                                                        Toast.makeText(context, "이미지 파일을 찾을 수 없습니다. 다시 첨부해 주세요.", Toast.LENGTH_LONG).show()
+                                                    }
+                                                    persistAssistantMessage(
+                                                        insertMessage = {
+                                                            dao.insertMessage(
+                                                                MessageEntity(
+                                                                    conversationId = s.conversationId,
+                                                                    role = "assistant",
+                                                                    content = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다. 다시 첨부해 주세요.",
+                                                                    createdAt = System.currentTimeMillis(),
+                                                                )
+                                                            )
+                                                        },
+                                                        updateConversationTimestamp = {
+                                                            dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                        },
+                                                        onTimestampFailure = {
+                                                            Log.e("FusionEngine", "Failed to update conversation time after image error", it)
+                                                        },
+                                                    )
                                                 }
                                                 return@start
                                             }
 
                                             if (snapshot.multimodalImagePaths.isNotEmpty() && !isMultimodalCapableModel(snapshot.selectedModelId!!, activeModelPath!!)) {
                                                 if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
-                                                    dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = "이 모델은 이미지 입력을 지원하지 않습니다.", createdAt = System.currentTimeMillis()))
-                                                    dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                    persistAssistantMessage(
+                                                        insertMessage = {
+                                                            dao.insertMessage(
+                                                                MessageEntity(
+                                                                    conversationId = s.conversationId,
+                                                                    role = "assistant",
+                                                                    content = "이 모델은 이미지 입력을 지원하지 않습니다.",
+                                                                    createdAt = System.currentTimeMillis(),
+                                                                )
+                                                            )
+                                                        },
+                                                        updateConversationTimestamp = {
+                                                            dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                        },
+                                                        onTimestampFailure = {
+                                                            Log.e("FusionEngine", "Failed to update conversation time after multimodal compatibility error", it)
+                                                        },
+                                                    )
                                                 }
                                                 return@start
                                             }
@@ -2967,7 +3087,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 }
                                                 is GenerationOutcome.Failure -> {
                                                     DeveloperLogStore.record(context, "chat", "답변 생성 실패", rawOutcome.kind.name)
-                                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == snapshot.conversationId) {
                                                         Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
                                                     }
                                                     return@start
@@ -2987,8 +3107,27 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             )
                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingMetricsLine = metricsLine, generationStatus = "답변 저장 중...") }
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
-                                            dao.insertMessage(MessageEntity(conversationId = s.conversationId, role = "assistant", content = appendSearchSourcesMetadata(appendFusionMetrics(rawReply, metricsLine), webSearchResponse?.sources.orEmpty()), createdAt = System.currentTimeMillis()))
-                                            dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                            persistAssistantMessage(
+                                                insertMessage = {
+                                                    dao.insertMessage(
+                                                        MessageEntity(
+                                                            conversationId = s.conversationId,
+                                                            role = "assistant",
+                                                            content = appendSearchSourcesMetadata(
+                                                                appendFusionMetrics(rawReply, metricsLine),
+                                                                webSearchResponse?.sources.orEmpty(),
+                                                            ),
+                                                            createdAt = System.currentTimeMillis(),
+                                                        )
+                                                    )
+                                                },
+                                                updateConversationTimestamp = {
+                                                    dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                },
+                                                onTimestampFailure = {
+                                                    Log.e("FusionEngine", "Failed to update conversation time after local response", it)
+                                                },
+                                            )
                                         } catch (e: Exception) {
                                             Log.e("FusionEngine", "Chat generation failed", e)
                                             if (e is BenchmarkRunningException) return@start
@@ -3247,7 +3386,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
             onSelect = { model ->
                 var didSelectModel = false
                 when {
-                    model.customPath != null && File(model.customPath).exists() -> {
+                    model.customPath != null && ManagedModelPathPolicy.resolveRunnableModel(context, model.customPath) != null -> {
                         selectedModel = model.name
                         selectedModelPath = model.customPath
                         didSelectModel = true
@@ -3332,24 +3471,38 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
     pendingModelImport?.let { pending ->
         ModelImportWizardDialog(
             pending = pending,
-            onDismiss = { pendingModelImport = null },
-            onLink = { family ->
-                val spec = FusionModelCatalog.externalLinkedSpec(
-                    displayName = pending.displayName,
-                    originalFileName = pending.originalFileName,
-                    uriString = pending.uri.toString(),
-                    fileSizeBytes = pending.fileSizeBytes,
-                    family = family
-                )
-                FusionModelCatalog.saveImported(context, spec)
-                storageRefreshKey += 1
+            onDismiss = {
+                if (pending.permissionPersisted) {
+                    releasePersistedReadPermission(context, pending.uri)
+                }
                 pendingModelImport = null
-                Toast.makeText(context, "외부 모델 파일을 연결했습니다.", Toast.LENGTH_SHORT).show()
-                when {
-                    !pending.permissionPersisted -> Toast.makeText(context, "모델 파일 권한을 유지할 수 없습니다.", Toast.LENGTH_SHORT).show()
-                    spec.availability == ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", Toast.LENGTH_LONG).show()
-                    spec.availability == ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
-                    else -> Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+            },
+            onLink = { family ->
+                if (!pending.permissionPersisted) {
+                    Toast.makeText(context, "파일 권한을 유지할 수 없어 외부 연결로 저장할 수 없습니다. 실행용 복사를 사용해 주세요.", Toast.LENGTH_LONG).show()
+                } else {
+                    val spec = FusionModelCatalog.externalLinkedSpec(
+                        displayName = pending.displayName,
+                        originalFileName = pending.originalFileName,
+                        uriString = pending.uri.toString(),
+                        fileSizeBytes = pending.fileSizeBytes,
+                        family = family
+                    )
+                    runCatching { FusionModelCatalog.saveImported(context, spec) }
+                        .onSuccess {
+                            storageRefreshKey += 1
+                            pendingModelImport = null
+                            Toast.makeText(context, "외부 모델 파일을 연결했습니다.", Toast.LENGTH_SHORT).show()
+                            when {
+                                spec.availability == ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", Toast.LENGTH_LONG).show()
+                                spec.availability == ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                                else -> Toast.makeText(context, "이 형식은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        .onFailure { failure ->
+                            Log.e("FusionModel", "Failed to persist linked model metadata", failure)
+                            Toast.makeText(context, "모델 연결 정보를 저장하지 못했습니다.", Toast.LENGTH_SHORT).show()
+                        }
                 }
             },
             onCopyForRun = { family ->
@@ -3364,7 +3517,13 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         return@launch
                     }
                     val spec = FusionModelCatalog.importedSpec(pending.displayName, copiedFile.absolutePath, family)
-                    FusionModelCatalog.saveImported(context, spec)
+                    if (!persistCopiedModelSpec(context, spec, copiedFile)) {
+                        Toast.makeText(context, "모델 정보를 저장하지 못했습니다.", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    if (pending.permissionPersisted) {
+                        releasePersistedReadPermission(context, pending.uri)
+                    }
                     if (spec.availability == ModelAvailability.CUSTOM_IMPORTED &&
                         customModels.none { it.customPath == copiedFile.absolutePath }
                     ) {
@@ -3392,6 +3551,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         ModelStorageManagerDialog(
             refreshKey = storageRefreshKey,
             currentModel = selectedModel,
+            currentModelPath = selectedModelPath,
             onDismiss = { showModelStorageManager = false },
             onSelect = { spec ->
                 val localPath = spec.localPath
@@ -3409,7 +3569,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             Toast.makeText(context, "이 파일은 현재 직접 실행할 수 없습니다.", Toast.LENGTH_SHORT).show()
                         }
                     }
-                    localPath != null && File(localPath).exists() && spec.availability == ModelAvailability.CUSTOM_IMPORTED -> {
+                    localPath != null && ManagedModelPathPolicy.resolveRunnableModel(context, localPath) != null && spec.availability == ModelAvailability.CUSTOM_IMPORTED -> {
                         selectedModel = spec.displayName
                         selectedModelPath = localPath
                         saveFusionSettings(
@@ -3423,6 +3583,18 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     }
                     else -> Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
                 }
+            },
+            onCurrentModelFileDeleted = {
+                selectedModelPath = null
+                saveFusionSettings(
+                    prefs = settingsPrefs,
+                    settings = generationSettings,
+                    reasoningEnabled = reasoningEnabled,
+                    webSearchEnabled = webSearchEnabled,
+                    selectedModel = selectedModel,
+                    selectedModelPath = null,
+                )
+                Toast.makeText(context, "현재 선택한 모델 파일이 삭제되어 다시 선택해야 합니다.", Toast.LENGTH_LONG).show()
             },
             onChanged = { storageRefreshKey += 1 }
         )
@@ -6314,7 +6486,7 @@ private fun ModelSelectDialog(
                             Spacer(modifier = Modifier.height(2.dp))
 
                             Text(
-                                text = "다운로드한 .litertlm / .task / 모델 파일 선택",
+                                text = "다운로드한 .litertlm 및 호환성 확인용 모델 파일 선택",
                                 color = TextSecondary,
                                 fontSize = 12.sp
                             )
@@ -7097,7 +7269,7 @@ private fun ModelZooDetailDialog(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     DetailMetaRow("현재 형식", spec.runtimeFormat.name)
-                    DetailMetaRow("권장 형식", ".litertlm 또는 .task")
+                    DetailMetaRow("현재 실행 형식", ".litertlm")
                     DetailMetaRow("상태", if (spec.supportsNpuCandidate) "NPU 후보" else "변환 필요")
                     Text("현재 앱에서 자동 변환은 지원하지 않습니다.", color = TextSecondary, fontSize = 12.sp)
                     Text("변환 후 파일 가져오기로 모델 파일을 선택해 주세요.", color = TextSecondary, fontSize = 12.sp)
@@ -7650,7 +7822,7 @@ private fun ModelImportWizardDialog(
     val formatLabel = remember(pending.originalFileName, format) { importFormatLabel(pending.originalFileName, format) }
     val executionStatus = remember(format) { importExecutionStatusMessage(format) }
     val nextAction = remember(format) { importRecommendedActionMessage(format) }
-    val canCopyForRun = format == ModelRuntimeFormat.LITERT_LM || format == ModelRuntimeFormat.MEDIAPIPE_LLM
+    val canCopyForRun = format == ModelRuntimeFormat.LITERT_LM
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -7691,7 +7863,7 @@ private fun ModelImportWizardDialog(
                     Text("모델 파일 권한을 유지할 수 없습니다.", color = DangerRed, fontSize = 12.sp)
                 }
                 if (format == ModelRuntimeFormat.MEDIAPIPE_LLM) {
-                    Text("이 모델은 실행 전에 Fusion 내부 저장소로 복사해야 할 수 있습니다.", color = TextSecondary, fontSize = 12.sp)
+                    Text("현재 빌드에는 MediaPipe LLM 실행 엔진이 없어 .task 파일은 직접 실행할 수 없습니다.", color = DangerRed, fontSize = 12.sp)
                 }
                 Text(nextAction, color = TextSecondary, fontSize = 12.sp)
             }
@@ -8354,18 +8526,22 @@ private fun formatGb(value: Float): String {
 private fun ModelStorageManagerDialog(
     refreshKey: Int,
     currentModel: String,
+    currentModelPath: String?,
     onDismiss: () -> Unit,
     onSelect: (FusionModelSpec) -> Unit,
+    onCurrentModelFileDeleted: () -> Unit,
     onChanged: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var models by remember(refreshKey) { mutableStateOf(FusionModelCatalog.loadImported(context)) }
     var deleteTarget by remember { mutableStateOf<FusionModelSpec?>(null) }
+    var deletingModelId by remember { mutableStateOf<String?>(null) }
     val internalFiles = remember(refreshKey) {
         getModelDirectory(context).listFiles()?.filter { it.isFile }.orEmpty()
     }
-    val totalSize = internalFiles.sumOf { it.length() } + models.sumOf { it.fileSizeBytes ?: 0L }
+    val totalSize = internalFiles.sumOf { it.length() } +
+        models.filter { it.externallyReferenced }.sumOf { it.fileSizeBytes ?: 0L }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -8420,7 +8596,7 @@ private fun ModelStorageManagerDialog(
                         Text("외부 연결 모델 파일", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                     }
                     items(models.filter { it.externallyReferenced }) { spec ->
-                        val available = canOpenUri(context, spec.uriString)
+                        val available = rememberUriAvailability(context, spec.uriString)
                         StorageModelRow(
                             name = spec.displayName,
                             source = "외부 파일 연결",
@@ -8443,28 +8619,36 @@ private fun ModelStorageManagerDialog(
                                             if (copied == null) {
                                                 Toast.makeText(context, "모델 파일에 접근할 수 없습니다. 파일을 다시 연결해 주세요.", Toast.LENGTH_SHORT).show()
                                             } else {
-                                                FusionModelCatalog.saveImported(
-                                                    context,
-                                                    spec.copy(
-                                                        localPath = copied.absolutePath,
-                                                        fileName = copied.name,
-                                                        copiedInternally = true,
-                                                        externallyReferenced = false,
-                                                        sourceLabel = "사용자 가져오기",
-                                                        lastCheckedAt = System.currentTimeMillis()
-                                                    )
+                                                val copiedSpec = spec.copy(
+                                                    localPath = copied.absolutePath,
+                                                    fileName = copied.name,
+                                                    copiedInternally = true,
+                                                    externallyReferenced = false,
+                                                    sourceLabel = "사용자 가져오기",
+                                                    lastCheckedAt = System.currentTimeMillis()
                                                 )
-                                                models = FusionModelCatalog.loadImported(context)
-                                                onChanged()
-                                                Toast.makeText(context, "실행용으로 복사했습니다.", Toast.LENGTH_SHORT).show()
+                                                if (!persistCopiedModelSpec(context, copiedSpec, copied)) {
+                                                    Toast.makeText(context, "모델 정보를 저장하지 못했습니다.", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    spec.uriString?.let { releasePersistedReadPermission(context, Uri.parse(it)) }
+                                                    models = FusionModelCatalog.loadImported(context)
+                                                    onChanged()
+                                                    Toast.makeText(context, "실행용으로 복사했습니다.", Toast.LENGTH_SHORT).show()
+                                                }
                                             }
                                         }
                                     }) { Text("실행용으로 복사", fontSize = 12.sp) }
                                 }
                                 FusionTextButton(onClick = {
-                                    FusionModelCatalog.removeImported(context, spec)
-                                    models = FusionModelCatalog.loadImported(context)
-                                    onChanged()
+                                    runCatching { FusionModelCatalog.removeImported(context, spec) }
+                                        .onSuccess {
+                                            spec.uriString?.let { releasePersistedReadPermission(context, Uri.parse(it)) }
+                                            models = FusionModelCatalog.loadImported(context)
+                                            onChanged()
+                                        }
+                                        .onFailure {
+                                            Toast.makeText(context, "모델 연결 정보를 지우지 못했습니다.", Toast.LENGTH_SHORT).show()
+                                        }
                                 }) { Text("연결 해제", fontSize = 12.sp) }
                             }
                         )
@@ -8479,20 +8663,45 @@ private fun ModelStorageManagerDialog(
     }
 
     deleteTarget?.let { target ->
+        val isDeleting = deletingModelId == target.id
         AlertDialog(
-            onDismissRequest = { deleteTarget = null },
+            onDismissRequest = { if (deletingModelId == null) deleteTarget = null },
             title = { Text("모델 파일을 삭제하시겠습니까?") },
-            text = { Text("Fusion 내부 저장소의 모델 파일이 삭제됩니다.") },
+            text = { Text(if (isDeleting) "모델 파일을 삭제하는 중입니다…" else "Fusion 내부 저장소의 모델 파일이 삭제됩니다.") },
             confirmButton = {
-                FusionTextButton(onClick = {
-                    target.localPath?.let { File(it).delete() }
-                    FusionModelCatalog.removeImported(context, target)
-                    models = FusionModelCatalog.loadImported(context)
-                    deleteTarget = null
-                    onChanged()
-                }) { Text("삭제") }
+                FusionTextButton(enabled = deletingModelId == null, onClick = {
+                    deletingModelId = target.id
+                    scope.launch {
+                        try {
+                            val targetPath = target.localPath
+                            val deleted = deleteManagedModelFile(context, targetPath)
+                            if (!deleted) {
+                                Toast.makeText(context, "모델 파일을 삭제하지 못했습니다.", Toast.LENGTH_SHORT).show()
+                                return@launch
+                            }
+                            if (targetPath != null && targetPath == currentModelPath) {
+                                onCurrentModelFileDeleted()
+                            }
+                            withContext(Dispatchers.IO) {
+                                FusionModelCatalog.removeImported(context, target)
+                            }
+                            models = FusionModelCatalog.loadImported(context)
+                            deleteTarget = null
+                            onChanged()
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
+                        } catch (failure: Exception) {
+                            Log.e("FusionModel", "Failed to delete managed model", failure)
+                            Toast.makeText(context, "모델 파일을 삭제하지 못했습니다.", Toast.LENGTH_SHORT).show()
+                        } finally {
+                            if (deletingModelId == target.id) deletingModelId = null
+                        }
+                    }
+                }) { Text(if (isDeleting) "삭제 중…" else "삭제") }
             },
-            dismissButton = { FusionTextButton(onClick = { deleteTarget = null }) { Text("취소") } },
+            dismissButton = {
+                FusionTextButton(enabled = deletingModelId == null, onClick = { deleteTarget = null }) { Text("취소") }
+            },
             containerColor = PanelBg,
             titleContentColor = TextPrimary,
             textContentColor = TextPrimary
@@ -8521,10 +8730,12 @@ private fun StorageModelRow(
     }
 }
 
-private fun storageStatusLabel(spec: FusionModelSpec, uriAvailable: Boolean): String {
+private fun storageStatusLabel(spec: FusionModelSpec, uriAvailable: Boolean?): String {
+    if (uriAvailable == null) return "접근 가능 여부 확인 중"
     if (!uriAvailable) return "파일을 찾을 수 없습니다."
     if (spec.runtimeFormat == ModelRuntimeFormat.NEEDS_CONVERSION) return "변환 필요"
-    if (spec.availability != ModelAvailability.CUSTOM_IMPORTED) return "실행 준비 필요"
+    if (spec.runtimeFormat == ModelRuntimeFormat.MEDIAPIPE_LLM) return "현재 실행 엔진 미지원"
+    if (spec.availability != ModelAvailability.CUSTOM_IMPORTED) return "현재 직접 실행 미지원"
     if (spec.externallyReferenced && spec.localPath.isNullOrBlank()) return "실행 준비 필요"
     return "사용 가능"
 }
@@ -8551,7 +8762,8 @@ private fun importFormatLabel(fileName: String, format: ModelRuntimeFormat): Str
 
 private fun importExecutionStatusMessage(format: ModelRuntimeFormat): String {
     return when (format) {
-        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "이 모델 파일은 Fusion에서 실행 후보로 사용할 수 있습니다."
+        ModelRuntimeFormat.LITERT_LM -> "이 모델 파일은 Fusion에서 실행 후보로 사용할 수 있습니다."
+        ModelRuntimeFormat.MEDIAPIPE_LLM -> "현재 빌드에는 .task 실행 엔진이 없습니다."
         ModelRuntimeFormat.NEEDS_CONVERSION -> "이 모델은 변환 후 사용할 수 있습니다."
         else -> "이 형식은 현재 직접 실행할 수 없습니다."
     }
@@ -8559,7 +8771,8 @@ private fun importExecutionStatusMessage(format: ModelRuntimeFormat): String {
 
 private fun importRecommendedActionMessage(format: ModelRuntimeFormat): String {
     return when (format) {
-        ModelRuntimeFormat.LITERT_LM, ModelRuntimeFormat.MEDIAPIPE_LLM -> "권장 동작: 먼저 연결하고, 실행이 필요하면 실행용으로 복사해 주세요."
+        ModelRuntimeFormat.LITERT_LM -> "권장 동작: 먼저 연결하고, 실행이 필요하면 실행용으로 복사해 주세요."
+        ModelRuntimeFormat.MEDIAPIPE_LLM -> "권장 동작: 보관용으로 연결하거나 .litertlm 형식 모델을 준비해 주세요."
         ModelRuntimeFormat.NEEDS_CONVERSION -> "권장 동작: 연결로 보관하고 변환 후 다시 가져와 주세요."
         else -> "권장 동작: 연결로 보관하고 지원 여부를 확인해 주세요."
     }
@@ -8580,11 +8793,17 @@ private fun getFileSizeFromUri(context: Context, uri: Uri): Long? {
     return null
 }
 
+@Composable
+private fun rememberUriAvailability(context: Context, uriString: String?): Boolean? {
+    return produceState<Boolean?>(initialValue = null, uriString) {
+        value = withContext(Dispatchers.IO) { canOpenUri(context, uriString) }
+    }.value
+}
+
 private fun canOpenUri(context: Context, uriString: String?): Boolean {
     if (uriString.isNullOrBlank()) return false
     return runCatching {
-        context.contentResolver.openInputStream(Uri.parse(uriString))?.close()
-        true
+        context.contentResolver.openInputStream(Uri.parse(uriString))?.use { true } ?: false
     }.getOrDefault(false)
 }
 
@@ -9546,13 +9765,8 @@ private fun stripFusionTags(text: String): String {
         .replace(Regex("""</?fusion_(?:thinking|answer|metrics)>""", RegexOption.IGNORE_CASE), "")
         .trim()
 }
-private fun getModelDirectory(context: Context): File {
-    val baseDir = context.getExternalFilesDir(null) ?: context.filesDir
-    return File(baseDir, "models").apply {
-        if (!exists()) mkdirs()
-    }
-
-}
+private fun getModelDirectory(context: Context): File =
+    ManagedModelPathPolicy.getModelDirectory(context)
 private fun getModelFile(
     context: Context,
     model: LocalModel
@@ -9564,7 +9778,7 @@ private fun isModelDownloaded(
     model: LocalModel
 ): Boolean {
     if (model.customPath != null) {
-        return File(model.customPath).exists()
+        return ManagedModelPathPolicy.resolveRunnableModel(context, model.customPath) != null
     }
     return getModelFile(context, model).exists()
 
@@ -9574,23 +9788,115 @@ private suspend fun copyUriToModelFile(
     uri: Uri,
     displayName: String
 ): File? {
-    return withContext(Dispatchers.IO) {
-        try {
-            val safeName = displayName.ifBlank { "custom_model.litertlm" }
-            val outputFile = File(getModelDirectory(context), safeName)
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                outputFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            } ?: return@withContext null
+    var temporaryFile: File? = null
+    var adoptedFile: File? = null
 
-            outputFile
-        } catch (_: Exception) {
-            null
+    try {
+        return withContext(Dispatchers.IO) outer@ {
+            val safeName = File(displayName).name
+                .replace(Regex("""[\u0000-\u001F\u007F\\/:*?"<>|]"""), "_")
+                .take(72)
+                .ifBlank { "custom_model.litertlm" }
+            val modelDirectory = getModelDirectory(context)
+            val finalFile = File(modelDirectory, "${UUID.randomUUID()}_$safeName")
+            val partFile = File(modelDirectory, ".${finalFile.name}.part")
+            temporaryFile = partFile
+
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                partFile.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                    }
+                    output.flush()
+                }
+            } ?: return@outer null
+
+            if (!partFile.isFile || partFile.length() <= 0L) {
+                partFile.delete()
+                return@outer null
+            }
+
+            withContext(NonCancellable) adopt@ {
+                val moved = runCatching {
+                    Files.move(
+                        partFile.toPath(),
+                        finalFile.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                    )
+                    true
+                }.getOrElse {
+                    runCatching {
+                        Files.move(partFile.toPath(), finalFile.toPath())
+                        true
+                    }.getOrDefault(false)
+                }
+                if (!moved || !finalFile.isFile || finalFile.length() <= 0L) {
+                    partFile.delete()
+                    finalFile.delete()
+                    return@adopt null
+                }
+                adoptedFile = finalFile
+                finalFile
+            }
+        }
+    } catch (cancellation: CancellationException) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            temporaryFile?.delete()
+            adoptedFile?.delete()
+        }
+        throw cancellation
+    } catch (failure: Exception) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            temporaryFile?.delete()
+            adoptedFile?.delete()
+        }
+        Log.e("FusionModel", "Failed to copy model into managed storage", failure)
+        return null
+    }
+}
+
+private fun releasePersistedReadPermission(context: Context, uri: Uri) {
+    runCatching {
+        context.contentResolver.releasePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+        )
+    }.onFailure { failure ->
+        if (failure !is SecurityException) {
+            Log.w("FusionModel", "Failed to release persisted model URI permission", failure)
         }
     }
-
 }
+
+private suspend fun deleteManagedModelFile(context: Context, path: String?): Boolean =
+    withContext(Dispatchers.IO) {
+        val managedTarget = ManagedModelPathPolicy.resolveManagedTarget(context, path)
+            ?: return@withContext false
+        !managedTarget.exists() || managedTarget.delete()
+    }
+
+private suspend fun persistCopiedModelSpec(
+    context: Context,
+    spec: FusionModelSpec,
+    copiedFile: File,
+): Boolean = withContext(NonCancellable + Dispatchers.IO) {
+    try {
+        FusionModelCatalog.saveImported(context, spec)
+        true
+    } catch (failure: Exception) {
+        Log.e("FusionModel", "Failed to persist imported model metadata", failure)
+        val managed = ManagedModelPathPolicy.resolveManagedFile(context, copiedFile.absolutePath)
+        if (managed != null && !(managed.delete() || !managed.exists())) {
+            Log.w("FusionModel", "Failed to roll back copied model after metadata failure")
+        }
+        false
+    }
+}
+
 private suspend fun downloadModelFile(
     context: Context,
     model: LocalModel,
@@ -10298,40 +10604,84 @@ private suspend fun copyUriToAttachmentFile(
     uri: Uri,
     displayName: String
 ): File? {
-    return withContext(Dispatchers.IO) {
-        var outputFile: File? = null
-        try {
+    var temporaryFile: File? = null
+    var adoptedFile: File? = null
+
+    try {
+        return withContext(Dispatchers.IO) outer@ {
             val safeName = displayName
-                .replace(Regex("""[\\/:*?"<>|]"""), "_")
+                .replace(Regex("""[\u0000-\u001F\u007F\\/:*?"<>|]"""), "_")
                 .take(48)
                 .ifBlank { "attachment" }
-
-            val targetFile = File(
-                getAttachmentDirectory(context),
-                "${UUID.randomUUID()}_$safeName"
-            )
-            outputFile = targetFile
+            val attachmentDirectory = getAttachmentDirectory(context)
+            val finalFile = File(attachmentDirectory, "${UUID.randomUUID()}_$safeName")
+            val partFile = File(attachmentDirectory, ".${finalFile.name}.part")
+            temporaryFile = partFile
 
             context.contentResolver.openInputStream(uri)?.use { input ->
-                targetFile.outputStream().use { output ->
-                    input.copyTo(output)
+                partFile.outputStream().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        output.write(buffer, 0, read)
+                    }
+                    output.flush()
                 }
-            } ?: return@withContext null
+            } ?: return@outer null
 
-            if (targetFile.exists() && targetFile.length() > 0L) {
-                AttachmentStorageManager.registerPendingAttachment(targetFile)
-                targetFile
-            } else {
-                targetFile.delete()
-                null
+            if (!partFile.isFile || partFile.length() <= 0L) {
+                partFile.delete()
+                return@outer null
             }
-        } catch (cancellation: CancellationException) {
-            outputFile?.delete()
-            throw cancellation
-        } catch (_: Exception) {
-            outputFile?.delete()
-            null
+
+            withContext(NonCancellable) adopt@ {
+                val moved = runCatching {
+                    Files.move(
+                        partFile.toPath(),
+                        finalFile.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                    )
+                    true
+                }.getOrElse {
+                    runCatching {
+                        Files.move(partFile.toPath(), finalFile.toPath())
+                        true
+                    }.getOrDefault(false)
+                }
+                if (!moved || !finalFile.isFile || finalFile.length() <= 0L) {
+                    partFile.delete()
+                    finalFile.delete()
+                    return@adopt null
+                }
+
+                val registeredPath = AttachmentStorageManager.registerPendingAttachment(finalFile)
+                if (registeredPath == null) {
+                    finalFile.delete()
+                    return@adopt null
+                }
+                adoptedFile = finalFile
+                finalFile
+            }
         }
+    } catch (cancellation: CancellationException) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            temporaryFile?.delete()
+            adoptedFile?.let { file ->
+                AttachmentStorageManager.discardPendingAttachmentFile(context, file.absolutePath)
+            }
+        }
+        throw cancellation
+    } catch (failure: Exception) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            temporaryFile?.delete()
+            adoptedFile?.let { file ->
+                AttachmentStorageManager.discardPendingAttachmentFile(context, file.absolutePath)
+            }
+        }
+        Log.e("FusionAttachment", "Failed to copy attachment into managed storage", failure)
+        return null
     }
 }
 

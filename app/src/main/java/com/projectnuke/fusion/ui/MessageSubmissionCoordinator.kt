@@ -44,6 +44,9 @@ internal suspend fun commitAndSettleUserSubmission(
     val originalConversationId = state.conversationId
     try {
         runInTransaction {
+            if (parentJob != null && !parentJob.isActive) {
+                throw CancellationException("Submission was cancelled before the database transaction began")
+            }
             if (state.conversationId == 0L) {
                 state.conversationId = createConversation()
                 state.conversationWasCreated = true

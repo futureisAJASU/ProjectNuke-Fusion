@@ -16,7 +16,7 @@ android {
         applicationId = "com.projectnuke.fusion"
         minSdk = 32
         targetSdk = 36
-        versionCode = 10000
+        versionCode = 10001
         versionName = "1.0.0-beta-stable"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -39,20 +39,36 @@
 ## Release metadata
 
 - `versionName`: `1.0.0-beta-stable`
-- `versionCode`: `10000`
+- `versionCode`: `10001` (R2 static-hardening build)
 - App information and in-app update history now show Fusion 1.0 Beta Stable.
 - Added user-facing release notes and updated README history.
+
+
+## Static hardening pass after the initial beta candidate
+
+- Added `ResponsePersistenceCoordinator` so assistant-message insertion is irreversible while conversation timestamp updates remain best effort.
+- Applied the same persistence contract to normal local/external generation, Retry and style regeneration.
+- Response-version state now uses durable `SharedPreferences.commit()` only on generation-result settlement; ordinary version navigation keeps asynchronous writes to avoid main-thread fsync.
+- Reloads response-version state when message identities change, covering cancellation immediately after durable persistence.
+- Attachment imports are adopted as one batch only after the originating conversation is still current; cancellation and conversation switches discard copied files through the managed storage API.
+- Model imports now use sanitized UUID names, `.part` staging files, cancellation checks and atomic move fallback.
+- Added `ManagedModelPathPolicy` as the final runtime boundary for direct managed model files, symlink rejection and supported executable extensions.
+- Corrected the runtime capability model: this build contains LiteRT-LM only, so `.litertlm` is executable while MediaPipe `.task` files remain non-runnable catalog items.
+- Model metadata writes use `AtomicFile`; metadata failure rolls back a newly copied model file.
+- Deleting the currently selected model clears its active path, and external unlink/copy flows release persisted document permissions only after metadata settlement succeeds.
+- External model accessibility checks run on `Dispatchers.IO` and no longer report a null stream as accessible.
+- Disabled Android automatic app-data backup and device-transfer inclusion to match the local-data policy.
 
 ## Validation performed in this environment
 
 - `git diff --check`: passed.
-- UTF-8 decoding and conflict-marker scan: passed.
-- Generated log, crash dump, temporary and backup file scan: passed.
-- Standalone Kotlin harness for commit ordering, transaction-failure ownership and draft reconciliation: passed.
-- Standalone Kotlin harness for canonical pending-attachment discard and registration behavior: passed.
-- Standalone compilation of production `MessageSubmissionCoordinator` with its JVM tests: passed.
-- Standalone compilation of composer policy test sources against matching production signatures: passed.
-- `testDebugUnitTest` and `assembleDebug` were attempted through the wrapper but could not start because Gradle 9.4.1 is not cached and this environment cannot resolve `services.gradle.org`.
+- XML parsing for all Android resource and manifest files: passed.
+- Kotlin PSI parsing for every modified production and test file: passed with no syntax errors.
+- Production `MessageSubmissionCoordinator` and `ResponsePersistenceCoordinator` compilation/execution harness: passed.
+- Production `ManagedModelPathPolicy` compilation/execution harness: passed.
+- UTF-8, conflict-marker, generated-log, crash-dump, temporary and backup-file scans: passed.
+- Git bundle verification and source ZIP integrity checks: passed after packaging.
+- Android Gradle build and device tests were intentionally left for the user environment as requested.
 
 ## Remaining beta limitations
 

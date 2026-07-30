@@ -16,6 +16,8 @@ import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
+import com.projectnuke.fusion.util.AttachmentStorageManager
+import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -53,9 +55,9 @@ class LiteRtLlmEngine(
         onToken: (String) -> Unit
     ): GenerationOutcome {
         return withContext(Dispatchers.IO) {
-            val modelFile = File(modelPath)
-            if (!modelFile.exists()) {
-                Log.e("FusionEngine", "Selected model file does not exist: $modelPath")
+            val modelFile = ManagedModelPathPolicy.resolveRunnableModel(context, modelPath)
+            if (modelFile == null) {
+                Log.e("FusionEngine", "Selected model path is missing or unmanaged: ${File(modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
                     message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
@@ -148,17 +150,19 @@ class LiteRtLlmEngine(
         onToken: (String) -> Unit
     ): GenerationOutcome {
         return withContext(Dispatchers.IO) {
-            val modelFile = File(modelPath)
-            if (!modelFile.exists()) {
-                Log.e("FusionEngine", "Selected model file does not exist for multimodal request: $modelPath")
+            val modelFile = ManagedModelPathPolicy.resolveRunnableModel(context, modelPath)
+            if (modelFile == null) {
+                Log.e("FusionEngine", "Selected multimodal model path is missing or unmanaged: ${File(modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
                     message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
                 )
             }
 
-            val missingImage = imagePaths.firstOrNull { !File(it).exists() }
-            if (missingImage != null) {
+            val managedImagePaths = imagePaths.mapNotNull { path ->
+                AttachmentStorageManager.resolveManagedAttachment(context, path)?.absolutePath
+            }
+            if (managedImagePaths.size != imagePaths.size) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.IMAGE_NOT_FOUND,
                     message = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다."
@@ -223,7 +227,7 @@ class LiteRtLlmEngine(
             )
 
             val contentParts = buildList<Content> {
-                imagePaths.forEach { imagePath ->
+                managedImagePaths.forEach { imagePath ->
                     add(Content.ImageFile(imagePath))
                 }
                 add(Content.Text(promptText))

@@ -304,6 +304,24 @@ private fun buildFusionReleaseNotesHistory(): List<FusionReleaseNote> {
                     )
                 ),
                 FusionReleaseNoteSection(
+                    title = "답변 저장과 모델 파일",
+                    items = listOf(
+                        "답변 저장 후 대화 timestamp 갱신만 실패했을 때 저장된 답변을 삭제하던 문제를 수정했습니다.",
+                        "Retry와 스타일 재생성의 답변 버전 정보를 확정 저장하고 취소 직후에도 다시 불러오도록 보강했습니다.",
+                        "모델 복사에 임시 파일과 원자적 이동을 적용하고 metadata 저장 실패 시 복사 파일을 정리합니다.",
+                        "현재 실행 엔진에 맞춰 .litertlm만 직접 실행 가능으로 표시하며 .task 파일은 호환성 확인 대상으로 구분합니다.",
+                        "현재 선택한 모델을 삭제하면 잘못된 모델 경로가 계속 사용되지 않도록 선택 상태를 정리합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
+                    title = "로컬 데이터 보호",
+                    items = listOf(
+                        "Android 시스템 자동 백업과 기기 이전 대상에서 Fusion 앱 데이터를 제외했습니다.",
+                        "외부 모델 연결을 해제하거나 내부 복사가 완료되면 불필요한 문서 URI 권한을 정리합니다.",
+                        "설정 복원과 실제 추론 엔진 모두 관리 모델 저장소 밖 경로와 symlink를 거부합니다."
+                    )
+                ),
+                FusionReleaseNoteSection(
                     title = "Beta Stable 안내",
                     items = listOf(
                         "핵심 채팅 기능을 일상적으로 시험할 수 있는 1.0.0 Beta Stable 기준으로 버전 체계를 올렸습니다.",
