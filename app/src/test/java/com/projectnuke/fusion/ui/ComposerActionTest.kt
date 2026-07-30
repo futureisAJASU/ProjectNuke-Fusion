@@ -367,6 +367,65 @@ class ComposerActionTest {
         assertEquals(0, navCalls)
     }
 
+    // === lifecycle integration — helpers as used by the real Send path ===
+
+    @Test
+    fun `happy path lifecycle clears owner and settles draft`() {
+        val owner = MessageSubmissionOwner(token = "submit-1", sourceConversationId = 1L)
+        var active: MessageSubmissionOwner? = owner
+        val pendingAttachments = mutableListOf(
+            LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf")
+        )
+        val capturedDraftPaths = listOf("/a.pdf")
+        val unregistered = mutableListOf<String>()
+        var input = "hello"
+
+        active = active.clearIfMatches(owner)
+        settleCommittedDraft(
+            input = { input },
+            setInput = { input = it },
+            capturedRawInput = "hello",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = true,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = { unregistered.add(it) }
+        )
+
+        assertNull(active)
+        assertEquals("", input)
+        assertTrue(pendingAttachments.isEmpty())
+        assertEquals(listOf("/a.pdf"), unregistered)
+    }
+
+    @Test
+    fun `concurrent submission does not clear newer owner`() {
+        val oldOwner = MessageSubmissionOwner(token = "old", sourceConversationId = 1L)
+        val newOwner = MessageSubmissionOwner(token = "new", sourceConversationId = 2L)
+        var active: MessageSubmissionOwner? = newOwner
+
+        active = active.clearIfMatches(oldOwner)
+
+        assertEquals(newOwner, active)
+    }
+
+    @Test
+    fun `failure path clears owner without settling draft`() {
+        val owner = MessageSubmissionOwner(token = "fail-1", sourceConversationId = 1L)
+        var active: MessageSubmissionOwner? = owner
+        val pendingAttachments = mutableListOf(
+            LocalAttachment(name = "b.pdf", mimeType = "application/pdf", localPath = "/b.pdf")
+        )
+        var input = "hello world"
+
+        active = active.clearIfMatches(owner)
+
+        assertNull(active)
+        assertEquals("hello world", input)
+        assertEquals(1, pendingAttachments.size)
+    }
+
     // === computePickerCapacity ===
 
     @Test

@@ -2157,8 +2157,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     )
 
                     if (conversationId != originConversationId) {
-                        copiedFile?.let { AttachmentStorageManager.unregisterPendingAttachment(it.absolutePath) }
-                        copiedFile?.delete()
+                        copiedFile?.let { rollbackPendingAttachment(it.absolutePath) }
                         return@launch
                     }
 
@@ -2436,24 +2435,21 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     userMessageInserted = true
 
                                     withContext(NonCancellable) {
-                                        if (conversationWasCreated) {
-                                            onConversationCreated(activeConversationId)
-                                        }
-                                        capturedDraftAttachments.forEach { attachment ->
-                                            AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
-                                        }
-
+                                        settleCommittedDraft(
+                                            input = { input },
+                                            setInput = { input = it },
+                                            capturedRawInput = capturedRawInput,
+                                            pendingAttachments = pendingAttachments,
+                                            capturedDraftPaths = capturedDraftAttachments.map { it.localPath },
+                                            conversationWasCreated = conversationWasCreated,
+                                            activeConversationId = activeConversationId,
+                                            onConversationCreated = onConversationCreated,
+                                            unregisterAttachment = { AttachmentStorageManager.unregisterPendingAttachment(it) }
+                                        )
                                         try {
                                             dao.updateConversationTime(activeConversationId, now)
                                         } catch (e: Exception) {
                                             Log.e("FusionEngine", "Failed to update conversation time", e)
-                                        }
-
-                                        if (input == capturedRawInput) {
-                                            input = ""
-                                        }
-                                        capturedDraftAttachments.map { LocalAttachment(it.name, it.mimeType, it.localPath) }.forEach { attachment ->
-                                            pendingAttachments.remove(attachment)
                                         }
                                     }
 
@@ -2633,18 +2629,22 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 }
                                             }
                                             // Install succeeded — transition from SubmitProgress to Stop
-                                            isGenerating = true
-                                            streamingAssistantText = null
-                                            streamingMetricsLine = null
-                                            generationStatus = if (snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) "인터넷 검색 중..." else "외부 AI API 응답을 기다리는 중..."
-                                            if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                            if (currentConversationId == snapshot.conversationId) {
+                                                isGenerating = true
+                                                streamingAssistantText = null
+                                                streamingMetricsLine = null
+                                                generationStatus = if (snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) "인터넷 검색 중..." else "외부 AI API 응답을 기다리는 중..."
+                                            }
+                                            activeSubmission = activeSubmission.clearIfMatches(owner)
                                         } catch (e: Exception) {
                                             chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
-                                            if (activeSubmission?.token == owner.token) { activeSubmission = null }
-                                            isGenerating = false
-                                            generationStatus = null
-                                            streamingAssistantText = null
-                                            streamingMetricsLine = null
+                                            activeSubmission = activeSubmission.clearIfMatches(owner)
+                                            if (currentConversationId == snapshot.conversationId) {
+                                                isGenerating = false
+                                                generationStatus = null
+                                                streamingAssistantText = null
+                                                streamingMetricsLine = null
+                                            }
                                             if (e is CancellationException) throw e
                                             if (currentConversationId == snapshot.conversationId) {
                                                 Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
@@ -2916,7 +2916,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             Log.e("FusionEngine", "Chat generation failed", e)
                                             if (e is BenchmarkRunningException) return@start
                                             if (e is kotlinx.coroutines.CancellationException) throw e
-                                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                            if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == snapshot.conversationId) {
                                                 Toast.makeText(context, if (isLiteRtModelLoadException(e)) "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요." else "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                             }
                                         } finally {
@@ -2924,32 +2924,37 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         }
                                         }
                                         // Install succeeded — transition from SubmitProgress to Stop
-                                        isGenerating = true
-                                        streamingAssistantText = null
-                                        streamingMetricsLine = null
-                                        generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
-                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                        if (currentConversationId == snapshot.conversationId) {
+                                            isGenerating = true
+                                            streamingAssistantText = null
+                                            streamingMetricsLine = null
+                                            generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
+                                        }
+                                        activeSubmission = activeSubmission.clearIfMatches(owner)
                                     } catch (e: Exception) {
                                         chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
-                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
-                                        isGenerating = false
-                                        generationStatus = null
-                                        streamingAssistantText = null
-                                        streamingMetricsLine = null
+                                        activeSubmission = activeSubmission.clearIfMatches(owner)
+                                        if (currentConversationId == snapshot.conversationId) {
+                                            isGenerating = false
+                                            generationStatus = null
+                                            streamingAssistantText = null
+                                            streamingMetricsLine = null
+                                        }
                                         if (e is kotlinx.coroutines.CancellationException) throw e
                                     }
                                 } catch (e: Exception) {
                                     Log.e("FusionEngine", "Chat generation failed", e)
-                                    if (e is kotlinx.coroutines.CancellationException) {
-                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
-                                        throw e
-                                    }
-                                    if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                    activeSubmission = activeSubmission.clearIfMatches(owner)
                                     isGenerating = false
                                     generationStatus = null
                                     streamingAssistantText = null
                                     streamingMetricsLine = null
                                     if (!userMessageInserted) {
+                                        withContext(NonCancellable) {
+                                            capturedDraftAttachments.forEach { 
+                                                rollbackPendingAttachment(it.localPath)
+                                            }
+                                        }
                                         if (conversationWasCreated) {
                                             withContext(NonCancellable) {
                                                 try {
@@ -2961,6 +2966,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         }
                                         Toast.makeText(context, "메시지를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                     }
+                                    if (e is kotlinx.coroutines.CancellationException) throw e
                                 }
                             }
                         }
@@ -10282,5 +10288,13 @@ internal fun settleCommittedDraft(
     capturedDraftPaths.forEach(unregisterAttachment)
     if (conversationWasCreated) {
         onConversationCreated(activeConversationId)
+    }
+}
+
+internal fun rollbackPendingAttachment(absolutePath: String) {
+    AttachmentStorageManager.unregisterPendingAttachment(absolutePath)
+    try {
+        File(absolutePath).delete()
+    } catch (_: Exception) {
     }
 }
