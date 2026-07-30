@@ -118,7 +118,7 @@ fun restoreSettingsBackupJson(
     val currentSelectedModel = prefs.getString(PrefSelectedModel, "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
     val currentSelectedModelPath = prefs.getString(PrefSelectedModelPath, null)
     val backupModel = settings.optString("selectedModel", currentSelectedModel)
-    val backupPath = settings.optString("selectedModelPath", currentSelectedModelPath)
+    val backupPath = settings.optString("selectedModelPath", currentSelectedModelPath ?: "")
     var modelPathMissing = false
     if (!backupPath.isNullOrBlank()) {
         val managedModel = ManagedModelPathPolicy.resolveRunnableModel(context, backupPath)

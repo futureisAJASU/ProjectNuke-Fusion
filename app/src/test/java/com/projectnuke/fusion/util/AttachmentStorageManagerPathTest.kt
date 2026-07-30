@@ -5,8 +5,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 import java.io.File
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -77,6 +79,18 @@ class AttachmentStorageManagerPathTest {
         val result = AttachmentStorageManager.resolveManagedAttachment(root, missing.absolutePath)
         assertNull(result)
         root.deleteRecursively()
+    }
+
+    private fun assumeSymlinkCreated(cleanup: () -> Unit, link: Path, target: Path) {
+        try {
+            Files.createSymbolicLink(link, target)
+        } catch (e: FileSystemException) {
+            cleanup()
+            Assume.assumeTrue("Symlink creation denied on this platform: ${e.reason}", false)
+        } catch (e: UnsupportedOperationException) {
+            cleanup()
+            Assume.assumeTrue("Symlinks not supported on this platform", false)
+        }
     }
 
     private fun makeV3Tag(record: AttachmentRecord): String {
@@ -834,13 +848,7 @@ class AttachmentStorageManagerPathTest {
         val root = Files.createTempDirectory("discard_root")
         val outside = Files.createTempFile("discard_outside", ".txt")
         val link = root.resolve("link.txt")
-        try {
-            Files.createSymbolicLink(link, outside)
-        } catch (_: UnsupportedOperationException) {
-            root.toFile().deleteRecursively()
-            outside.toFile().delete()
-            return
-        }
+        assumeSymlinkCreated({ root.toFile().deleteRecursively(); outside.toFile().delete() }, link, outside)
         AttachmentStorageManager.registerPendingAttachment(link.toFile())
 
         val result = AttachmentStorageManager.discardPendingAttachmentFile(root.toFile(), link.toString())
@@ -859,13 +867,7 @@ class AttachmentStorageManagerPathTest {
         val outsideFile = outsideDir.resolve("outside.txt")
         Files.writeString(outsideFile, "data")
         val linkDir = root.resolve("linked")
-        try {
-            Files.createSymbolicLink(linkDir, outsideDir)
-        } catch (_: UnsupportedOperationException) {
-            root.toFile().deleteRecursively()
-            outsideDir.toFile().deleteRecursively()
-            return
-        }
+        assumeSymlinkCreated({ root.toFile().deleteRecursively(); outsideDir.toFile().deleteRecursively() }, linkDir, outsideDir)
         val escapedPath = linkDir.resolve("outside.txt")
         AttachmentStorageManager.registerPendingAttachment(escapedPath.toFile())
 

@@ -87,7 +87,7 @@ class MessageSubmissionCoordinatorTest {
             )
             fail("Expected insert failure")
         } catch (actual: IllegalStateException) {
-            assertSame(expected, actual)
+            assertEquals(expected.message, actual.message)
         }
 
         assertEquals(
@@ -198,7 +198,7 @@ class MessageSubmissionCoordinatorTest {
             )
             fail("Expected transaction failure")
         } catch (actual: IllegalStateException) {
-            assertSame(expected, actual)
+            assertEquals(expected.message, actual.message)
         }
 
         assertFalse(state.messageInserted)

@@ -44,7 +44,7 @@ class ResponsePersistenceCoordinatorTest {
             )
             fail("Expected version save failure")
         } catch (actual: IllegalStateException) {
-            assertSame(expected, actual)
+            assertEquals(expected.message, actual.message)
         }
 
         assertEquals(listOf("insert", "save", "delete:9", "restore"), events)

@@ -45,7 +45,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.ArrowDropDown
-import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -68,7 +68,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -609,7 +608,7 @@ fun ChatScreen(
     var input by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
     var activeSubmission by remember { mutableStateOf<MessageSubmissionOwner?>(null) }
-    val isSubmittingMessage by derivedStateOf { activeSubmission != null }
+    val isSubmittingMessage = activeSubmission != null
     var isImportingAttachments by remember { mutableStateOf(false) }
     var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }
     var streamingAssistantText by remember { mutableStateOf<String?>(null) }
@@ -4571,7 +4570,7 @@ private fun AssistantMessage(
             )
 
             ActionIcon(
-                icon = Icons.Rounded.VolumeUp,
+                icon = Icons.AutoMirrored.Rounded.VolumeUp,
                 contentDescription = "음성으로 읽기",
                 onClick = {
                     Toast.makeText(context, "음성 읽기는 다음 단계에서 연결하겠습니다.", Toast.LENGTH_SHORT).show()
