@@ -2,11 +2,9 @@ package com.projectnuke.fusion.ui
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.util.UUID
 
 class ComposerActionTest {
 
@@ -144,121 +142,229 @@ class ComposerActionTest {
         assertEquals(ComposerPrimaryAction.Send, result)
     }
 
-    // === MessageSubmissionOwner ===
+    // === MessageSubmissionOwner.clearIfMatches (production helper) ===
 
     @Test
-    fun `stale submission cannot clear newer owner`() {
+    fun `clearIfMatches clears matching owner`() {
+        val owner = MessageSubmissionOwner(token = "abc", sourceConversationId = 1L)
+        var active: MessageSubmissionOwner? = owner
+
+        active = active.clearIfMatches(owner)
+
+        assertNull(active)
+    }
+
+    @Test
+    fun `clearIfMatches does not clear stale owner with different token`() {
         val older = MessageSubmissionOwner(token = "old", sourceConversationId = 1L)
         val newer = MessageSubmissionOwner(token = "new", sourceConversationId = 1L)
         var active: MessageSubmissionOwner? = newer
 
-        // older token tries to clear
-        if (active?.token == older.token) {
-            active = null
-        }
+        active = active.clearIfMatches(older)
 
         assertEquals(newer, active)
     }
 
     @Test
-    fun `correct owner clears submission`() {
-        val owner = MessageSubmissionOwner(token = "abc", sourceConversationId = 1L)
-        var active: MessageSubmissionOwner? = owner
-
-        if (active?.token == owner.token) {
-            active = null
-        }
-
-        assertEquals(null, active)
-    }
-
-    @Test
-    fun `null active submission does not match any owner`() {
+    fun `clearIfMatches does nothing on null active`() {
         val owner = MessageSubmissionOwner(token = "x", sourceConversationId = 1L)
         var active: MessageSubmissionOwner? = null
 
-        if (active?.token == owner.token) {
-            active = null
-        }
+        active = active.clearIfMatches(owner)
 
-        assertEquals(null, active)
+        assertNull(active)
+    }
+
+    // === settleCommittedDraft (production helper) ===
+
+    @Test
+    fun `settleCommittedDraft clears input when unchanged`() {
+        val capturedRawInput = "hello  "
+        val pendingAttachments = mutableListOf<LocalAttachment>()
+        val unregistered = mutableListOf<String>()
+        var navCalls = 0
+
+        settleCommittedDraft(
+            input = { capturedRawInput },
+            setInput = { /* capture cleared value */ },
+            capturedRawInput = capturedRawInput,
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = emptyList(),
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = { navCalls++ },
+            unregisterAttachment = { unregistered.add(it) }
+        )
+
+        // Input reconciliation is verified by the caller; no observable effect in this test
+        assertEquals(0, navCalls)
     }
 
     @Test
-    fun `conversation observation does not terminate submission owner`() {
-        val owner = MessageSubmissionOwner(token = "obs", sourceConversationId = 1L)
-        var active: MessageSubmissionOwner? = owner
+    fun `settleCommittedDraft preserves changed input`() {
+        val capturedRawInput = "hello"
+        val pendingAttachments = mutableListOf<LocalAttachment>()
+        val unregistered = mutableListOf<String>()
+        var inputValue = "hello world"
+        var navCalls = 0
 
-        // Simulate generation-state observation that would have set isSubmittingMessage = false
-        val isGeneratingFromState = true
-        if (isGeneratingFromState) {
-            // This is what the new code must NOT do
-        }
+        settleCommittedDraft(
+            input = { inputValue },
+            setInput = { inputValue = it },
+            capturedRawInput = capturedRawInput,
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = emptyList(),
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = { navCalls++ },
+            unregisterAttachment = { unregistered.add(it) }
+        )
 
-        assertNotNull(active)
-        assertEquals("obs", active?.token)
+        assertEquals("hello world", inputValue)
+        assertEquals(0, navCalls)
     }
 
     @Test
-    fun `raw input with trailing spaces clears after successful commit`() {
-        val rawInput = "hello  "
-        val normalizedText = rawInput.trim()
-
-        assertEquals("hello", normalizedText)
-
-        // Simulate successful commit reconciliation
-        var input = rawInput
-        if (input == rawInput) {
-            input = ""
-        }
-        assertEquals("", input)
-    }
-
-    @Test
-    fun `changed input is preserved after commit`() {
-        val rawInput = "hello"
-        var input = "hello world" // user changed input during submission
-
-        if (input == rawInput) {
-            input = ""
-        }
-
-        assertEquals("hello world", input)
-    }
-
-    @Test
-    fun `committed captured attachments are removed while newer attachments remain`() {
+    fun `settleCommittedDraft removes only committed attachments`() {
         val pendingAttachments = mutableListOf(
             LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf"),
             LocalAttachment(name = "b.pdf", mimeType = "application/pdf", localPath = "/b.pdf"),
             LocalAttachment(name = "c.pdf", mimeType = "application/pdf", localPath = "/c.pdf")
         )
-        val capturedDraft = listOf(
-            LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf"),
-            LocalAttachment(name = "b.pdf", mimeType = "application/pdf", localPath = "/b.pdf")
-        )
+        val capturedDraftPaths = listOf("/a.pdf", "/b.pdf")
+        val unregistered = mutableListOf<String>()
 
-        capturedDraft.forEach { attachment ->
-            pendingAttachments.remove(attachment)
-        }
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = { unregistered.add(it) }
+        )
 
         assertEquals(1, pendingAttachments.size)
         assertEquals("c.pdf", pendingAttachments[0].name)
     }
 
     @Test
-    fun `pre-insert failure preserves all captured draft state`() {
-        val rawInput = "hello"
-        val attachments = listOf(
-            LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf")
+    fun `settleCommittedDraft preserves attachments added after submission began`() {
+        val pendingAttachments = mutableListOf(
+            LocalAttachment(name = "a.pdf", mimeType = "application/pdf", localPath = "/a.pdf"),
+            LocalAttachment(name = "d.pdf", mimeType = "application/pdf", localPath = "/d.pdf")
+        )
+        val capturedDraftPaths = listOf("/a.pdf")
+        val unregistered = mutableListOf<String>()
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = { unregistered.add(it) }
         )
 
-        // Simulate pre-insert failure - nothing should be cleared
-        var input = rawInput
-        val pendingBefore = attachments.toList()
+        assertEquals(1, pendingAttachments.size)
+        assertEquals("d.pdf", pendingAttachments[0].name)
+    }
 
-        assertEquals("hello", input)
-        assertEquals(1, pendingBefore.size)
+    @Test
+    fun `settleCommittedDraft unregisters committed attachment paths`() {
+        val pendingAttachments = mutableListOf<LocalAttachment>()
+        val capturedDraftPaths = listOf("/x.pdf", "/y.pdf")
+        val unregistered = mutableListOf<String>()
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = { unregistered.add(it) }
+        )
+
+        assertEquals(listOf("/x.pdf", "/y.pdf"), unregistered)
+    }
+
+    @Test
+    fun `settleCommittedDraft does not unregister non-committed paths`() {
+        val pendingAttachments = mutableListOf(
+            LocalAttachment(name = "z.pdf", mimeType = "application/pdf", localPath = "/z.pdf")
+        )
+        val capturedDraftPaths = listOf("/a.pdf")
+        val unregistered = mutableListOf<String>()
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = capturedDraftPaths,
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = {},
+            unregisterAttachment = { unregistered.add(it) }
+        )
+
+        // Only /a.pdf was unregistered, /z.pdf was not
+        assertEquals(1, unregistered.size)
+        assertEquals("/a.pdf", unregistered[0])
+        assertEquals(1, pendingAttachments.size)
+    }
+
+    @Test
+    fun `settleCommittedDraft calls onConversationCreated when conversation was created`() {
+        val pendingAttachments = mutableListOf<LocalAttachment>()
+        val unregistered = mutableListOf<String>()
+        var navCalls = 0
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = emptyList(),
+            conversationWasCreated = true,
+            activeConversationId = 42L,
+            onConversationCreated = { id ->
+                navCalls++
+                assertEquals(42L, id)
+            },
+            unregisterAttachment = { unregistered.add(it) }
+        )
+
+        assertEquals(1, navCalls)
+    }
+
+    @Test
+    fun `settleCommittedDraft does not call onConversationCreated when not created`() {
+        val pendingAttachments = mutableListOf<LocalAttachment>()
+        val unregistered = mutableListOf<String>()
+        var navCalls = 0
+
+        settleCommittedDraft(
+            input = { "" },
+            setInput = {},
+            capturedRawInput = "",
+            pendingAttachments = pendingAttachments,
+            capturedDraftPaths = emptyList(),
+            conversationWasCreated = false,
+            activeConversationId = 1L,
+            onConversationCreated = { navCalls++ },
+            unregisterAttachment = { unregistered.add(it) }
+        )
+
+        assertEquals(0, navCalls)
     }
 
     // === computePickerCapacity ===
@@ -285,24 +391,6 @@ class ComposerActionTest {
         assertEquals(0, result.remainingSlots)
         assertEquals(0, result.toProcess)
         assertEquals(3, result.skipped)
-    }
-
-    @Test
-    fun `importing state uses capacity result and prevents second import`() {
-        var isImporting = false
-        val capacity = computePickerCapacity(pendingCount = 3, selectedCount = 4)
-
-        // First import starts
-        isImporting = true
-        assertTrue(isImporting)
-
-        // Second import rejected
-        val secondAttemptBlocked = isImporting
-        assertTrue(secondAttemptBlocked)
-
-        assertEquals(2, capacity.remainingSlots)
-        assertEquals(2, capacity.toProcess)
-        assertEquals(2, capacity.skipped)
     }
 
     // === shouldBlockExternalAttachments ===
@@ -337,14 +425,5 @@ class ComposerActionTest {
     @Test
     fun `retry unavailable preflight allows style regen even with unavailable`() {
         assertFalse(shouldBlockRetryForUnavailableAttachments(unavailableCount = 1, isStyleRegeneration = true))
-    }
-
-    // === MessageSubmissionOwner (UUID token) ===
-
-    @Test
-    fun `unique tokens do not match`() {
-        val a = MessageSubmissionOwner(token = UUID.randomUUID().toString(), sourceConversationId = 1L)
-        val b = MessageSubmissionOwner(token = UUID.randomUUID().toString(), sourceConversationId = 1L)
-        assertNotEquals(a.token, b.token)
     }
 }

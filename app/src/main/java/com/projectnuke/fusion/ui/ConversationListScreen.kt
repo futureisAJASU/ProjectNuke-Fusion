@@ -349,9 +349,10 @@ fun ConversationListScreen(
 
     deleteConversation?.let { conversation ->
         val isDeleting = deletingConversationId == conversation.id
+        val anyDeleting = deletingConversationId != null
         AlertDialog(
             onDismissRequest = {
-                if (!isDeleting && deletingConversationId != conversation.id) {
+                if (!anyDeleting) {
                     deleteConversation = null
                 }
             },
@@ -364,19 +365,19 @@ fun ConversationListScreen(
             dismissButton = {
                 TextButton(
                     onClick = {
-                        if (!isDeleting && deletingConversationId != conversation.id) {
+                        if (!anyDeleting) {
                             deleteConversation = null
                         }
                     },
-                    enabled = !isDeleting
+                    enabled = !anyDeleting
                 ) {
-                    Text("취소", color = if (isDeleting) DrawerTextSecondary.copy(alpha = 0.5f) else DrawerTextSecondary)
+                    Text("취소", color = if (anyDeleting) DrawerTextSecondary.copy(alpha = 0.5f) else DrawerTextSecondary)
                 }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (deletingConversationId != null) return@TextButton
+                        if (anyDeleting) return@TextButton
                         deletingConversationId = conversation.id
                         scope.launch {
                             val targetId = conversation.id
@@ -402,7 +403,7 @@ fun ConversationListScreen(
                             }
                         }
                     },
-                    enabled = !isDeleting
+                    enabled = !anyDeleting
                 ) {
                     if (isDeleting) {
                         Row(
@@ -417,7 +418,7 @@ fun ConversationListScreen(
                             Text("삭제 중…", color = Color(0xFFFF7A7A))
                         }
                     } else {
-                        Text("삭제", color = Color(0xFFFF7A7A))
+                        Text("삭제", color = if (anyDeleting) Color(0xFFFF7A7A).copy(alpha = 0.5f) else Color(0xFFFF7A7A))
                     }
                 }
             },

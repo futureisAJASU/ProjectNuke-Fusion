@@ -2157,6 +2157,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     )
 
                     if (conversationId != originConversationId) {
+                        copiedFile?.let { AttachmentStorageManager.unregisterPendingAttachment(it.absolutePath) }
                         copiedFile?.delete()
                         return@launch
                     }
@@ -2257,7 +2258,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         selectedProviderName = selectedExternalProviderName,
                         selectedProviderId = selectedExternalProviderId,
                         externalProviders = externalProviders,
-                    enabled = !isGenerating && !isSubmittingMessage,
+                    enabled = !isGenerating && !isSubmittingMessage && !isImportingAttachments,
                         onOpenApiSettings = {
                             showAdvancedSettingsDialog = true
                         },
@@ -2434,30 +2435,27 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     )
                                     userMessageInserted = true
 
-                                    if (conversationWasCreated) {
-                                        onConversationCreated(activeConversationId)
-                                    }
-                                    capturedDraftAttachments.forEach { attachment ->
-                                        AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
-                                    }
+                                    withContext(NonCancellable) {
+                                        if (conversationWasCreated) {
+                                            onConversationCreated(activeConversationId)
+                                        }
+                                        capturedDraftAttachments.forEach { attachment ->
+                                            AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
+                                        }
 
-                                    try {
-                                        dao.updateConversationTime(activeConversationId, now)
-                                    } catch (e: Exception) {
-                                        Log.e("FusionEngine", "Failed to update conversation time", e)
-                                    }
+                                        try {
+                                            dao.updateConversationTime(activeConversationId, now)
+                                        } catch (e: Exception) {
+                                            Log.e("FusionEngine", "Failed to update conversation time", e)
+                                        }
 
-                                    if (input == capturedRawInput) {
-                                        input = ""
+                                        if (input == capturedRawInput) {
+                                            input = ""
+                                        }
+                                        capturedDraftAttachments.map { LocalAttachment(it.name, it.mimeType, it.localPath) }.forEach { attachment ->
+                                            pendingAttachments.remove(attachment)
+                                        }
                                     }
-                                    capturedDraftAttachments.map { LocalAttachment(it.name, it.mimeType, it.localPath) }.forEach { attachment ->
-                                        pendingAttachments.remove(attachment)
-                                    }
-
-                                    isGenerating = true
-                                    streamingAssistantText = null
-                                    streamingMetricsLine = null
-                                    generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
 
                                     val requestId = UUID.randomUUID().toString()
                                     val snapshot = GenerationRequestSnapshot(
@@ -2634,14 +2632,24 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                     chatViewModel.finishRequestState(s.conversationId, snapshot.requestId)
                                                 }
                                             }
+                                            // Install succeeded — transition from SubmitProgress to Stop
+                                            isGenerating = true
+                                            streamingAssistantText = null
+                                            streamingMetricsLine = null
+                                            generationStatus = if (snapshot.webSearchPolicy != GenerationRequestSnapshot.WebSearchPolicy.DISABLED) "인터넷 검색 중..." else "외부 AI API 응답을 기다리는 중..."
+                                            if (activeSubmission?.token == owner.token) { activeSubmission = null }
                                         } catch (e: Exception) {
                                             chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
+                                            if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                            isGenerating = false
+                                            generationStatus = null
+                                            streamingAssistantText = null
+                                            streamingMetricsLine = null
                                             if (e is CancellationException) throw e
                                             if (currentConversationId == snapshot.conversationId) {
                                                 Toast.makeText(context, "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
                                             }
                                         }
-                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
                                         return@launch
                                     }
 
@@ -2656,7 +2664,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         )
                                     }
 
-                                    chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
+                                    try {
+                                        chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
                                         if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
                                         try {
                                             // === WEB SEARCH ===
@@ -2913,22 +2922,30 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         } finally {
                                             chatViewModel.finishRequestState(s.conversationId, snapshot.requestId)
                                         }
-                                    }
-                                    if (activeSubmission?.token == owner.token) { activeSubmission = null }
-                                } catch (e: Exception) {
-                                    if (!userMessageInserted && attachmentsToSend.isNotEmpty()) {
-                                        attachmentsToSend.forEach { attachment ->
-                                            val deleted = AttachmentStorageManager.deletePendingAttachmentFile(context = context, path = attachment.localPath)
-                                            if (!deleted) {
-                                                AttachmentStorageManager.unregisterPendingAttachment(attachment.localPath)
-                                            }
                                         }
-                                        DeveloperLogStore.record(context, "attachment", "첨부 파일 저장 롤백", "count=${attachmentsToSend.size}, error=${e::class.java.simpleName}")
+                                        // Install succeeded — transition from SubmitProgress to Stop
+                                        isGenerating = true
+                                        streamingAssistantText = null
+                                        streamingMetricsLine = null
+                                        generationStatus = if (shouldUseWebSearch) "인터넷 검색 중..." else "모델 로딩 중..."
+                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                    } catch (e: Exception) {
+                                        chatViewModel.finishRequestState(snapshot.conversationId, snapshot.requestId)
+                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                        isGenerating = false
+                                        generationStatus = null
+                                        streamingAssistantText = null
+                                        streamingMetricsLine = null
+                                        if (e is kotlinx.coroutines.CancellationException) throw e
                                     }
+                                } catch (e: Exception) {
                                     Log.e("FusionEngine", "Chat generation failed", e)
-                                    if (e is kotlinx.coroutines.CancellationException) throw e
-                                    isGenerating = false
+                                    if (e is kotlinx.coroutines.CancellationException) {
+                                        if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                        throw e
+                                    }
                                     if (activeSubmission?.token == owner.token) { activeSubmission = null }
+                                    isGenerating = false
                                     generationStatus = null
                                     streamingAssistantText = null
                                     streamingMetricsLine = null
@@ -10239,4 +10256,31 @@ private fun buildModelUserContent(
         사용자 메시지:
         ${body.ifBlank { "첨부 파일을 보냈다." }}
     """.trimIndent()
+}
+
+internal fun MessageSubmissionOwner?.clearIfMatches(owner: MessageSubmissionOwner): MessageSubmissionOwner? {
+    if (this?.token == owner.token) return null
+    return this
+}
+
+internal fun settleCommittedDraft(
+    input: () -> String,
+    setInput: (String) -> Unit,
+    capturedRawInput: String,
+    pendingAttachments: MutableList<LocalAttachment>,
+    capturedDraftPaths: List<String>,
+    conversationWasCreated: Boolean,
+    activeConversationId: Long,
+    onConversationCreated: (Long) -> Unit,
+    unregisterAttachment: (String) -> Unit,
+) {
+    if (input() == capturedRawInput) {
+        setInput("")
+    }
+    val committed = capturedDraftPaths.toSet()
+    pendingAttachments.removeAll { it.localPath in committed }
+    capturedDraftPaths.forEach(unregisterAttachment)
+    if (conversationWasCreated) {
+        onConversationCreated(activeConversationId)
+    }
 }
