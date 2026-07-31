@@ -57,29 +57,18 @@ class ChatViewModelLifecycleAndDraftTest {
         val original = ChatViewModel(handle)
         original.selectConversation(72L)
         original.updateDraftText(72L, "persisted draft")
-        val import = original.beginAttachmentImport(72L)
-        assertTrue(original.beginAttachmentCopy(72L, import.token))
-        assertTrue(
-            original.completeAttachmentImport(
-                72L,
-                import.token,
-                listOf(PendingAttachmentIdentity("a.txt", "text/plain", "/managed/a.txt")),
-            )
-        )
-        original.beginAttachmentImport(72L)
 
         val restored = ChatViewModel(
             SavedStateHandle(
                 mapOf(
                     "current_conversation_id" to handle.get<Long>("current_conversation_id"),
-                    "composer_drafts_v1" to handle.get<String>("composer_drafts_v1"),
                 )
             )
         )
 
         assertEquals(72L, restored.currentConversationId.value)
-        assertEquals("persisted draft", restored.draft(72L).rawInput)
-        assertEquals(listOf("/managed/a.txt"), restored.draft(72L).pendingAttachments.map { it.localPath })
+        assertTrue(restored.draft(72L).rawInput.isEmpty())
+        assertTrue(restored.draft(72L).pendingAttachments.isEmpty())
         assertNull("process recreation must not restore invalid import ownership", restored.draft(72L).importOwnership)
         assertNull("process recreation must not restore invalid submission ownership", restored.draft(72L).activeSubmissionToken)
     }

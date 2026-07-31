@@ -3,6 +3,10 @@ package com.projectnuke.fusion.chat
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.CreationExtras
+import androidx.lifecycle.createSavedStateHandle
+import android.content.Context
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -11,8 +15,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import org.json.JSONArray
-import org.json.JSONObject
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 /**
  * Per-conversation generation state. This state is deliberately not written to
@@ -71,6 +77,7 @@ data class ComposerSubmissionSnapshot(
  */
 class ChatViewModel(
     private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
+    context: Context? = null,
 ) : ViewModel() {
     val scope: CoroutineScope = viewModelScope
     val registry = GenerationSessionRegistry()
@@ -79,13 +86,30 @@ class ChatViewModel(
     private val _states = MutableStateFlow<Map<Long, ConversationGenerationState>>(emptyMap())
     val states: StateFlow<Map<Long, ConversationGenerationState>> = _states.asStateFlow()
 
-    private val _composerDrafts = MutableStateFlow(restoreDrafts(savedStateHandle[DRAFTS_KEY]))
+    private val draftStore = context?.let(::PersistentComposerDraftStore)
+    private var draftPersistJob: Job? = null
+    private var draftWriteId = 0L
+    private val _composerDrafts = MutableStateFlow(emptyMap<Long, ComposerDraftState>())
     val composerDrafts: StateFlow<Map<Long, ComposerDraftState>> = _composerDrafts.asStateFlow()
 
     private val _currentConversationId = MutableStateFlow(
         savedStateHandle[CURRENT_CONVERSATION_KEY] ?: NEW_CONVERSATION_ID
     )
     val currentConversationId: StateFlow<Long> = _currentConversationId.asStateFlow()
+
+    init {
+        draftStore?.let { store ->
+            viewModelScope.launch(Dispatchers.IO) {
+                val restored = store.load()
+                _composerDrafts.update { current ->
+                    restored + current.mapValues { (id, draft) ->
+                        val stored = restored[id]
+                        if (stored == null || draft.version >= stored.version) draft else stored
+                    }
+                }
+            }
+        }
+    }
 
     fun selectConversation(conversationId: Long) {
         _currentConversationId.value = conversationId
@@ -164,13 +188,13 @@ class ChatViewModel(
         _composerDrafts.value[conversationId] ?: ComposerDraftState()
 
     fun updateDraftText(conversationId: Long, rawInput: String) {
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = false) { current ->
             current.copy(rawInput = rawInput, version = current.version + 1L)
         }
     }
 
     fun appendQuickPrompt(conversationId: Long, prompt: String, append: (String, String) -> String) {
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = false) { current ->
             current.copy(
                 rawInput = append(current.rawInput, prompt),
                 version = current.version + 1L,
@@ -180,7 +204,7 @@ class ChatViewModel(
 
     fun removePendingAttachment(conversationId: Long, localPath: String): Boolean {
         var removed = false
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = true) { current ->
             val remaining = current.pendingAttachments.filterNot {
                 if (!removed && it.localPath == localPath) {
                     removed = true
@@ -202,7 +226,7 @@ class ChatViewModel(
             token = UUID.randomUUID().toString(),
             status = ComposerImportStatus.PICKER_OPEN,
         )
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = true) { current ->
             current.copy(importOwnership = owner, version = current.version + 1L)
         }
         return owner
@@ -217,7 +241,7 @@ class ChatViewModel(
 
     fun beginAttachmentCopy(conversationId: Long, token: String): Boolean {
         var accepted = false
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = true) { current ->
             val owner = current.importOwnership
             if (owner?.token != token) return@updateDraft current
             accepted = true
@@ -235,7 +259,7 @@ class ChatViewModel(
         attachments: List<PendingAttachmentIdentity>,
     ): Boolean {
         var accepted = false
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = true) { current ->
             if (current.importOwnership?.token != token) return@updateDraft current
             accepted = true
             current.copy(
@@ -249,7 +273,7 @@ class ChatViewModel(
 
     fun settleAttachmentImport(conversationId: Long, token: String): Boolean {
         var accepted = false
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = true) { current ->
             if (current.importOwnership?.token != token) return@updateDraft current
             accepted = true
             current.copy(importOwnership = null, version = current.version + 1L)
@@ -259,7 +283,7 @@ class ChatViewModel(
 
     fun beginSubmission(conversationId: Long): ComposerSubmissionSnapshot? {
         var snapshot: ComposerSubmissionSnapshot? = null
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = true) { current ->
             if (current.activeSubmissionToken != null) return@updateDraft current
             val token = UUID.randomUUID().toString()
             snapshot = ComposerSubmissionSnapshot(
@@ -275,7 +299,7 @@ class ChatViewModel(
     }
 
     fun settleSubmissionOwner(conversationId: Long, token: String) {
-        updateDraft(conversationId) { current ->
+        updateDraft(conversationId, immediate = true) { current ->
             if (current.activeSubmissionToken != token) current
             else current.copy(activeSubmissionToken = null)
         }
@@ -290,7 +314,7 @@ class ChatViewModel(
         committedPaths: List<String>,
     ): Boolean {
         var accepted = false
-        updateDraft(snapshot.conversationId) { current ->
+        updateDraft(snapshot.conversationId, immediate = true) { current ->
             if (current.activeSubmissionToken != snapshot.token) return@updateDraft current
             accepted = true
             val committed = committedPaths.toSet()
@@ -308,11 +332,12 @@ class ChatViewModel(
         _composerDrafts.update { current ->
             if (conversationId !in current) current else current - conversationId
         }
-        persistDrafts()
+        scheduleDraftPersist(immediate = true)
     }
 
     private inline fun updateDraft(
         conversationId: Long,
+        immediate: Boolean,
         transform: (ComposerDraftState) -> ComposerDraftState,
     ) {
         _composerDrafts.update { current ->
@@ -320,89 +345,36 @@ class ChatViewModel(
             val updated = transform(existing)
             if (updated == existing) current else current + (conversationId to updated)
         }
-        persistDrafts()
+        scheduleDraftPersist(immediate)
     }
 
-    private fun persistDrafts() {
-        savedStateHandle[DRAFTS_KEY] = serializeDrafts(_composerDrafts.value)
+    private fun scheduleDraftPersist(immediate: Boolean) {
+        val store = draftStore ?: return
+        val snapshot = _composerDrafts.value
+        val writeId = ++draftWriteId
+        draftPersistJob?.cancel()
+        draftPersistJob = viewModelScope.launch(Dispatchers.IO) {
+            if (!immediate) delay(DRAFT_PERSIST_DEBOUNCE_MS)
+            store.write(writeId, snapshot)
+        }
     }
 
     companion object {
         const val NEW_CONVERSATION_ID = 0L
         private const val CURRENT_CONVERSATION_KEY = "current_conversation_id"
-        private const val DRAFTS_KEY = "composer_drafts_v1"
-        private const val MAX_RESTORED_DRAFTS = 64
-        private const val MAX_RESTORED_ATTACHMENTS = 64
-        private const val MAX_RESTORED_INPUT_CHARS = 32_768
-        private const val MAX_RESTORED_FIELD_CHARS = 4_096
+        private const val DRAFT_PERSIST_DEBOUNCE_MS = 300L
 
-        private fun serializeDrafts(drafts: Map<Long, ComposerDraftState>): String {
-            val array = JSONArray()
-            drafts.entries
-                .asSequence()
-                .filter { (_, draft) ->
-                    draft.rawInput.isNotEmpty() || draft.pendingAttachments.isNotEmpty()
+        fun factory(context: Context): ViewModelProvider.Factory =
+            object : ViewModelProvider.Factory {
+                override fun <T : ViewModel> create(
+                    modelClass: Class<T>,
+                    extras: CreationExtras,
+                ): T {
+                    return ChatViewModel(
+                        savedStateHandle = extras.createSavedStateHandle(),
+                        context = context.applicationContext,
+                    ) as T
                 }
-                .take(MAX_RESTORED_DRAFTS)
-                .forEach { (conversationId, draft) ->
-                    val attachments = JSONArray()
-                    draft.pendingAttachments.take(MAX_RESTORED_ATTACHMENTS).forEach { attachment ->
-                        attachments.put(
-                            JSONObject()
-                                .put("name", attachment.name.take(MAX_RESTORED_FIELD_CHARS))
-                                .put("mime", attachment.mimeType.take(MAX_RESTORED_FIELD_CHARS))
-                                .put("path", attachment.localPath.take(MAX_RESTORED_FIELD_CHARS))
-                        )
-                    }
-                    array.put(
-                        JSONObject()
-                            .put("id", conversationId)
-                            .put("input", draft.rawInput.take(MAX_RESTORED_INPUT_CHARS))
-                            .put("version", draft.version)
-                            .put("attachments", attachments)
-                    )
-                }
-            return array.toString()
-        }
-
-        private fun restoreDrafts(serialized: String?): Map<Long, ComposerDraftState> {
-            if (serialized.isNullOrBlank()) return emptyMap()
-            return runCatching {
-                val result = LinkedHashMap<Long, ComposerDraftState>()
-                val array = JSONArray(serialized)
-                for (index in 0 until minOf(array.length(), MAX_RESTORED_DRAFTS)) {
-                    val item = array.optJSONObject(index) ?: continue
-                    val conversationId = item.optLong("id", Long.MIN_VALUE)
-                    if (conversationId == Long.MIN_VALUE || conversationId < 0L) continue
-                    val attachmentArray = item.optJSONArray("attachments") ?: JSONArray()
-                    val attachments = buildList {
-                        for (attachmentIndex in 0 until minOf(
-                            attachmentArray.length(),
-                            MAX_RESTORED_ATTACHMENTS,
-                        )) {
-                            val attachment = attachmentArray.optJSONObject(attachmentIndex) ?: continue
-                            val path = attachment.optString("path").take(MAX_RESTORED_FIELD_CHARS)
-                            if (path.isBlank()) continue
-                            add(
-                                PendingAttachmentIdentity(
-                                    name = attachment.optString("name").take(MAX_RESTORED_FIELD_CHARS),
-                                    mimeType = attachment.optString("mime").take(MAX_RESTORED_FIELD_CHARS),
-                                    localPath = path,
-                                )
-                            )
-                        }
-                    }
-                    result[conversationId] = ComposerDraftState(
-                        rawInput = item.optString("input").take(MAX_RESTORED_INPUT_CHARS),
-                        pendingAttachments = attachments,
-                        version = item.optLong("version").coerceAtLeast(0L),
-                        // Process recreation restores identities, never invalid jobs/owners.
-                        importOwnership = null,
-                        activeSubmissionToken = null,
-                    )
-                }
-                result
-            }.getOrDefault(emptyMap())
-        }
+            }
     }
 }

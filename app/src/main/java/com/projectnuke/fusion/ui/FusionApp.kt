@@ -17,13 +17,16 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.fusion.chat.ChatViewModel
 import kotlinx.coroutines.launch
 
 @Composable
 fun FusionApp() {
-  val chatViewModel: ChatViewModel = viewModel()
+  val context = LocalContext.current
+  val factory = remember(context) { ChatViewModel.factory(context) }
+  val chatViewModel: ChatViewModel = viewModel(factory = factory)
   val currentConversationId by chatViewModel.currentConversationId.collectAsStateWithLifecycle()
     var openModelLibraryRequest by remember { mutableLongStateOf(0L) }
     var openAdvancedSettingsRequest by remember { mutableLongStateOf(0L) }
