@@ -9,6 +9,8 @@ import java.net.URL
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -63,13 +65,11 @@ internal class ModelDownloadCoordinator(
     private val minimumPlausibleBytes: Long = 1024L * 1024L,
     private val progressIntervalMs: Long = 500L,
 ) {
-    private val mutex = Mutex()
-
     suspend fun download(
         sourceUrl: String,
         target: File,
         onProgress: suspend (Int) -> Unit = {},
-    ): ModelDownloadResult = mutex.withLock {
+    ): ModelDownloadResult = targetLocks.computeIfAbsent(target.canonicalPath) { Mutex() }.withLock {
         downloadLocked(sourceUrl, target, onProgress)
     }
 
@@ -85,7 +85,7 @@ internal class ModelDownloadCoordinator(
             return ModelDownloadResult.Failure(ModelDownloadFailure.STORAGE_FULL)
         }
 
-        val part = File(parent, ".${target.name}.part")
+        val part = File(parent, ".${target.name}.${UUID.randomUUID()}.part")
         runCatching { if (part.exists()) part.delete() }
 
         var connection: HttpURLConnection? = null
@@ -199,11 +199,12 @@ internal class ModelDownloadCoordinator(
         return available >= required
     }
 
-    private fun openFinalConnection(sourceUrl: String): OpenResult {
+    private suspend fun openFinalConnection(sourceUrl: String): OpenResult {
         var current = runCatching { URL(sourceUrl) }.getOrNull()
             ?: return OpenResult.Failure(ModelDownloadResult.Failure(ModelDownloadFailure.NETWORK))
 
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
+            currentCoroutineContext().ensureActive()
             val candidate = connectionFactory.open(current).apply {
                 instanceFollowRedirects = false
                 connectTimeout = connectTimeoutMs
@@ -224,6 +225,7 @@ internal class ModelDownloadCoordinator(
                         ModelDownloadResult.Failure(ModelDownloadFailure.REDIRECT, status)
                     )
                 }
+                currentCoroutineContext().ensureActive()
                 val location = candidate.getHeaderField("Location")
                     ?: return OpenResult.Failure(
                         ModelDownloadResult.Failure(ModelDownloadFailure.REDIRECT, status)
@@ -277,6 +279,7 @@ internal class ModelDownloadCoordinator(
     }
 
     private companion object {
+        val targetLocks = ConcurrentHashMap<String, Mutex>()
         const val MAX_REDIRECTS = 5
         const val MAX_ERROR_BODY_BYTES = 64 * 1024
         const val PAYLOAD_SNIFF_BYTES = 512
