@@ -17,11 +17,10 @@ internal suspend fun deleteConversationProduction(
 ): ConversationDeletionResult {
     val appContext = context.applicationContext
     var deletedMessageIds: Set<Long> = emptySet()
-    var targetPendingPaths: Set<String> = emptySet()
-    val currentConversationAtStart = chatViewModel.currentConversationId.value
-    targetPendingPaths = chatViewModel.draft(conversationId).pendingAttachments
+    val targetPendingPaths = chatViewModel.draft(conversationId)
+        .pendingAttachments
         .mapTo(linkedSetOf()) { it.localPath }
-    return chatViewModel.deleteConversation(
+    val deferred = chatViewModel.deleteConversation(
         conversationId = conversationId,
         exists = {
             val exists = dao.getConversationById(conversationId) != null
@@ -35,8 +34,10 @@ internal suspend fun deleteConversationProduction(
         settleTarget = {
             chatViewModel.clear(conversationId)
             chatViewModel.clearDraft(conversationId)
-            if (currentConversationAtStart == conversationId) {
-                chatViewModel.selectConversation(dao.getLatestConversation()?.id ?: ChatViewModel.NEW_CONVERSATION_ID)
+            if (chatViewModel.currentConversationId.value == conversationId) {
+                chatViewModel.selectConversation(
+                    dao.getLatestConversation()?.id ?: ChatViewModel.NEW_CONVERSATION_ID
+                )
             }
         },
         cleanupDerivedData = {
@@ -60,7 +61,8 @@ internal suspend fun deleteConversationProduction(
                 )
             }
         },
-    ).await()
+    )
+    return deferred.await()
 }
 
 private fun deleteResponseVersionStateSafely(context: Context, conversationId: Long): Boolean =

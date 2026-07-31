@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.ConcurrentHashMap
 
 data class ConversationGenerationState(
     val isGenerating: Boolean = false,
@@ -73,6 +74,7 @@ class ChatViewModel(
     val scope: CoroutineScope = viewModelScope
     val registry = GenerationSessionRegistry()
     private val deletionCoordinator = ConversationDeletionCoordinator()
+    private val deletionDeferreds = ConcurrentHashMap<Long, Deferred<ConversationDeletionResult>>()
 
     private val _states = MutableStateFlow<Map<Long, ConversationGenerationState>>(emptyMap())
     val states: StateFlow<Map<Long, ConversationGenerationState>> = _states.asStateFlow()
@@ -178,18 +180,31 @@ class ChatViewModel(
         settleTarget: suspend () -> Unit,
         cleanupDerivedData: suspend () -> Unit,
         recordCleanupDebt: suspend () -> Unit,
-    ): Deferred<ConversationDeletionResult> = viewModelScope.async {
-        deletionCoordinator.delete(
-            conversationId = conversationId,
-            cancelAndJoin = {
-                cancelAndAwait(conversationId, reason = "delete-conversation")
-            },
-            exists = exists,
-            commitDelete = commitDelete,
-            settleTarget = settleTarget,
-            cleanupDerivedData = cleanupDerivedData,
-            recordCleanupDebt = recordCleanupDebt,
-        )
+    ): Deferred<ConversationDeletionResult> {
+        val existing = deletionDeferreds[conversationId]
+        if (existing != null && !existing.isCompleted) return existing
+
+        val deferred = viewModelScope.async {
+            val result = deletionCoordinator.delete(
+                conversationId = conversationId,
+                cancelAndJoin = {
+                    cancelAndAwait(conversationId, reason = "delete-conversation")
+                },
+                exists = exists,
+                commitDelete = commitDelete,
+                settleTarget = settleTarget,
+                cleanupDerivedData = cleanupDerivedData,
+                recordCleanupDebt = recordCleanupDebt,
+            )
+            deletionDeferreds.remove(conversationId)
+            result
+        }
+        val previous = deletionDeferreds.putIfAbsent(conversationId, deferred)
+        if (previous != null) {
+            deferred.cancel()
+            return previous
+        }
+        return deferred
     }
 
     fun draft(conversationId: Long): ComposerDraftState =

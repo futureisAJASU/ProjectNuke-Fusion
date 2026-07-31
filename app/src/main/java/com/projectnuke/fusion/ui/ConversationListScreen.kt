@@ -1,6 +1,7 @@
 package com.projectnuke.fusion.ui
 
 import android.widget.Toast
+import com.projectnuke.fusion.chat.ConversationDeletionResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -395,10 +396,13 @@ fun ConversationListScreen(
                         scope.launch {
                             val targetId = conversation.id
                             try {
-                                deleteConversationProduction(context, dao, chatViewModel, targetId)
-                                val nextConversationId = dao.getLatestConversation()?.id
-                                if (targetId == currentConversationId) {
-                                    onConversationRemovedFromList(targetId, nextConversationId)
+                                val result = deleteConversationProduction(context, dao, chatViewModel, targetId)
+                                if (result == ConversationDeletionResult.DELETED ||
+                                    result == ConversationDeletionResult.ALREADY_ABSENT) {
+                                    val nextConversationId = dao.getLatestConversation()?.id
+                                    if (targetId == currentConversationId) {
+                                        onConversationRemovedFromList(targetId, nextConversationId)
+                                    }
                                 }
                             } catch (e: CancellationException) {
                                 throw e

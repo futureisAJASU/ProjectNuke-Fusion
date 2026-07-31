@@ -113,6 +113,7 @@ import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
 import com.projectnuke.fusion.ai.secure.AndroidKeystoreSecretStore
 import com.projectnuke.fusion.chat.ComposerImportStatus
+import com.projectnuke.fusion.chat.ConversationDeletionResult
 import com.projectnuke.fusion.chat.PendingAttachmentIdentity
 import com.projectnuke.fusion.chat.PromptHistoryBudgetRequest
 import com.projectnuke.fusion.chat.PromptHistoryBudgeter
@@ -3870,16 +3871,21 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         deletingCurrentConversationId = targetId
                         scope.launch {
                             try {
+                                var deleted = targetId == 0L
                                 if (targetId != 0L) {
-                                    deleteConversationProduction(context, dao, chatViewModel, targetId)
+                                    val result = deleteConversationProduction(context, dao, chatViewModel, targetId)
+                                    deleted = result == ConversationDeletionResult.DELETED ||
+                                        result == ConversationDeletionResult.ALREADY_ABSENT
                                 }
-                                if (chatViewModel.currentConversationId.value == targetId) {
-                                    clearPendingAttachmentDrafts(context, pendingAttachments)
-                                    streamingAssistantText = null
-                                    streamingMetricsLine = null
-                                    generationStatus = null
+                                if (deleted) {
                                     showDeleteChatDialog = false
-                                    onNewChat()
+                                    if (targetId == chatViewModel.currentConversationId.value) {
+                                        clearPendingAttachmentDrafts(context, pendingAttachments)
+                                        streamingAssistantText = null
+                                        streamingMetricsLine = null
+                                        generationStatus = null
+                                        onNewChat()
+                                    }
                                 }
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e

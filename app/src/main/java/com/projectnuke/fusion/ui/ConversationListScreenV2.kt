@@ -13,6 +13,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import com.projectnuke.fusion.chat.ConversationDeletionResult
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -1512,10 +1513,13 @@ deleteConversation?.let { conversation ->
           deletingConversationId = deletingId
           scope.launch {
             try {
-              deleteConversationProduction(context, dao, chatViewModel, deletingId)
-              val nextConversationId = dao.getLatestConversation()?.id
-              if (deletingId == currentConversationId) {
-                onConversationRemovedFromList(deletingId, nextConversationId)
+              val result = deleteConversationProduction(context, dao, chatViewModel, deletingId)
+              if (result == ConversationDeletionResult.DELETED ||
+                  result == ConversationDeletionResult.ALREADY_ABSENT) {
+                val nextConversationId = dao.getLatestConversation()?.id
+                if (deletingId == currentConversationId) {
+                  onConversationRemovedFromList(deletingId, nextConversationId)
+                }
               }
             } catch (e: CancellationException) {
               throw e
