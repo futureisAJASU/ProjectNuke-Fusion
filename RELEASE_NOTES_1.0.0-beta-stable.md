@@ -28,3 +28,9 @@ Fusion의 핵심 채팅 기능을 실제 일상 사용에 가까운 조건에서
 - 음성 입력과 보이스 모드는 아직 실제 기능이 연결되지 않은 안내 상태입니다.
 - 로컬 모델의 속도, 메모리 사용량과 지원 accelerator는 기기·모델 파일·LiteRT backend에 따라 달라집니다.
 - 외부 AI API 모드의 첨부 전송은 아직 지원하지 않으며 전송·재시도 전에 차단됩니다.
+### Persistence and ownership hardening
+
+- Crash-consistent composer draft hydration and critical settlement.
+- Durable draft attachment cleanup references.
+- Cancellation-safe conversation deletion and settings restore truthfulness.
+- Bounded UTF-8 backup streaming, prompt budgeting, HTTP cancellation, and rollback-safe model replacement.

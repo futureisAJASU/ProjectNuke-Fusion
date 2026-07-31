@@ -75,3 +75,8 @@
 - Voice input and voice mode remain placeholders.
 - External AI API attachment upload remains intentionally blocked before request creation.
 - Full Android build, emulator/device smoke tests and release signing must still be run in an environment with Gradle 9.4.1, the Android SDK and network/dependency caches available.
+## 2026-08-01
+
+- Added final-prompt assembly budgeting for local and external generation paths.
+- Added durable draft attachment reference discovery and rollback-safe model adoption.
+- Hardened deletion, settings backup, candidate persistence, and HTTP cancellation ownership.
