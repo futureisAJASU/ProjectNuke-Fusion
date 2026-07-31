@@ -18,6 +18,9 @@ internal suspend fun deleteConversationProduction(
     val appContext = context.applicationContext
     var deletedMessageIds: Set<Long> = emptySet()
     var targetPendingPaths: Set<String> = emptySet()
+    val currentConversationAtStart = chatViewModel.currentConversationId.value
+    targetPendingPaths = chatViewModel.draft(conversationId).pendingAttachments
+        .mapTo(linkedSetOf()) { it.localPath }
     return chatViewModel.deleteConversation(
         conversationId = conversationId,
         exists = {
@@ -25,8 +28,6 @@ internal suspend fun deleteConversationProduction(
             if (exists) {
                 deletedMessageIds = dao.getMessagesForConversation(conversationId)
                     .mapTo(linkedSetOf()) { it.id }
-                targetPendingPaths = chatViewModel.draft(conversationId).pendingAttachments
-                    .mapTo(linkedSetOf()) { it.localPath }
             }
             exists
         },
@@ -34,6 +35,9 @@ internal suspend fun deleteConversationProduction(
         settleTarget = {
             chatViewModel.clear(conversationId)
             chatViewModel.clearDraft(conversationId)
+            if (currentConversationAtStart == conversationId) {
+                chatViewModel.selectConversation(dao.getLatestConversation()?.id ?: ChatViewModel.NEW_CONVERSATION_ID)
+            }
         },
         cleanupDerivedData = {
             withContext(Dispatchers.IO) {

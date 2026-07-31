@@ -47,9 +47,9 @@ internal class ConversationDeletionCoordinator {
                 }
                 ConversationDeletionResult.ALREADY_ABSENT
             } else {
-                commitDelete()
-                committed = true
                 withContext(NonCancellable) {
+                    commitDelete()
+                    committed = true
                     runCatching { settleTarget() }
                         .onFailure { runCatching { recordCleanupDebt() } }
                     runCatching { cleanupDerivedData() }
