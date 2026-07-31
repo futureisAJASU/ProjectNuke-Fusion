@@ -294,7 +294,7 @@ class ChatViewModelRequestStateTest {
     }
 
     @Test
-    fun `cancelGeneration of pending B stops B before block enters`() = runBlocking {
+    fun `cancelGeneration of pending or starting B stops B before block enters`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val aCleanupStarted = CountDownLatch(1)
         val aCleanupRelease = CompletableDeferred<Unit>()
@@ -362,7 +362,10 @@ class ChatViewModelRequestStateTest {
             }
 
             withTimeout(2000) {
-                while (!vm.registry.isPending(convId, "B")) {
+                while (
+                    !vm.registry.isPending(convId, "B") &&
+                    !vm.registry.isStarting(convId, "B")
+                ) {
                     yield()
                 }
             }
@@ -455,7 +458,10 @@ class ChatViewModelRequestStateTest {
             }
 
             withTimeout(2000) {
-                while (!vm.registry.isPending(convId, "B")) {
+                while (
+                    !vm.registry.isPending(convId, "B") &&
+                    !vm.registry.isStarting(convId, "B")
+                ) {
                     yield()
                 }
             }

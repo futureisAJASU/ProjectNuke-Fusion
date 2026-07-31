@@ -2,6 +2,7 @@ package com.projectnuke.fusion.ui
 
 import android.content.Context
 import java.io.File
+import com.projectnuke.fusion.util.writeTextAtomically
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -51,6 +52,9 @@ data class StoredAbTestSession(
 
 object ModelAbTestHistoryStore {
     private const val MaxSessions = 20
+    private const val MaxResultsPerSession = 8
+    private const val MaxPromptChars = 16_384
+    private const val MaxAnswerChars = 65_536
     private const val FileName = "fusion_ab_test_history.json"
     private val writeMutex = Mutex()
 
@@ -59,7 +63,7 @@ object ModelAbTestHistoryStore {
         if (!file.exists()) return emptyList()
         return runCatching {
             val array = JSONArray(file.readText(Charsets.UTF_8))
-            (0 until array.length()).mapNotNull { index ->
+            (0 until minOf(array.length(), MaxSessions)).mapNotNull { index ->
                 array.optJSONObject(index)?.toStoredSession()
             }
         }.getOrDefault(emptyList())
@@ -114,12 +118,27 @@ object ModelAbTestHistoryStore {
     private suspend fun write(context: Context, sessions: List<StoredAbTestSession>) {
         withContext(Dispatchers.IO) {
             val array = JSONArray()
-            sessions.forEach { array.put(it.toJson()) }
-            historyFile(context).writeText(array.toString(2), Charsets.UTF_8)
+            sessions.take(MaxSessions).forEach { array.put(it.bounded().toJson()) }
+            writeTextAtomically(historyFile(context), array.toString(2))
         }
     }
 
     private fun historyFile(context: Context): File = File(context.filesDir, FileName)
+
+    private fun StoredAbTestSession.bounded(): StoredAbTestSession = copy(
+        id = id.take(200),
+        fullPrompt = fullPrompt.take(MaxPromptChars),
+        results = results.take(MaxResultsPerSession).map {
+            it.copy(
+                targetLabel = it.targetLabel.take(200),
+                modelName = it.modelName.take(300),
+                modelId = it.modelId?.take(300),
+                accelerator = it.accelerator.take(80),
+                answer = it.answer?.take(MaxAnswerChars),
+                errorSummary = it.errorSummary?.take(1_000),
+            )
+        },
+    )
 }
 
 private fun StoredAbTestSession.toJson(): JSONObject {

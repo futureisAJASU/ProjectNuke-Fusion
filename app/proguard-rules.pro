@@ -19,3 +19,10 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# Release shrinking remains disabled for Fusion 1.0.0 Beta Stable. Before a
+# separately validated R8 enablement, retain LiteRT/JNI entry points and Room
+# generated database implementations:
+# -keep class com.google.ai.edge.litertlm.** { *; }
+# -keepclasseswithmembernames class * { native <methods>; }
+# -keep class * extends androidx.room.RoomDatabase

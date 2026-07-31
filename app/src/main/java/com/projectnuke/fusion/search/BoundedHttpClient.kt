@@ -1,0 +1,236 @@
+package com.projectnuke.fusion.search
+
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+
+internal data class BoundedHttpRequest(
+    val url: String,
+    val method: String = "GET",
+    val body: ByteArray? = null,
+    val headers: Map<String, String> = emptyMap(),
+)
+
+internal data class BoundedHttpResponse(
+    val body: String,
+    val statusCode: Int,
+    val contentType: String?,
+    val finalUrl: String,
+)
+
+internal enum class BoundedHttpFailure {
+    RESPONSE_TOO_LARGE,
+    ERROR_RESPONSE_TOO_LARGE,
+    INVALID_REDIRECT,
+    AUTHENTICATED_CROSS_HOST_REDIRECT,
+    TOO_MANY_REDIRECTS,
+}
+
+internal class BoundedHttpException(
+    val kind: BoundedHttpFailure,
+    message: String,
+) : Exception(message)
+
+internal fun interface SearchConnectionFactory {
+    fun open(url: URL): HttpURLConnection
+}
+
+internal class BoundedHttpClient(
+    private val connectionFactory: SearchConnectionFactory = SearchConnectionFactory { url ->
+        url.openConnection() as HttpURLConnection
+    },
+    private val connectTimeoutMs: Int = 8_000,
+    private val readTimeoutMs: Int = 8_000,
+    private val maxSuccessBytes: Int = 2 * 1024 * 1024,
+    private val maxErrorBytes: Int = 64 * 1024,
+) {
+    suspend fun execute(request: BoundedHttpRequest): BoundedHttpResponse =
+        withContext(Dispatchers.IO) {
+            val activeConnection = AtomicReference<HttpURLConnection?>()
+            suspendCancellableCoroutine { continuation ->
+                continuation.invokeOnCancellation {
+                    activeConnection.getAndSet(null)?.disconnect()
+                }
+                try {
+                    val response = executeBlocking(request, activeConnection)
+                    if (continuation.isActive) continuation.resume(response)
+                } catch (cancellation: CancellationException) {
+                    if (continuation.isActive) continuation.cancel(cancellation)
+                } catch (failure: Throwable) {
+                    if (continuation.isActive) continuation.resumeWithException(failure)
+                }
+            }
+        }
+
+    private fun executeBlocking(
+        initialRequest: BoundedHttpRequest,
+        activeConnection: AtomicReference<HttpURLConnection?>,
+    ): BoundedHttpResponse {
+        var currentUrl = URL(initialRequest.url)
+        var method = initialRequest.method.uppercase()
+        var body = initialRequest.body
+        val hasSensitiveHeaders = initialRequest.headers.keys.any(::isSensitiveHeader)
+
+        repeat(MAX_REDIRECTS + 1) { redirectIndex ->
+            val connection = connectionFactory.open(currentUrl).apply {
+                requestMethod = method
+                connectTimeout = connectTimeoutMs
+                readTimeout = readTimeoutMs
+                instanceFollowRedirects = false
+                useCaches = false
+                initialRequest.headers.forEach { (key, value) -> setRequestProperty(key, value) }
+                if (body != null) doOutput = true
+            }
+            activeConnection.set(connection)
+            var handedOff = false
+            try {
+                body?.let { requestBody ->
+                    connection.outputStream.use { output ->
+                        output.write(requestBody)
+                        output.flush()
+                    }
+                }
+                val status = connection.responseCode
+                if (status in REDIRECT_STATUSES) {
+                    if (redirectIndex >= MAX_REDIRECTS) {
+                        throw BoundedHttpException(
+                            BoundedHttpFailure.TOO_MANY_REDIRECTS,
+                            "Too many redirects",
+                        )
+                    }
+                    val location = connection.getHeaderField("Location")
+                        ?: throw BoundedHttpException(
+                            BoundedHttpFailure.INVALID_REDIRECT,
+                            "Redirect did not contain Location",
+                        )
+                    val nextUrl = runCatching { URL(currentUrl, location) }.getOrNull()
+                        ?: throw BoundedHttpException(
+                            BoundedHttpFailure.INVALID_REDIRECT,
+                            "Redirect Location was invalid",
+                        )
+                    if (nextUrl.protocol !in setOf("http", "https") ||
+                        (currentUrl.protocol == "https" && nextUrl.protocol != "https")
+                    ) {
+                        throw BoundedHttpException(
+                            BoundedHttpFailure.INVALID_REDIRECT,
+                            "Redirect scheme was not permitted",
+                        )
+                    }
+                    if (hasSensitiveHeaders && !sameOrigin(currentUrl, nextUrl)) {
+                        throw BoundedHttpException(
+                            BoundedHttpFailure.AUTHENTICATED_CROSS_HOST_REDIRECT,
+                            "Authenticated redirect crossed origin",
+                        )
+                    }
+                    if (status == HttpURLConnection.HTTP_SEE_OTHER) {
+                        method = "GET"
+                        body = null
+                    }
+                    currentUrl = nextUrl
+                    return@repeat
+                }
+
+                val success = status in 200..299
+                val cap = if (success) maxSuccessBytes else maxErrorBytes
+                val declaredLength = connection.contentLengthLong
+                if (declaredLength > cap) {
+                    throw BoundedHttpException(
+                        if (success) BoundedHttpFailure.RESPONSE_TOO_LARGE
+                        else BoundedHttpFailure.ERROR_RESPONSE_TOO_LARGE,
+                        "HTTP response exceeded byte budget",
+                    )
+                }
+                val stream = if (success) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream ?: connection.inputStream
+                }
+                val bytes = stream.use { input ->
+                    val output = ByteArrayOutputStream(minOf(cap, 32 * 1024))
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var total = 0
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        total += read
+                        if (total > cap) {
+                            throw BoundedHttpException(
+                                if (success) BoundedHttpFailure.RESPONSE_TOO_LARGE
+                                else BoundedHttpFailure.ERROR_RESPONSE_TOO_LARGE,
+                                "HTTP response exceeded streaming byte budget",
+                            )
+                        }
+                        output.write(buffer, 0, read)
+                    }
+                    output.toByteArray()
+                }
+                val charset = connection.contentType.charsetFromContentType()
+                handedOff = true
+                return BoundedHttpResponse(
+                    body = String(bytes, charset),
+                    statusCode = status,
+                    contentType = connection.contentType,
+                    finalUrl = connection.url.toString(),
+                )
+            } finally {
+                activeConnection.compareAndSet(connection, null)
+                connection.disconnect()
+                if (handedOff) {
+                    // The response body is already detached; no connection ownership escapes.
+                }
+            }
+        }
+        throw BoundedHttpException(
+            BoundedHttpFailure.TOO_MANY_REDIRECTS,
+            "Too many redirects",
+        )
+    }
+
+    private fun String?.charsetFromContentType(): Charset {
+        val value = this ?: return StandardCharsets.UTF_8
+        val match = Regex("""(?i)charset\s*=\s*["']?([^;"']+)""").find(value)
+        return match?.groupValues?.getOrNull(1)?.trim()
+            ?.let { runCatching { Charset.forName(it) }.getOrNull() }
+            ?: StandardCharsets.UTF_8
+    }
+
+    private fun isSensitiveHeader(name: String): Boolean {
+        val normalized = name.lowercase()
+        return normalized == "authorization" ||
+            normalized == "proxy-authorization" ||
+            normalized.contains("api-key") ||
+            normalized.contains("subscription-token") ||
+            normalized.contains("client-secret")
+    }
+
+    private fun sameOrigin(first: URL, second: URL): Boolean =
+        first.protocol.equals(second.protocol, ignoreCase = true) &&
+            first.host.equals(second.host, ignoreCase = true) &&
+            effectivePort(first) == effectivePort(second)
+
+    private fun effectivePort(url: URL): Int =
+        if (url.port >= 0) url.port else url.defaultPort
+
+    private companion object {
+        const val MAX_REDIRECTS = 5
+        val REDIRECT_STATUSES = setOf(
+            HttpURLConnection.HTTP_MOVED_PERM,
+            HttpURLConnection.HTTP_MOVED_TEMP,
+            HttpURLConnection.HTTP_SEE_OTHER,
+            307,
+            308,
+        )
+    }
+}

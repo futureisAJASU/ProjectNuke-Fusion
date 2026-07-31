@@ -50,6 +50,9 @@ object FusionMemoryCandidates {
 }
 
 object FusionResponseRatings {
+    private const val MaxRatings = 2_000
+    private const val MaxStringChars = 4_096
+    private val writeLock = Any()
     private fun file(context: Context): File = File(context.filesDir, "fusion_response_ratings.json")
 
     fun get(context: Context, messageId: Long): String? {
@@ -65,7 +68,7 @@ object FusionResponseRatings {
         }.getOrNull()
     }
 
-    fun toggle(context: Context, rating: FusionResponseRating): Boolean {
+    fun toggle(context: Context, rating: FusionResponseRating): Boolean = synchronized(writeLock) {
         val file = file(context)
         val current = if (file.exists()) {
             runCatching { JSONArray(file.readText()) }.getOrDefault(JSONArray())
@@ -86,14 +89,31 @@ object FusionResponseRatings {
         if (!removedSame) {
             kept.put(JSONObject().apply {
                 put("messageId", rating.messageId)
-                put("rating", rating.rating)
-                put("modelName", rating.modelName)
-                put("settingsSnapshot", rating.settingsSnapshot)
+                put("rating", rating.rating.take(40))
+                put("modelName", rating.modelName.take(300))
+                put("settingsSnapshot", rating.settingsSnapshot.take(MaxStringChars))
                 put("createdAt", rating.createdAt)
             })
         }
-        file.writeText(kept.toString(2))
-        return !removedSame
+        while (kept.length() >= MaxRatings) kept.remove(0)
+        writeTextAtomically(file(context), kept.toString(2))
+        return@synchronized !removedSame
+    }
+
+    fun deleteForMessages(context: Context, messageIds: Set<Long>): Boolean = synchronized(writeLock) {
+        if (messageIds.isEmpty()) return true
+        val target = file(context)
+        if (!target.exists()) return true
+        val current = runCatching { JSONArray(target.readText()) }.getOrElse { return false }
+        val kept = JSONArray()
+        for (index in 0 until current.length()) {
+            val item = current.optJSONObject(index) ?: continue
+            if (item.optLong("messageId") !in messageIds) kept.put(item)
+        }
+        return runCatching {
+            writeTextAtomically(target, kept.toString(2))
+            true
+        }.getOrDefault(false)
     }
 }
 

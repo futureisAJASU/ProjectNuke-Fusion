@@ -21,7 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -62,7 +62,7 @@ fun BenchmarkHistoryScreen(
     onBack: () -> Unit,
     initialModelFilter: String? = null
 ) {
-    val allResults by dao.observeRecent(limit = 50).collectAsState(initial = emptyList())
+    val allResults by dao.observeRecent(limit = 50).collectAsStateWithLifecycle(initialValue = emptyList())
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()

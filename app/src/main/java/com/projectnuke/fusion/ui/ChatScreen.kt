@@ -67,9 +67,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -111,6 +112,10 @@ import com.projectnuke.fusion.ai.data.AiProviderRepository
 import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
 import com.projectnuke.fusion.ai.secure.AndroidKeystoreSecretStore
+import com.projectnuke.fusion.chat.ComposerImportStatus
+import com.projectnuke.fusion.chat.PendingAttachmentIdentity
+import com.projectnuke.fusion.chat.PromptHistoryBudgetRequest
+import com.projectnuke.fusion.chat.PromptHistoryBudgeter
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.data.ConversationEntity
@@ -133,11 +138,17 @@ import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.FusionThumbnailCache
 import com.projectnuke.fusion.util.PendingAttachmentDiscardResult
 import com.projectnuke.fusion.util.AttachmentCandidate
+import com.projectnuke.fusion.util.AttachmentImportCoordinator
+import com.projectnuke.fusion.util.AttachmentImportFailure
+import com.projectnuke.fusion.util.AttachmentImportResult
 import com.projectnuke.fusion.util.validateAttachmentBatch
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryRiskLevel
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
 import com.projectnuke.fusion.modelzoo.ModelAvailability
+import com.projectnuke.fusion.modelzoo.ModelDownloadCoordinator
+import com.projectnuke.fusion.modelzoo.ModelDownloadFailure
+import com.projectnuke.fusion.modelzoo.ModelDownloadResult
 import com.projectnuke.fusion.modelzoo.ModelFamily
 import com.projectnuke.fusion.modelzoo.ModelMemoryClass
 import com.projectnuke.fusion.modelzoo.ModelRecommendedDeviceClass
@@ -151,6 +162,7 @@ import com.projectnuke.fusion.search.WebSearchProviderRepository
 import com.projectnuke.fusion.search.WebSearchProviderSettingsSection
 import com.projectnuke.fusion.search.WebSearchSource
 import com.projectnuke.fusion.search.appendSearchSourcesMetadata
+import com.projectnuke.fusion.search.hasUsableResults
 import com.projectnuke.fusion.search.parseSearchSourcesMetadata
 import com.projectnuke.fusion.search.stripSearchSourcesMetadata
 import com.projectnuke.fusion.search.toStructuredContext
@@ -163,8 +175,6 @@ import com.projectnuke.fusion.util.fusionNpuNoteTitle
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import java.io.File
-import java.net.URL
-import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -191,9 +201,8 @@ import android.content.ActivityNotFoundException
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.core.content.FileProvider
 import com.projectnuke.fusion.util.FusionFileProvider
-import java.net.HttpURLConnection
+import com.projectnuke.fusion.util.normalizeUserVisibleName
 private val BlackBg = Color(0xFF000000)
 private val PanelBg = Color(0xFF171717)
 private val MenuBg = Color(0xFF202020)
@@ -232,6 +241,12 @@ internal data class LocalAttachment(
     val mimeType: String,
     val localPath: String
 )
+
+private fun PendingAttachmentIdentity.toLocalAttachment(): LocalAttachment =
+    LocalAttachment(name = name, mimeType = mimeType, localPath = localPath)
+
+private fun LocalAttachment.toPendingAttachmentIdentity(): PendingAttachmentIdentity =
+    PendingAttachmentIdentity(name = name, mimeType = mimeType, localPath = localPath)
 
 private data class ParsedMessageContent(
     val body: String,
@@ -604,12 +619,16 @@ fun ChatScreen(
       client = OpenAiCompatibleClient(aiSecretStore)
     )
   }
-  var pickerOriginConversationId by remember { mutableStateOf<Long?>(null) }
-    var input by remember { mutableStateOf("") }
+    val composerDrafts by chatViewModel.composerDrafts.collectAsStateWithLifecycle()
+    val composerDraft = composerDrafts[conversationId]
+        ?: com.projectnuke.fusion.chat.ComposerDraftState()
+    val input = composerDraft.rawInput
     var isGenerating by remember { mutableStateOf(false) }
-    var activeSubmission by remember { mutableStateOf<MessageSubmissionOwner?>(null) }
+    val activeSubmission = composerDraft.activeSubmissionToken?.let {
+        MessageSubmissionOwner(token = it, sourceConversationId = conversationId)
+    }
     val isSubmittingMessage = activeSubmission != null
-    var isImportingAttachments by remember { mutableStateOf(false) }
+    val isImportingAttachments = composerDraft.importOwnership?.status == ComposerImportStatus.COPYING
     var regeneratingMessageId by remember { mutableStateOf<Long?>(null) }
     var streamingAssistantText by remember { mutableStateOf<String?>(null) }
     var streamingMetricsLine by remember { mutableStateOf<String?>(null) }
@@ -638,7 +657,7 @@ fun ChatScreen(
     var reasoningEnabled by remember { mutableStateOf(settingsPrefs.getBoolean(PrefReasoningEnabled, false)) }
 
     var generationSettings by remember { mutableStateOf(loadSavedGenerationSettings(settingsPrefs)) }
-    val pendingAttachments = remember { mutableStateListOf<LocalAttachment>() }
+    val pendingAttachments = composerDraft.pendingAttachments.map { it.toLocalAttachment() }
 
     val builtInModels = remember {
         listOf(
@@ -655,6 +674,7 @@ fun ChatScreen(
         )
     }
 
+    val modelDownloadCoordinator = remember { ModelDownloadCoordinator() }
     val customModels = remember { mutableStateListOf<LocalModel>() }
     var pendingModelImport by remember { mutableStateOf<PendingModelImport?>(null) }
     var showModelStorageManager by remember { mutableStateOf(false) }
@@ -814,7 +834,7 @@ fun ChatScreen(
         }
         val unregisterIdle = FusionMemoryManager.registerIdleEngineUnloader {
             Log.i("FusionMemory", "Requesting idle shared engine unload from chat screen")
-            scope.launch {
+            chatViewModel.scope.launch {
                 FusionRuntimeManager.unloadSharedEngineWhenRuntimeIdle("chat_memory_pressure")
             }
         }
@@ -824,15 +844,31 @@ fun ChatScreen(
         }
     }
 
-    val messageFlow = remember(conversationId) {
+    var messageWindowLimit by remember(conversationId) { mutableIntStateOf(100) }
+    var totalMessageCount by remember(conversationId) { mutableIntStateOf(0) }
+    val messageFlow = remember(conversationId, messageWindowLimit) {
         if (conversationId == 0L) {
             flowOf(emptyList<MessageEntity>())
         } else {
-            dao.observeMessages(conversationId)
+            dao.observeMessagesLatestLimited(conversationId, messageWindowLimit)
         }
     }
 
-    val messageEntities by messageFlow.collectAsState(initial = emptyList())
+    val rawMessageEntities by messageFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val messageEntities = remember(rawMessageEntities, totalMessageCount, messageWindowLimit) {
+        if (totalMessageCount > rawMessageEntities.size) {
+            rawMessageEntities.dropWhile { it.role != "user" }
+        } else {
+            rawMessageEntities
+        }
+    }
+    LaunchedEffect(conversationId, rawMessageEntities.size) {
+        totalMessageCount = if (conversationId == 0L) {
+            0
+        } else {
+            withContext(Dispatchers.IO) { dao.getMessageCountForConversation(conversationId) }
+        }
+    }
     var responseVersionState by remember(conversationId) {
         mutableStateOf(loadResponseVersionState(context, conversationId))
     }
@@ -956,7 +992,8 @@ fun ChatScreen(
             return
         }
 
-        val snapshot = messageEntities.toList()
+        // Resolve the selected response-version branch before any context budgeting.
+        val snapshot = activeTimelineMessages(messageEntities.toList(), responseVersionState)
         val targetIndex = snapshot.indexOfFirst { it.id == targetMessage.id }
         if (targetIndex <= 0 || targetMessage.role == "user") {
             Toast.makeText(context, "답변을 다시 생성할 수 없습니다.", Toast.LENGTH_SHORT).show()
@@ -1011,10 +1048,22 @@ fun ChatScreen(
             previousUserText
         }
         val historyAttachmentRoot = AttachmentStorageManager.getAttachmentDirectory(context)
-        val historyBeforeUser = sanitizeTrustedHistory(
+        val sanitizedHistoryBeforeUser = sanitizeTrustedHistory(
             snapshot.take(previousUserIndex).map { ChatMessage(role = it.role, content = it.content) },
             historyAttachmentRoot
         )
+        val historyBeforeUser = PromptHistoryBudgeter.select(
+            PromptHistoryBudgetRequest(
+                history = sanitizedHistoryBeforeUser,
+                modelId = selectedModel,
+                generationModeKey = generationMode.name,
+                maxOutputTokens = generationSettings.maxTokens,
+                currentRequestChars = userInstruction.length,
+                attachmentCount = attachmentsToSend.size,
+                webSearchPlanned = webSearchEnabled || shouldAutoUseWebSearch(previousUserText),
+                summaryText = conversationSummary?.summary,
+            )
+        ).messages
 if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
             val requestId = UUID.randomUUID().toString()
             val capturedSettings = generationSettings.copy(
@@ -1070,7 +1119,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(generationStatus = "검색 결과 정리 중...") }
                                 response
                             } else null
-                            val actualWebSearchUsed = webSearchResponse != null
+                            val actualWebSearchUsed = webSearchResponse.hasUsableResults()
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(actualWebSearchUsed = actualWebSearchUsed) }
                             val webSearchResult = webSearchResponse?.toStructuredContext()
                             val modelPath = ManagedModelPathPolicy.resolveRunnableModel(context, request.selectedModelPath)?.absolutePath
@@ -1663,7 +1712,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "검색 결과 정리 중...") }
                                 response
                             } else null
-                            val actualWebSearchUsed = webSearchResponse != null
+                            val actualWebSearchUsed = webSearchResponse.hasUsableResults()
                             chatViewModel.updateRequestState(s.conversationId, retrySnapshot.requestId, requireActiveSession = true) { it.copy(actualWebSearchUsed = actualWebSearchUsed) }
                             val webSearchResult = webSearchResponse?.toStructuredContext()
                             recordWebSearchDiagnostics(context, webSearchResponse)
@@ -2186,58 +2235,70 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
     val attachmentPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
+        val pendingImport = chatViewModel.pendingPickerImport()
         if (uris.isEmpty()) {
-            pickerOriginConversationId = null
+            pendingImport?.let { (draftConversationId, owner) ->
+                chatViewModel.settleAttachmentImport(draftConversationId, owner.token)
+            }
             return@rememberLauncherForActivityResult
         }
-        if (isImportingAttachments) return@rememberLauncherForActivityResult
-        isImportingAttachments = true
 
-        val originConversationId = pickerOriginConversationId
-        if (originConversationId == null || originConversationId != currentConversationId) {
-            Toast.makeText(context, "대화가 변경되어 첨부를 취소했습니다.", Toast.LENGTH_SHORT).show()
-            pickerOriginConversationId = null
-            isImportingAttachments = false
+        val import = pendingImport ?: return@rememberLauncherForActivityResult
+        val originConversationId = import.first
+        val importOwner = import.second
+        if (!chatViewModel.beginAttachmentCopy(originConversationId, importOwner.token)) {
             return@rememberLauncherForActivityResult
         }
 
         Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
 
-        scope.launch {
+        chatViewModel.scope.launch {
             val copiedBatch = mutableListOf<LocalAttachment>()
+            val importCoordinator = AttachmentImportCoordinator(context.applicationContext)
             try {
                 val capacity = computePickerCapacity(
-                    pendingCount = pendingAttachments.size,
+                    pendingCount = chatViewModel.draft(originConversationId).pendingAttachments.size,
                     selectedCount = uris.size
                 )
                 val urisToProcess = uris.take(capacity.toProcess)
                 val skippedByLimit = capacity.skipped
 
                 var failed = 0
+                val failureKinds = mutableSetOf<AttachmentImportFailure>()
                 urisToProcess.forEach { uri ->
                     currentCoroutineContext().ensureActive()
-                    val displayName = getDisplayNameFromUri(context, uri)
+                    val displayName = normalizeUserVisibleName(
+                        getDisplayNameFromUri(context, uri),
+                        fallback = "attachment",
+                        maxCodePoints = 120,
+                    )
                     val mimeType = context.contentResolver.getType(uri)
                         ?: "application/octet-stream"
 
-                    val copiedFile = copyUriToAttachmentFile(
-                        context = context,
-                        uri = uri,
-                        displayName = displayName
+                    val copyResult = importCoordinator.copy(
+                        source = uri.toString(),
+                        displayName = displayName,
+                        declaredLength = getFileSizeFromUri(context, uri),
                     )
 
-                    if (copiedFile != null) {
+                    if (copyResult is AttachmentImportResult.Success) {
                         copiedBatch += LocalAttachment(
                             name = displayName,
                             mimeType = mimeType,
-                            localPath = copiedFile.absolutePath
+                            localPath = copyResult.file.absolutePath
                         )
                     } else {
                         failed++
+                        failureKinds += (copyResult as AttachmentImportResult.Failure).kind
                     }
                 }
 
-                if (currentConversationId != originConversationId) {
+                val importAccepted = chatViewModel.completeAttachmentImport(
+                    conversationId = originConversationId,
+                    token = importOwner.token,
+                    attachments = copiedBatch.map { it.toPendingAttachmentIdentity() },
+                )
+                if (!importAccepted) {
                     copiedBatch.forEach { attachment ->
                         when (AttachmentStorageManager.discardPendingAttachmentFile(context, attachment.localPath)) {
                             PendingAttachmentDiscardResult.DeletionFailed ->
@@ -2248,11 +2309,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             else -> Unit
                         }
                     }
-                    Toast.makeText(context, "대화가 변경되어 첨부를 취소했습니다.", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
 
-                pendingAttachments.addAll(copiedBatch)
                 val success = copiedBatch.size
                 when {
                     success > 0 && failed == 0 && skippedByLimit == 0 ->
@@ -2265,8 +2324,13 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         Toast.makeText(context, "첨부 일부 실패 ($success 성공, $failed 실패), ${skippedByLimit}개는 최대 한도로 제외", Toast.LENGTH_LONG).show()
                     skippedByLimit > 0 && success == 0 ->
                         Toast.makeText(context, "최대 5개까지 첨부할 수 있어 ${skippedByLimit}개를 제외했습니다.", Toast.LENGTH_LONG).show()
+                    AttachmentImportFailure.STORAGE_FULL in failureKinds ->
+                        Toast.makeText(context, "저장 공간이 부족합니다. 공간을 확보한 뒤 다시 시도해 주세요.", Toast.LENGTH_LONG).show()
+                    AttachmentImportFailure.FILE_TOO_LARGE in failureKinds ||
+                        AttachmentImportFailure.BATCH_TOO_LARGE in failureKinds ->
+                        Toast.makeText(context, "첨부 파일 또는 선택한 파일의 전체 크기가 허용 한도를 초과합니다.", Toast.LENGTH_LONG).show()
                     else ->
-                        Toast.makeText(context, "첨부 실패", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, "첨부 파일을 가져오지 못했습니다.", Toast.LENGTH_SHORT).show()
                 }
             } catch (cancellation: CancellationException) {
                 withContext(NonCancellable) {
@@ -2286,8 +2350,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     Toast.makeText(context, "첨부 파일을 가져오지 못했습니다.", Toast.LENGTH_SHORT).show()
                 }
             } finally {
-                pickerOriginConversationId = null
-                isImportingAttachments = false
+                chatViewModel.settleAttachmentImport(originConversationId, importOwner.token)
             }
         }
     }
@@ -2384,7 +2447,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     )
                 ChatInputBar(
                     value = input,
-                    onValueChange = { input = it },
+                    onValueChange = { chatViewModel.updateDraftText(conversationId, it) },
                     enabled = !isGenerating && !isSubmittingMessage && !isImportingAttachments,
                     isGenerating = isGenerating,
                     isSubmittingMessage = isSubmittingMessage,
@@ -2394,7 +2457,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     attachmentRefreshKey = attachmentLifecycleRefreshKey,
                     onRemoveAttachment = { attachment ->
                         if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
-                        pendingAttachments.remove(attachment)
+                        if (!chatViewModel.removePendingAttachment(conversationId, attachment.localPath)) {
+                            return@ChatInputBar
+                        }
                         scope.launch {
                             when (AttachmentStorageManager.discardPendingAttachmentFile(context, attachment.localPath)) {
                                 PendingAttachmentDiscardResult.DeletionFailed ->
@@ -2408,7 +2473,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     },
                     onAppendQuickPrompt = { preset ->
                         if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
-                        input = appendQuickPrompt(input, preset)
+                        chatViewModel.appendQuickPrompt(conversationId, preset, ::appendQuickPrompt)
                     },
                     onPlusClick = {
                         if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
@@ -2420,7 +2485,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             ).show()
                             return@ChatInputBar
                         }
-                        pickerOriginConversationId = conversationId
+                        chatViewModel.beginAttachmentImport(conversationId)
                         attachmentPickerLauncher.launch(
                             arrayOf(
                                 "image/*",
@@ -2485,7 +2550,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             }
                             val shouldUseWebSearch = webSearchEnabled || shouldAutoUseWebSearch(userInput)
                             val historyAttachmentRoot = AttachmentStorageManager.getAttachmentDirectory(context)
-                            val capturedRawMessages = messages.toList()
+                            val capturedResponseVersionState = responseVersionState
                             val capturedGenerationMode = generationMode
                             val capturedSelectedModel = selectedModel
                             val capturedSelectedModelPath = selectedModelPath
@@ -2508,21 +2573,54 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                             val capturedDraftAttachments = attachmentsToSend.toList()
 
+                            val submissionSnapshot = chatViewModel.beginSubmission(conversationId)
+                                ?: return@sendClick
                             val owner = MessageSubmissionOwner(
-                                token = UUID.randomUUID().toString(),
-                                sourceConversationId = conversationId
+                                token = submissionSnapshot.token,
+                                sourceConversationId = submissionSnapshot.conversationId,
                             )
-                            activeSubmission = owner
 
-                            scope.launch {
+                            chatViewModel.scope.launch {
                                 val commitState = SubmissionCommitState(conversationId = conversationId)
 
                                 try {
                                     val capturedMessages = withContext(Dispatchers.IO) {
-                                        sanitizeTrustedHistory(capturedRawMessages, historyAttachmentRoot)
+                                        val rawHistory = if (owner.sourceConversationId > 0L) {
+                                            dao.getMessagesLatestLimited(
+                                                owner.sourceConversationId,
+                                                256,
+                                            )
+                                        } else {
+                                            emptyList()
+                                        }
+                                        val activeBranchHistory = activeTimelineMessages(
+                                            rawHistory,
+                                            capturedResponseVersionState,
+                                        ).map { ChatMessage(role = it.role, content = it.content) }
+                                        val sanitized = sanitizeTrustedHistory(
+                                            activeBranchHistory,
+                                            historyAttachmentRoot,
+                                        )
+                                        PromptHistoryBudgeter.select(
+                                            PromptHistoryBudgetRequest(
+                                                history = sanitized,
+                                                modelId = capturedSelectedModel,
+                                                generationModeKey = capturedGenerationMode.name,
+                                                maxOutputTokens = capturedGenerationSettings.maxTokens,
+                                                currentRequestChars = userInstruction.length,
+                                                attachmentCount = attachmentsToSend.size,
+                                                webSearchPlanned = capturedWebSearchEnabled ||
+                                                    shouldAutoUseWebSearch(userInput),
+                                                summaryText = conversationSummary?.summary,
+                                            )
+                                        ).messages
                                     }
                                     val now = System.currentTimeMillis()
-                                    val newConversationTitle = capturedMessageText.take(24).ifBlank { "새 대화" }
+                                    val newConversationTitle = normalizeUserVisibleName(
+                                        capturedMessageText,
+                                        fallback = "새 대화",
+                                        maxCodePoints = 80,
+                                    )
 
                                     val commitResult = commitAndSettleUserSubmission(
                                         state = commitState,
@@ -2555,18 +2653,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             }
                                         },
                                         reconcileCommittedDraft = {
-                                            val reconciliation = reconcileCommittedDraft(
-                                                currentInput = input,
-                                                capturedRawInput = capturedRawInput,
-                                                pendingAttachments = pendingAttachments.toList(),
-                                                capturedDraftPaths = capturedDraftAttachments.map { it.localPath },
+                                            chatViewModel.reconcileCommittedSubmission(
+                                                snapshot = submissionSnapshot,
+                                                committedPaths = capturedDraftAttachments.map { it.localPath },
                                             )
-                                            if (reconciliation.shouldClearInput) {
-                                                input = ""
-                                            }
-                                            pendingAttachments.clear()
-                                            pendingAttachments.addAll(reconciliation.remainingAttachments)
-                                            reconciliation.committedPaths.forEach { committedPath ->
+                                            capturedDraftAttachments.map { it.localPath }.distinct().forEach { committedPath ->
                                                 runCatching {
                                                     AttachmentStorageManager.unregisterPendingAttachment(committedPath)
                                                 }.onFailure { failure ->
@@ -2635,7 +2726,14 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             installGenerationRequestAndSettleOwner(
                                                 owner = owner,
                                                 getActiveOwner = { activeSubmission },
-                                                setActiveOwner = { activeSubmission = it },
+                                                setActiveOwner = { next ->
+                                                    if (next == null) {
+                                                        chatViewModel.settleSubmissionOwner(
+                                                            owner.sourceConversationId,
+                                                            owner.token,
+                                                        )
+                                                    }
+                                                },
                                             ) {
                                                 chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
                                                 if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
@@ -2671,7 +2769,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                         chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "검색 결과 정리 중...") }
                                                         response
                                                     } else null
-                                                    val actualWebSearchUsed = webSearchResponse != null
+                                                    val actualWebSearchUsed = webSearchResponse.hasUsableResults()
                                                     chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(actualWebSearchUsed = actualWebSearchUsed) }
                                                     val webSearchResult = webSearchResponse?.toStructuredContext()
                                                     recordWebSearchDiagnostics(context, webSearchResponse)
@@ -2805,7 +2903,14 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                         installGenerationRequestAndSettleOwner(
                                             owner = owner,
                                             getActiveOwner = { activeSubmission },
-                                            setActiveOwner = { activeSubmission = it },
+                                            setActiveOwner = { next ->
+                                                if (next == null) {
+                                                    chatViewModel.settleSubmissionOwner(
+                                                        owner.sourceConversationId,
+                                                        owner.token,
+                                                    )
+                                                }
+                                            },
                                         ) {
                                             chatViewModel.registry.start(chatViewModel.scope, snapshot) { s ->
                                         if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
@@ -2834,7 +2939,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "검색 결과 정리 중...") }
                                                 response
                                             } else null
-                                            val actualWebSearchUsed = webSearchResponse != null
+                                            val actualWebSearchUsed = webSearchResponse.hasUsableResults()
                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(actualWebSearchUsed = actualWebSearchUsed) }
                                             val webSearchResult = webSearchResponse?.toStructuredContext()
                                             recordWebSearchDiagnostics(context, webSearchResponse)
@@ -3152,7 +3257,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     }
                                 } catch (e: Exception) {
                                     Log.e("FusionEngine", "Message submission failed", e)
-                                    activeSubmission = activeSubmission.clearIfMatches(owner)
+                                    chatViewModel.settleSubmissionOwner(
+                                        owner.sourceConversationId,
+                                        owner.token,
+                                    )
                                     if (e is kotlinx.coroutines.CancellationException) throw e
 
                                     val message = if (commitState.messageInserted) {
@@ -3256,6 +3364,23 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         verticalArrangement = Arrangement.spacedBy(18.dp),
                         contentPadding = PaddingValues(top = 12.dp, bottom = chatContentBottomPadding)
                     ) {
+                        if (totalMessageCount > rawMessageEntities.size) {
+                            item(key = "load-older-messages") {
+                                Box(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    TextButton(
+                                        onClick = {
+                                            messageWindowLimit = (messageWindowLimit + 100)
+                                                .coerceAtMost(totalMessageCount)
+                                        }
+                                    ) {
+                                        Text("이전 메시지 불러오기")
+                                    }
+                                }
+                            }
+                        }
                         items(
                             items = activeMessageEntities,
                             key = { it.id }
@@ -3621,9 +3746,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 downloadProgressPercent = 0
 
                 scope.launch {
-                    val success = downloadModelFile(
+                    val result = downloadModelFile(
                         context = context,
                         model = model,
+                        coordinator = modelDownloadCoordinator,
                         onProgress = { percent ->
                             downloadProgressPercent = percent
                         }
@@ -3632,7 +3758,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     downloadingModelName = null
                     downloadProgressPercent = null
 
-                    if (success) {
+                    if (result is ModelDownloadResult.Success) {
                         selectedModel = model.name
                         selectedModelPath = getModelFile(context, model).absolutePath
                         saveFusionSettings(
@@ -3645,7 +3771,20 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         )
                         Toast.makeText(context, "${model.name} 다운로드 완료", Toast.LENGTH_SHORT).show()
                     } else {
-                        Toast.makeText(context, "${model.name} 다운로드 실패", Toast.LENGTH_SHORT).show()
+                        val failure = result as ModelDownloadResult.Failure
+                        val message = when (failure.kind) {
+                            ModelDownloadFailure.TOO_LARGE ->
+                                "모델 파일이 허용된 최대 크기를 초과합니다."
+                            ModelDownloadFailure.STORAGE_FULL ->
+                                "저장 공간이 부족합니다. 공간을 확보한 뒤 다시 시도해 주세요."
+                            ModelDownloadFailure.INVALID_PAYLOAD ->
+                                "다운로드한 파일이 유효한 모델 파일이 아닙니다."
+                            ModelDownloadFailure.TIMEOUT ->
+                                "다운로드 시간이 초과되었습니다. 네트워크를 확인해 주세요."
+                            else ->
+                                "${model.name} 다운로드에 실패했습니다."
+                        }
+                        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                     }
                 }
             }
@@ -3731,21 +3870,16 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         scope.launch {
                             try {
                                 if (targetId != 0L) {
-                                    chatViewModel.cancelAndAwait(targetId, reason = "delete-conversation")
-                                    withContext(NonCancellable) {
-                                        // Re-check existence: another deletion path may have won the race.
-                                        if (dao.getConversationById(targetId) != null) {
-                                            dao.deleteConversation(targetId)
-                                        }
-                                    }
+                                    deleteConversationProduction(context, dao, chatViewModel, targetId)
                                 }
-                                input = ""
-                                clearPendingAttachmentDrafts(context, pendingAttachments)
-                                streamingAssistantText = null
-                                streamingMetricsLine = null
-                                generationStatus = null
-                                showDeleteChatDialog = false
-                                onNewChat()
+                                if (chatViewModel.currentConversationId.value == targetId) {
+                                    clearPendingAttachmentDrafts(context, pendingAttachments)
+                                    streamingAssistantText = null
+                                    streamingMetricsLine = null
+                                    generationStatus = null
+                                    showDeleteChatDialog = false
+                                    onNewChat()
+                                }
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
                                 Log.e("FusionDelete", "Failed to delete current conversation", e)
@@ -3778,7 +3912,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         ConversationSummaryDialog(
             summaryMemory = conversationSummary,
             onGenerate = {
-                input = "현재 대화의 핵심 내용을 나중에 참고할 수 있도록 간결하게 요약해 주세요. 사용자의 선호, 진행 중인 작업, 중요한 결정 사항을 중심으로 정리해 주세요. 불필요한 잡담은 제외해 주세요."
+                chatViewModel.updateDraftText(
+                    conversationId,
+                    "현재 대화의 핵심 내용을 나중에 참고할 수 있도록 간결하게 요약해 주세요. 사용자의 선호, 진행 중인 작업, 중요한 결정 사항을 중심으로 정리해 주세요. 불필요한 잡담은 제외해 주세요.",
+                )
                 showConversationSummaryDialog = false
                 Toast.makeText(context, "요약 요청을 입력창에 추가했습니다.", Toast.LENGTH_SHORT).show()
                 DeveloperLogStore.record(context, "summary", "요약 생성 요청", "conversationId=$conversationId")
@@ -5691,7 +5828,7 @@ private fun ModelSelectDialog(
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences(FusionPrefsName, Context.MODE_PRIVATE) }
     val benchmarkDao = remember { AppDatabase.getInstance(context).benchmarkDao() }
-    val benchmarkResults by benchmarkDao.observeAll().collectAsState(initial = emptyList())
+    val benchmarkResults by benchmarkDao.observeAll().collectAsStateWithLifecycle(initialValue = emptyList())
     var favoriteModelIds by remember { mutableStateOf(prefs.getStringSet(PrefFavoriteModelIds, emptySet())?.toSet() ?: emptySet()) }
     var hiddenModelIds by remember { mutableStateOf(prefs.getStringSet(PrefHiddenModelIds, emptySet())?.toSet() ?: emptySet()) }
     var showHiddenModels by remember { mutableStateOf(prefs.getBoolean(PrefShowHiddenModels, false)) }
@@ -9899,68 +10036,22 @@ private suspend fun persistCopiedModelSpec(
 private suspend fun downloadModelFile(
     context: Context,
     model: LocalModel,
+    coordinator: ModelDownloadCoordinator,
     onProgress: (Int) -> Unit
-): Boolean {
-    val url = model.downloadUrl ?: return false
-    val outputFile = getModelFile(context, model)
-    val parentDir = outputFile.parentFile ?: getModelDirectory(context)
-    val tempFile = File(parentDir, "${outputFile.name}.tmp")
+): ModelDownloadResult {
+    val url = model.downloadUrl
+        ?: return ModelDownloadResult.Failure(ModelDownloadFailure.NETWORK)
     return withContext(Dispatchers.IO) {
-        try {
-            if (tempFile.exists()) {
-                tempFile.delete()
-            }
-
-            val connection = URL(url).openConnection()
-            connection.connect()
-
-            val totalBytes = connection.contentLengthLong
-            var downloadedBytes = 0L
-
-            connection.getInputStream().use { input ->
-                tempFile.outputStream().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read == -1) break
-
-                        output.write(buffer, 0, read)
-                        downloadedBytes += read
-
-                        if (totalBytes > 0L) {
-                            val percent = ((downloadedBytes * 100) / totalBytes)
-                                .toInt()
-                                .coerceIn(0, 100)
-
-                            withContext(Dispatchers.Main) {
-                                onProgress(percent)
-                            }
-                        }
-                    }
+        coordinator.download(
+            sourceUrl = url,
+            target = getModelFile(context, model),
+            onProgress = { percent ->
+                withContext(Dispatchers.Main) {
+                    onProgress(percent)
                 }
-            }
-
-            if (outputFile.exists()) {
-                outputFile.delete()
-            }
-
-            val renamed = tempFile.renameTo(outputFile)
-
-            withContext(Dispatchers.Main) {
-                onProgress(100)
-            }
-
-            renamed
-        } catch (_: Exception) {
-            if (tempFile.exists()) {
-                tempFile.delete()
-            }
-
-            false
-        }
+            },
+        )
     }
-
 }
 private fun getDisplayNameFromUri(
     context: Context,
@@ -9983,226 +10074,6 @@ private fun getDisplayNameFromUri(
 
     return displayName ?: uri.lastPathSegment ?: "custom_model"
 
-}
-private suspend fun performSimpleWebSearch(
-    query: String
-): String? {
-    return withContext(Dispatchers.IO) {
-        val instantResult = runCatching {
-            performDuckDuckGoInstantSearch(query)
-        }.getOrNull()
-
-        if (!instantResult.isNullOrBlank() && !instantResult.contains("검색 결과가 충분하지 않았어")) {
-            return@withContext instantResult
-        }
-
-        val htmlResult = runCatching {
-            performDuckDuckGoHtmlSearch(query)
-        }.getOrNull()
-
-        if (!htmlResult.isNullOrBlank()) {
-            return@withContext htmlResult
-        }
-
-        instantResult ?: "검색 결과를 가져오지 못했습니다. 일반 지식과 추론을 구분해서 답변해야 합니다."
-    }
-}
-private fun performDuckDuckGoInstantSearch(
-    query: String
-): String? {
-    val encodedQuery = URLEncoder.encode(query, "UTF-8")
-    val url = URL(
-        "https://api.duckduckgo.com/?q=$encodedQuery&format=json&no_html=1&skip_disambig=1"
-    )
-
-    val jsonText = url.readText()
-    val json = JSONObject(jsonText)
-    val lines = mutableListOf<String>()
-
-    val heading = json.optString("Heading")
-    val abstractText = json.optString("AbstractText")
-    val abstractUrl = json.optString("AbstractURL")
-    val answer = json.optString("Answer")
-    val definition = json.optString("Definition")
-
-    if (answer.isNotBlank()) {
-        lines.add("즉답: $answer")
-    }
-
-    if (definition.isNotBlank()) {
-        lines.add("정의: $definition")
-    }
-
-    if (abstractText.isNotBlank()) {
-        if (heading.isNotBlank()) {
-            lines.add("주제: $heading")
-        }
-        lines.add("요약: $abstractText")
-        if (abstractUrl.isNotBlank()) {
-            lines.add("출처: $abstractUrl")
-        }
-    }
-
-    val relatedTopics = json.optJSONArray("RelatedTopics")
-    if (relatedTopics != null) {
-        var added = 0
-        var index = 0
-
-        while (index < relatedTopics.length() && added < 3) {
-            val item = relatedTopics.optJSONObject(index)
-
-            if (item != null) {
-                val text = item.optString("Text")
-                val firstUrl = item.optString("FirstURL")
-
-                if (text.isNotBlank()) {
-                    lines.add("관련: $text")
-                    if (firstUrl.isNotBlank()) {
-                        lines.add("관련 출처: $firstUrl")
-                    }
-                    added += 1
-                } else {
-                    val nestedTopics = item.optJSONArray("Topics")
-                    if (nestedTopics != null) {
-                        var nestedIndex = 0
-
-                        while (nestedIndex < nestedTopics.length() && added < 3) {
-                            val nested = nestedTopics.optJSONObject(nestedIndex)
-                            val nestedText = nested?.optString("Text").orEmpty()
-                            val nestedUrl = nested?.optString("FirstURL").orEmpty()
-
-                            if (nestedText.isNotBlank()) {
-                                lines.add("관련: $nestedText")
-                                if (nestedUrl.isNotBlank()) {
-                                    lines.add("관련 출처: $nestedUrl")
-                                }
-                                added += 1
-                            }
-
-                            nestedIndex += 1
-                        }
-                    }
-                }
-            }
-
-            index += 1
-        }
-    }
-
-    return if (lines.isEmpty()) {
-        null
-    } else {
-        lines.joinToString("\n")
-    }
-}
-
-private fun performDuckDuckGoHtmlSearch(
-    query: String
-): String? {
-    val encodedQuery = URLEncoder.encode(query, "UTF-8")
-    val url = URL("https://html.duckduckgo.com/html/?q=$encodedQuery")
-
-    val connection = (url.openConnection() as HttpURLConnection).apply {
-        requestMethod = "GET"
-        connectTimeout = 8000
-        readTimeout = 8000
-        setRequestProperty(
-            "User-Agent",
-            "Mozilla/5.0 (Android; Fusion) AppleWebKit/537.36 Chrome Mobile Safari/537.36"
-        )
-    }
-
-    val html = connection.inputStream.bufferedReader().use { it.readText() }
-
-    val resultRegex = Regex(
-        pattern = """(?s)<div class="result results_links.*?</div>\s*</div>"""
-    )
-
-    val titleRegex = Regex(
-        pattern = """(?s)<a rel="nofollow" class="result__a" href="(.*?)">(.*?)</a>"""
-    )
-
-    val snippetRegex = Regex(
-        pattern = """(?s)<a class="result__snippet".*?>(.*?)</a>|<div class="result__snippet".*?>(.*?)</div>"""
-    )
-
-    val results = resultRegex.findAll(html)
-        .mapNotNull { blockMatch ->
-            val block = blockMatch.value
-            val titleMatch = titleRegex.find(block) ?: return@mapNotNull null
-
-            val rawUrl = titleMatch.groupValues[1]
-            val rawTitle = titleMatch.groupValues[2]
-
-            val snippetMatch = snippetRegex.find(block)
-            val rawSnippet = snippetMatch?.groupValues
-                ?.drop(1)
-                ?.firstOrNull { it.isNotBlank() }
-                .orEmpty()
-
-            val title = cleanHtmlText(rawTitle)
-            val snippet = cleanHtmlText(rawSnippet)
-            val link = cleanDuckDuckGoUrl(rawUrl)
-
-            if (title.isBlank()) {
-                null
-            } else {
-                SearchResultText(
-                    title = title,
-                    snippet = snippet,
-                    url = link
-                )
-            }
-        }
-        .take(5)
-        .toList()
-
-    if (results.isEmpty()) return null
-
-    return buildString {
-        appendLine("검색어: $query")
-        appendLine("아래는 DuckDuckGo HTML 검색에서 가져온 참고 결과다.")
-        appendLine()
-
-        results.forEachIndexed { index, result ->
-            appendLine("${index + 1}. ${result.title}")
-            if (result.snippet.isNotBlank()) {
-                appendLine("요약: ${result.snippet}")
-            }
-            if (result.url.isNotBlank()) {
-                appendLine("출처: ${result.url}")
-            }
-            appendLine()
-        }
-    }.trim()
-}
-
-private data class SearchResultText(
-    val title: String,
-    val snippet: String,
-    val url: String
-)
-
-private fun cleanHtmlText(raw: String): String {
-    return raw
-        .replace(Regex("<.*?>"), " ")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&nbsp;", " ")
-        .replace(Regex("\\s+"), " ")
-        .trim()
-}
-
-private fun cleanDuckDuckGoUrl(raw: String): String {
-    val cleaned = cleanHtmlText(raw)
-
-    return cleaned
-        .replace("&amp;", "&")
-        .trim()
 }
 private fun openAttachmentFile(
     context: Context,
@@ -10598,98 +10469,11 @@ private fun getAttachmentDirectory(context: Context): File {
     return AttachmentStorageManager.getAttachmentDirectory(context)
 }
 
-private suspend fun copyUriToAttachmentFile(
-    context: Context,
-    uri: Uri,
-    displayName: String
-): File? {
-    var temporaryFile: File? = null
-    var adoptedFile: File? = null
-
-    try {
-        return withContext(Dispatchers.IO) outer@ {
-            val safeName = displayName
-                .replace(Regex("""[\u0000-\u001F\u007F\\/:*?"<>|]"""), "_")
-                .take(48)
-                .ifBlank { "attachment" }
-            val attachmentDirectory = getAttachmentDirectory(context)
-            val finalFile = File(attachmentDirectory, "${UUID.randomUUID()}_$safeName")
-            val partFile = File(attachmentDirectory, ".${finalFile.name}.part")
-            temporaryFile = partFile
-
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                partFile.outputStream().use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        output.write(buffer, 0, read)
-                    }
-                    output.flush()
-                }
-            } ?: return@outer null
-
-            if (!partFile.isFile || partFile.length() <= 0L) {
-                partFile.delete()
-                return@outer null
-            }
-
-            withContext(NonCancellable) adopt@ {
-                val moved = runCatching {
-                    Files.move(
-                        partFile.toPath(),
-                        finalFile.toPath(),
-                        StandardCopyOption.ATOMIC_MOVE,
-                    )
-                    true
-                }.getOrElse {
-                    runCatching {
-                        Files.move(partFile.toPath(), finalFile.toPath())
-                        true
-                    }.getOrDefault(false)
-                }
-                if (!moved || !finalFile.isFile || finalFile.length() <= 0L) {
-                    partFile.delete()
-                    finalFile.delete()
-                    return@adopt null
-                }
-
-                val registeredPath = AttachmentStorageManager.registerPendingAttachment(finalFile)
-                if (registeredPath == null) {
-                    finalFile.delete()
-                    return@adopt null
-                }
-                adoptedFile = finalFile
-                finalFile
-            }
-        }
-    } catch (cancellation: CancellationException) {
-        withContext(NonCancellable + Dispatchers.IO) {
-            temporaryFile?.delete()
-            adoptedFile?.let { file ->
-                AttachmentStorageManager.discardPendingAttachmentFile(context, file.absolutePath)
-            }
-        }
-        throw cancellation
-    } catch (failure: Exception) {
-        withContext(NonCancellable + Dispatchers.IO) {
-            temporaryFile?.delete()
-            adoptedFile?.let { file ->
-                AttachmentStorageManager.discardPendingAttachmentFile(context, file.absolutePath)
-            }
-        }
-        Log.e("FusionAttachment", "Failed to copy attachment into managed storage", failure)
-        return null
-    }
-}
-
 private suspend fun clearPendingAttachmentDrafts(
     context: Context,
-    pendingAttachments: MutableList<LocalAttachment>,
+    pendingAttachments: List<LocalAttachment>,
 ) {
     val paths = pendingAttachments.map { it.localPath }
-    pendingAttachments.clear()
     paths.forEach { path ->
         when (AttachmentStorageManager.discardPendingAttachmentFile(context, path)) {
             PendingAttachmentDiscardResult.DeletionFailed ->

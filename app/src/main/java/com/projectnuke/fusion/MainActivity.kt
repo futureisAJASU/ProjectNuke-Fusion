@@ -12,6 +12,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.ui.FusionApp
+import com.projectnuke.fusion.ui.theme.FusionTheme
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.FusionThumbnailCache
 
@@ -49,7 +50,9 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            FusionApp()
+            FusionTheme(darkTheme = true, dynamicColor = false) {
+                FusionApp()
+            }
         }
     }
 

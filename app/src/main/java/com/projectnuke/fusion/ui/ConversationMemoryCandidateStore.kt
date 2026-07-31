@@ -249,6 +249,28 @@ fun deleteConversationMemoryCandidate(
     }
 }
 
+fun deleteConversationOnlyMemoryCandidates(
+    context: Context,
+    conversationId: Long,
+): Boolean {
+    if (conversationId <= 0L) return true
+    return synchronized(ConversationMemoryCandidateWriteLock) {
+        val prefs = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+        val existing = runCatching {
+            JSONArray(prefs.getString(ConversationMemoryCandidateKey, null) ?: "[]")
+        }.getOrElse { JSONArray() }
+        val updated = JSONArray()
+        for (index in 0 until existing.length()) {
+            val item = existing.optJSONObject(index) ?: continue
+            val belongsToConversation = item.optLong("conversationId") == conversationId
+            val promoted = item.optBoolean("enabled", false) &&
+                item.optString("scope") in setOf(MemoryScope.GLOBAL.name, MemoryScope.MODEL_ONLY.name)
+            if (!belongsToConversation || promoted) updated.put(item)
+        }
+        prefs.edit().putString(ConversationMemoryCandidateKey, updated.toString()).commit()
+    }
+}
+
 private fun normalizeMemoryCandidateText(value: String): String {
     return value
         .replace(Regex("""^(?:[\-\*\u2022\u25CF\u25E6]\s*|\d+[\.\)]\s*)"""), "")

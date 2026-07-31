@@ -27,7 +27,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,10 +47,12 @@ import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.escapeSqlLikeQuery
+import com.projectnuke.fusion.util.normalizeUserVisibleName
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
@@ -77,6 +80,7 @@ fun ConversationListScreen(
   val scope = rememberCoroutineScope()
 
   var searchQuery by remember { mutableStateOf("") }
+  var debouncedSearchQuery by remember { mutableStateOf("") }
   var menuConversation by remember { mutableStateOf<ConversationEntity?>(null) }
   var renameConversation by remember { mutableStateOf<ConversationEntity?>(null) }
   var renameTitle by remember { mutableStateOf("") }
@@ -84,16 +88,23 @@ fun ConversationListScreen(
   var deletingConversationId by remember { mutableStateOf<Long?>(null) }
 
     val conversations by dao.observeConversations()
-        .collectAsState(initial = emptyList())
-    val trimmedSearchQuery = searchQuery.trim()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    LaunchedEffect(searchQuery) {
+        delay(ConversationSearchDebounceMs)
+        debouncedSearchQuery = boundedConversationSearchQuery(searchQuery).orEmpty()
+    }
+    val trimmedSearchQuery = debouncedSearchQuery
     val isSearchMode = trimmedSearchQuery.isNotEmpty()
     val matchingMessageConversationIds by remember(trimmedSearchQuery) {
-        if (trimmedSearchQuery.isBlank()) {
+        if (trimmedSearchQuery.length < 2) {
             flowOf(emptyList())
         } else {
-            dao.observeConversationIdsMatchingMessages(escapeSqlLikeQuery(trimmedSearchQuery))
+            dao.observeConversationIdsMatchingMessagesLimited(
+                escapeSqlLikeQuery(trimmedSearchQuery),
+                ConversationSearchResultLimit,
+            )
         }
-    }.collectAsState(initial = emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
 
     val filteredConversations = remember(conversations, trimmedSearchQuery, matchingMessageConversationIds) {
         if (trimmedSearchQuery.isBlank()) {
@@ -329,7 +340,9 @@ fun ConversationListScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        val title = renameTitle.trim()
+                        val title = renameTitle.takeIf { it.isNotBlank() }
+                            ?.let { normalizeUserVisibleName(it, "New conversation", 80) }
+                            .orEmpty()
                         if (title.isNotBlank()) {
                             scope.launch {
                                 dao.updateConversationTitle(conversation.id, title)
@@ -382,9 +395,7 @@ fun ConversationListScreen(
                         scope.launch {
                             val targetId = conversation.id
                             try {
-                                chatViewModel.cancelAndAwait(targetId)
-                                if (dao.getConversationById(targetId) == null) return@launch
-                                dao.deleteConversation(targetId)
+                                deleteConversationProduction(context, dao, chatViewModel, targetId)
                                 val nextConversationId = dao.getLatestConversation()?.id
                                 if (targetId == currentConversationId) {
                                     onConversationRemovedFromList(targetId, nextConversationId)

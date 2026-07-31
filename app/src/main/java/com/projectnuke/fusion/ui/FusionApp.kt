@@ -8,7 +8,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -17,16 +17,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.fusion.chat.ChatViewModel
 import kotlinx.coroutines.launch
 
 @Composable
 fun FusionApp() {
-  val chatViewModel = remember { ChatViewModel() }
-  DisposableEffect(chatViewModel) {
-    onDispose { chatViewModel.dispose() }
-  }
-  var currentConversationId by remember { mutableLongStateOf(0L) }
+  val chatViewModel: ChatViewModel = viewModel()
+  val currentConversationId by chatViewModel.currentConversationId.collectAsStateWithLifecycle()
     var openModelLibraryRequest by remember { mutableLongStateOf(0L) }
     var openAdvancedSettingsRequest by remember { mutableLongStateOf(0L) }
     var openBenchmarkRequest by remember { mutableLongStateOf(0L) }
@@ -60,18 +58,18 @@ ConversationListScreenV2(
                         }
                     },
                     onOpenConversation = { conversationId ->
-                        currentConversationId = conversationId
+                        chatViewModel.selectConversation(conversationId)
                         scope.launch {
                             drawerState.close()
                         }
                     },
                     onConversationRemovedFromList = { removedConversationId, nextConversationId ->
                         if (currentConversationId == removedConversationId) {
-                            currentConversationId = nextConversationId ?: 0L
+                            chatViewModel.selectConversation(nextConversationId ?: 0L)
                         }
                     },
                     onNewChat = {
-                        currentConversationId = 0L
+                        chatViewModel.selectConversation(0L)
                         scope.launch {
                             drawerState.close()
                         }
@@ -95,7 +93,7 @@ ConversationListScreenV2(
 ChatScreen(
   conversationId = currentConversationId,
   onConversationCreated = { newId ->
-    currentConversationId = newId
+    chatViewModel.selectConversation(newId)
   },
   onOpenList = {
     scope.launch {
@@ -103,7 +101,7 @@ ChatScreen(
     }
   },
   onNewChat = {
-    currentConversationId = 0L
+    chatViewModel.selectConversation(0L)
   },
   openModelLibraryRequest = openModelLibraryRequest.toInt(),
   openAdvancedSettingsRequest = openAdvancedSettingsRequest.toInt(),

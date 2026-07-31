@@ -70,6 +70,9 @@ interface ChatDao {
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt ASC")
     suspend fun getMessagesForConversation(conversationId: Long): List<MessageEntity>
 
+    @Query("SELECT * FROM (SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY createdAt DESC LIMIT :limit) ORDER BY createdAt ASC")
+    suspend fun getMessagesLatestLimited(conversationId: Long, limit: Int): List<MessageEntity>
+
     @Query("SELECT content FROM messages")
     suspend fun getAllMessageContents(): List<String>
 

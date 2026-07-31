@@ -45,7 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,11 +73,13 @@ import com.projectnuke.fusion.data.escapeSqlLikeQuery
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.AttachmentStorageStats
 import com.projectnuke.fusion.util.collectFusionSocInfo
+import com.projectnuke.fusion.util.normalizeUserVisibleName
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -144,6 +146,7 @@ fun ConversationListScreenV2(
 
     var page by remember { mutableStateOf(SidebarPage.HOME) }
     var searchQuery by remember { mutableStateOf("") }
+    var debouncedSearchQuery by remember { mutableStateOf("") }
     var menuConversation by remember { mutableStateOf<ConversationEntity?>(null) }
     var renameConversation by remember { mutableStateOf<ConversationEntity?>(null) }
     var renameTitle by remember { mutableStateOf("") }
@@ -188,6 +191,10 @@ fun ConversationListScreenV2(
             archiveUnlockedForSession = false
         }
     }
+    LaunchedEffect(searchQuery) {
+        delay(ConversationSearchDebounceMs)
+        debouncedSearchQuery = boundedConversationSearchQuery(searchQuery).orEmpty()
+    }
     LaunchedEffect(openBenchmarkRequest) {
         if (openBenchmarkRequest > 0) {
             page = SidebarPage.BENCHMARK
@@ -201,15 +208,22 @@ fun ConversationListScreenV2(
     var webSearchEnabled by remember { mutableStateOf(prefs.getBoolean("web_search_enabled", false)) }
     var speculativeEnabled by remember { mutableStateOf(prefs.getBoolean("speculative_decoding_enabled", false)) }
 
-    val conversations by dao.observeConversations().collectAsState(initial = emptyList())
-    val archivedConversations by dao.observeArchivedConversations().collectAsState(initial = emptyList())
+    val conversations by remember(isDrawerOpen) {
+        if (isDrawerOpen) dao.observeConversations() else flowOf(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val archivedConversations by remember(isDrawerOpen) {
+        if (isDrawerOpen) dao.observeArchivedConversations() else flowOf(emptyList())
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
 
-    val trimmedSearchQuery = searchQuery.trim()
+    val trimmedSearchQuery = debouncedSearchQuery
     val isSearchMode = trimmedSearchQuery.isNotEmpty()
     val matchingMessageConversationIds by remember(trimmedSearchQuery) {
-        if (trimmedSearchQuery.isBlank()) flowOf(emptyList())
-        else dao.observeConversationIdsMatchingMessages(escapeSqlLikeQuery(trimmedSearchQuery))
-    }.collectAsState(initial = emptyList())
+        if (trimmedSearchQuery.length < 2) flowOf(emptyList())
+        else dao.observeConversationIdsMatchingMessagesLimited(
+            escapeSqlLikeQuery(trimmedSearchQuery),
+            ConversationSearchResultLimit,
+        )
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
 
     val filteredConversations = remember(conversations, trimmedSearchQuery, matchingMessageConversationIds) {
         if (trimmedSearchQuery.isBlank()) {
@@ -990,6 +1004,9 @@ fun ConversationListScreenV2(
                         SettingsRestoreResult.InvalidJson -> {
                             Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
                         }
+                        SettingsRestoreResult.TooLarge,
+                        SettingsRestoreResult.InvalidFields,
+                        SettingsRestoreResult.CommitFailed,
                         SettingsRestoreResult.UnsupportedSchema -> {
                             Toast.makeText(context, "지원하지 않는 설정 백업 형식입니다.", Toast.LENGTH_SHORT).show()
                         }
@@ -1222,7 +1239,7 @@ fun ConversationListScreenV2(
     }
 
     if (showDeveloperLogDialog) {
-        val benchmarkResults by db.benchmarkDao().observeAll().collectAsState(initial = emptyList())
+        val benchmarkResults by db.benchmarkDao().observeAll().collectAsStateWithLifecycle(initialValue = emptyList())
         DeveloperLogDialog(
             context = context,
             prefs = prefs,
@@ -1233,7 +1250,7 @@ fun ConversationListScreenV2(
     }
 
     if (showStatusDashboardDialog) {
-        val benchmarkResults by db.benchmarkDao().observeAll().collectAsState(initial = emptyList())
+        val benchmarkResults by db.benchmarkDao().observeAll().collectAsStateWithLifecycle(initialValue = emptyList())
         FusionStatusDashboardDialog(
             context = context,
             prefs = prefs,
@@ -1448,7 +1465,9 @@ fun ConversationListScreenV2(
             dismissButton = { TextButton(onClick = { renameConversation = null }) { Text("취소") } },
             confirmButton = {
                 TextButton(onClick = {
-                    val title = renameTitle.trim()
+                    val title = renameTitle.takeIf { it.isNotBlank() }
+                        ?.let { normalizeUserVisibleName(it, "New conversation", 80) }
+                        .orEmpty()
                     if (title.isNotBlank()) {
                         scope.launch { dao.updateConversationTitle(conversation.id, title) }
                     }
@@ -1489,13 +1508,7 @@ deleteConversation?.let { conversation ->
           deletingConversationId = deletingId
           scope.launch {
             try {
-              chatViewModel.cancelAndAwait(
-                deletingId,
-                reason = "delete-conversation"
-              )
-              if (dao.getConversationById(deletingId) != null) {
-                dao.deleteConversation(deletingId)
-              }
+              deleteConversationProduction(context, dao, chatViewModel, deletingId)
               val nextConversationId = dao.getLatestConversation()?.id
               if (deletingId == currentConversationId) {
                 onConversationRemovedFromList(deletingId, nextConversationId)

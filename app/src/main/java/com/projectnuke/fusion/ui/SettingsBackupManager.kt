@@ -33,8 +33,16 @@ enum class SettingsRestoreResult {
     Success,
     ModelPathMissing,
     InvalidJson,
-    UnsupportedSchema
+    UnsupportedSchema,
+    TooLarge,
+    InvalidFields,
+    CommitFailed,
 }
+
+internal const val MaxSettingsBackupBytes = 512 * 1024
+private const val MaxBackupObjectFields = 64
+private const val MaxBackupArrayItems = 256
+private const val MaxBackupStringChars = 8_192
 
 fun buildSettingsBackupJson(context: Context, prefs: SharedPreferences): String {
     val lowMemoryMode = (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.let {
@@ -77,12 +85,22 @@ fun restoreSettingsBackupJson(
     prefs: SharedPreferences,
     raw: String
 ): SettingsRestoreResult {
+    if (raw.toByteArray(Charsets.UTF_8).size > MaxSettingsBackupBytes) {
+        return SettingsRestoreResult.TooLarge
+    }
     val root = runCatching { JSONObject(raw) }.getOrNull() ?: return SettingsRestoreResult.InvalidJson
     if (root.optString("app") != "Fusion" || root.optInt("schemaVersion", -1) != SettingsBackupSchemaVersion) {
         return SettingsRestoreResult.UnsupportedSchema
     }
     val settings = root.optJSONObject("settings") ?: JSONObject()
     val modelLibrary = root.optJSONObject("modelLibrary") ?: JSONObject()
+    if (root.length() > MaxBackupObjectFields ||
+        settings.length() > MaxBackupObjectFields ||
+        modelLibrary.length() > MaxBackupObjectFields ||
+        containsOversizedValue(root)
+    ) {
+        return SettingsRestoreResult.InvalidFields
+    }
     val restoredKeys = mutableListOf<String>()
     val editor = prefs.edit()
     if (settings.has("accelerator")) {
@@ -116,11 +134,15 @@ fun restoreSettingsBackupJson(
     if (settings.has("lowMemoryMode")) { restoredKeys += "lowMemoryMode(ignored)" }
 
     val currentSelectedModel = prefs.getString(PrefSelectedModel, "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
-    val currentSelectedModelPath = prefs.getString(PrefSelectedModelPath, null)
     val backupModel = settings.optString("selectedModel", currentSelectedModel)
-    val backupPath = settings.optString("selectedModelPath", currentSelectedModelPath ?: "")
+    val hasBackupPath = settings.has("selectedModelPath")
+    val backupPath = if (!hasBackupPath || settings.isNull("selectedModelPath")) {
+        null
+    } else {
+        settings.optString("selectedModelPath")
+    }
     var modelPathMissing = false
-    if (!backupPath.isNullOrBlank()) {
+    if (hasBackupPath && !backupPath.isNullOrBlank()) {
         val managedModel = ManagedModelPathPolicy.resolveRunnableModel(context, backupPath)
         if (managedModel != null) {
             editor.putString(PrefSelectedModel, backupModel)
@@ -130,7 +152,7 @@ fun restoreSettingsBackupJson(
         } else {
             modelPathMissing = true
         }
-    } else if (settings.has("selectedModel")) {
+    } else if (hasBackupPath || settings.has("selectedModel")) {
         editor.putString(PrefSelectedModel, backupModel)
         editor.remove(PrefSelectedModelPath)
         restoredKeys += PrefSelectedModel
@@ -151,7 +173,23 @@ fun restoreSettingsBackupJson(
         editor.putString(PrefModelLibrarySortMode, sortMode.takeIf { it in allowedSortModes } ?: "recommendation")
         restoredKeys += PrefModelLibrarySortMode
     }
-    editor.apply()
+    if (modelPathMissing) return SettingsRestoreResult.ModelPathMissing
+    if (!editor.commit()) return SettingsRestoreResult.CommitFailed
     Log.d("FusionModelSelect", "settings_restore schema=${root.optInt("schemaVersion", -1)} keys=${restoredKeys.joinToString(",")} success=true")
-    return if (modelPathMissing) SettingsRestoreResult.ModelPathMissing else SettingsRestoreResult.Success
+    return SettingsRestoreResult.Success
+}
+
+private fun containsOversizedValue(value: Any?): Boolean = when (value) {
+    is JSONObject -> {
+        if (value.length() > MaxBackupObjectFields) true
+        else value.keys().asSequence().any { key ->
+            key.length > 200 || containsOversizedValue(value.opt(key))
+        }
+    }
+    is JSONArray -> {
+        if (value.length() > MaxBackupArrayItems) true
+        else (0 until value.length()).any { containsOversizedValue(value.opt(it)) }
+    }
+    is String -> value.length > MaxBackupStringChars
+    else -> false
 }
