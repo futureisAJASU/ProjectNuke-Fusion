@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -31,7 +32,7 @@ internal suspend fun readSettingsBackup(
 }
 
 internal suspend fun readBoundedSettingsStream(input: InputStream): SettingsBackupReadResult {
-    val output = StringBuilder()
+    val output = ByteArrayOutputStream()
     val buffer = ByteArray(8 * 1024)
     var total = 0
     return try {
@@ -41,9 +42,9 @@ internal suspend fun readBoundedSettingsStream(input: InputStream): SettingsBack
             if (count < 0) break
             total += count
             if (total > MaxSettingsBackupBytes) return SettingsBackupReadResult.TooLarge
-            output.append(String(buffer, 0, count, Charsets.UTF_8))
+            output.write(buffer, 0, count)
         }
-        SettingsBackupReadResult.Success(output.toString())
+        SettingsBackupReadResult.Success(output.toByteArray().toString(Charsets.UTF_8))
     } catch (_: kotlinx.coroutines.CancellationException) {
         SettingsBackupReadResult.Cancelled
     }
