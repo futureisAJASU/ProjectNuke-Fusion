@@ -19,6 +19,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.runBlocking
 
 /**
  * Per-conversation generation state. This state is deliberately not written to
@@ -89,6 +91,8 @@ class ChatViewModel(
     private val draftStore = context?.let(::PersistentComposerDraftStore)
     private var draftPersistJob: Job? = null
     private var draftWriteId = 0L
+    private val draftHydrated = CompletableDeferred<Unit>()
+    private val locallyMutatedDrafts = mutableSetOf<Long>()
     private val _composerDrafts = MutableStateFlow(emptyMap<Long, ComposerDraftState>())
     val composerDrafts: StateFlow<Map<Long, ComposerDraftState>> = _composerDrafts.asStateFlow()
 
@@ -100,15 +104,19 @@ class ChatViewModel(
     init {
         draftStore?.let { store ->
             viewModelScope.launch(Dispatchers.IO) {
-                val restored = store.load()
-                _composerDrafts.update { current ->
-                    restored + current.mapValues { (id, draft) ->
-                        val stored = restored[id]
-                        if (stored == null || draft.version >= stored.version) draft else stored
+                try {
+                    val restored = store.load()
+                    _composerDrafts.update { current ->
+                        restored + current.mapValues { (id, draft) ->
+                            if (id in locallyMutatedDrafts) draft
+                            else restored[id] ?: draft
+                        }
                     }
+                } finally {
+                    draftHydrated.complete(Unit)
                 }
             }
-        }
+        } ?: draftHydrated.complete(Unit)
     }
 
     fun selectConversation(conversationId: Long) {
@@ -345,6 +353,7 @@ class ChatViewModel(
             val updated = transform(existing)
             if (updated == existing) current else current + (conversationId to updated)
         }
+        locallyMutatedDrafts += conversationId
         scheduleDraftPersist(immediate)
     }
 
@@ -353,9 +362,18 @@ class ChatViewModel(
         val snapshot = _composerDrafts.value
         val writeId = ++draftWriteId
         draftPersistJob?.cancel()
-        draftPersistJob = viewModelScope.launch(Dispatchers.IO) {
-            if (!immediate) delay(DRAFT_PERSIST_DEBOUNCE_MS)
-            store.write(writeId, snapshot)
+        if (immediate) {
+            // Critical settlement is durably complete before the mutation returns.
+            runBlocking(Dispatchers.IO) {
+                draftHydrated.await()
+                store.write(writeId, _composerDrafts.value)
+            }
+        } else {
+            draftPersistJob = viewModelScope.launch(Dispatchers.IO) {
+                draftHydrated.await()
+                delay(DRAFT_PERSIST_DEBOUNCE_MS)
+                store.write(writeId, _composerDrafts.value)
+            }
         }
     }
 
