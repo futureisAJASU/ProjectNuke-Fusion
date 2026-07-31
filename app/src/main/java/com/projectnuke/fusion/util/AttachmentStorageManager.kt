@@ -2,6 +2,7 @@ package com.projectnuke.fusion.util
 
 import android.content.Context
 import com.projectnuke.fusion.data.ChatDao
+import com.projectnuke.fusion.chat.PersistentComposerDraftStore
 import com.projectnuke.fusion.util.AttachmentMessageCodec
 import java.io.File
 import java.nio.file.Files
@@ -205,7 +206,8 @@ object AttachmentStorageManager {
             val files = dir.listFiles()?.filter { it.isFile } ?: emptyList()
             val allMessageContents = dao.getAllMessageContents()
             val referencedPaths = extractReferencedAttachmentPaths(context, allMessageContents)
-            val referencedCanonical = referencedPaths.mapNotNull { safeCanonicalPath(it) }.toSet()
+            val referencedCanonical = (referencedPaths + PersistentComposerDraftStore.durableAttachmentPaths(context))
+                .mapNotNull { safeCanonicalPath(it) }.toSet()
             val pendingCanonical = pendingAttachmentPaths.toSet()
             val now = System.currentTimeMillis()
 

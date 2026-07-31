@@ -97,7 +97,7 @@ internal class PersistentComposerDraftStore(
         return array.toString()
     }
 
-    private companion object {
+    companion object {
         const val FILE_NAME = "composer_drafts_v2.json"
         const val MAX_DRAFT_COUNT = 64
         const val MAX_ATTACHMENT_COUNT = 32
@@ -105,5 +105,28 @@ internal class PersistentComposerDraftStore(
         const val MAX_FIELD_CHARS = 512
         const val MAX_PATH_CHARS = 4_096
         const val MAX_FILE_BYTES = 2 * 1024 * 1024
+        fun durableAttachmentPaths(context: Context): Set<String> = runCatching {
+            val file = File(context.applicationContext.filesDir, FILE_NAME)
+            if (!file.isFile || file.length() > MAX_FILE_BYTES) return@runCatching emptySet()
+            val root = AttachmentStorageManager.getAttachmentDirectory(context)
+                .canonicalFile
+            val array = JSONArray(file.readText(Charsets.UTF_8))
+            buildSet {
+                for (index in 0 until minOf(array.length(), MAX_DRAFT_COUNT)) {
+                    val attachments = array.optJSONObject(index)?.optJSONArray("attachments") ?: continue
+                    for (attachmentIndex in 0 until minOf(attachments.length(), MAX_ATTACHMENT_COUNT)) {
+                        val path = attachments.optJSONObject(attachmentIndex)
+                            ?.optString("path")
+                            ?.takeIf { it.length in 1..MAX_PATH_CHARS }
+                            ?: continue
+                        val candidate = File(path)
+                        val canonical = candidate.canonicalFile
+                        if (canonical.parentFile?.canonicalPath == root.canonicalPath &&
+                            canonical.isFile && !java.nio.file.Files.isSymbolicLink(candidate.toPath())
+                        ) add(canonical.path)
+                    }
+                }
+            }
+        }.getOrDefault(emptySet())
     }
 }
