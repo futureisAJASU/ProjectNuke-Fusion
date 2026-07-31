@@ -12,6 +12,11 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.ui.FusionApp
+import com.projectnuke.fusion.ui.ConversationCleanupDebtStore
+import com.projectnuke.fusion.data.AppDatabase
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import com.projectnuke.fusion.ui.theme.FusionTheme
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.FusionThumbnailCache
@@ -53,6 +58,9 @@ class MainActivity : ComponentActivity() {
             FusionTheme(darkTheme = true, dynamicColor = false) {
                 FusionApp()
             }
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            ConversationCleanupDebtStore.retry(this@MainActivity, AppDatabase.getInstance(this@MainActivity).chatDao())
         }
     }
 

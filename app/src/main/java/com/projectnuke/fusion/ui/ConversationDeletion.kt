@@ -17,6 +17,7 @@ internal suspend fun deleteConversationProduction(
 ): ConversationDeletionResult {
     val appContext = context.applicationContext
     var deletedMessageIds: Set<Long> = emptySet()
+    var targetPendingPaths: Set<String> = emptySet()
     return chatViewModel.deleteConversation(
         conversationId = conversationId,
         exists = {
@@ -24,6 +25,8 @@ internal suspend fun deleteConversationProduction(
             if (exists) {
                 deletedMessageIds = dao.getMessagesForConversation(conversationId)
                     .mapTo(linkedSetOf()) { it.id }
+                targetPendingPaths = chatViewModel.draft(conversationId).pendingAttachments
+                    .mapTo(linkedSetOf()) { it.localPath }
             }
             exists
         },
@@ -38,13 +41,19 @@ internal suspend fun deleteConversationProduction(
                 deleteConversationSummary(appContext, conversationId)
                 check(deleteConversationOnlyMemoryCandidates(appContext, conversationId))
                 check(FusionResponseRatings.deleteForMessages(appContext, deletedMessageIds))
+                targetPendingPaths.forEach { path ->
+                    check(AttachmentStorageManager.deletePendingAttachmentFile(appContext, path))
+                }
                 AttachmentStorageManager.cleanupUnreferencedAttachments(appContext, dao)
                 removeConversationCleanupDebt(appContext, conversationId)
             }
         },
         recordCleanupDebt = {
             withContext(Dispatchers.IO) {
-                recordConversationCleanupDebt(appContext, conversationId)
+                ConversationCleanupDebtStore.record(
+                    appContext,
+                    ConversationCleanupDebt(conversationId, deletedMessageIds, targetPendingPaths, 0, 0L),
+                )
             }
         },
     ).await()
@@ -56,23 +65,6 @@ private fun deleteResponseVersionStateSafely(context: Context, conversationId: L
         true
     }.getOrDefault(false)
 
-private const val CleanupDebtPrefs = "fusion_conversation_cleanup_debt"
-private const val MaxCleanupDebt = 64
-
-private fun recordConversationCleanupDebt(context: Context, conversationId: Long) {
-    val prefs = context.getSharedPreferences(CleanupDebtPrefs, Context.MODE_PRIVATE)
-    val ids = prefs.getStringSet("ids", emptySet()).orEmpty()
-        .mapNotNull(String::toLongOrNull)
-        .filter { it > 0L && it != conversationId }
-        .takeLast(MaxCleanupDebt - 1)
-        .plus(conversationId)
-        .map(Long::toString)
-        .toSet()
-    prefs.edit().putStringSet("ids", ids).commit()
-}
-
 private fun removeConversationCleanupDebt(context: Context, conversationId: Long) {
-    val prefs = context.getSharedPreferences(CleanupDebtPrefs, Context.MODE_PRIVATE)
-    val updated = prefs.getStringSet("ids", emptySet()).orEmpty() - conversationId.toString()
-    prefs.edit().putStringSet("ids", updated).commit()
+    ConversationCleanupDebtStore.remove(context, conversationId)
 }

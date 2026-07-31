@@ -53,7 +53,7 @@ fun deleteConversationSummary(
         .edit()
         .remove(summaryKey(conversationId))
         .remove(updatedAtKey(conversationId))
-        .apply()
+        .commit()
 }
 
 fun loadAllConversationSummaries(

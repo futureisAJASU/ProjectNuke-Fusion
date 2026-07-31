@@ -97,4 +97,40 @@ class ConversationDeletionCoordinatorTest {
         assertFalse(1L in drafts)
         assertTrue(2L in drafts)
     }
+
+    @Test
+    fun `already absent still settles target and cleans derived data`() = runTest {
+        val coordinator = ConversationDeletionCoordinator()
+        var settled = false
+        var cleaned = false
+        val result = coordinator.delete(
+            conversationId = 11,
+            cancelAndJoin = {},
+            exists = { false },
+            commitDelete = { error("must not commit") },
+            settleTarget = { settled = true },
+            cleanupDerivedData = { cleaned = true },
+            recordCleanupDebt = {},
+        )
+        assertEquals(ConversationDeletionResult.ALREADY_ABSENT, result)
+        assertTrue(settled)
+        assertTrue(cleaned)
+    }
+
+    @Test
+    fun `cleanup debt failure does not turn committed deletion into failure`() = runTest {
+        val coordinator = ConversationDeletionCoordinator()
+        var committed = false
+        val result = coordinator.delete(
+            conversationId = 12,
+            cancelAndJoin = {},
+            exists = { true },
+            commitDelete = { committed = true },
+            settleTarget = { throw IllegalStateException("settlement failure") },
+            cleanupDerivedData = { throw IllegalStateException("cleanup failure") },
+            recordCleanupDebt = { throw IllegalStateException("debt store failure") },
+        )
+        assertTrue(committed)
+        assertEquals(ConversationDeletionResult.DELETED, result)
+    }
 }

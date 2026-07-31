@@ -40,14 +40,20 @@ internal class ConversationDeletionCoordinator {
         return try {
             cancelAndJoin()
             if (!exists()) {
+                withContext(NonCancellable) {
+                    settleTarget()
+                    runCatching { cleanupDerivedData() }
+                        .onFailure { runCatching { recordCleanupDebt() } }
+                }
                 ConversationDeletionResult.ALREADY_ABSENT
             } else {
                 commitDelete()
                 committed = true
                 withContext(NonCancellable) {
-                    settleTarget()
+                    runCatching { settleTarget() }
+                        .onFailure { runCatching { recordCleanupDebt() } }
                     runCatching { cleanupDerivedData() }
-                        .onFailure { recordCleanupDebt() }
+                        .onFailure { runCatching { recordCleanupDebt() } }
                 }
                 ConversationDeletionResult.DELETED
             }
