@@ -6,6 +6,8 @@ import org.json.JSONObject
 import java.util.UUID
 import java.io.File
 import com.projectnuke.fusion.util.writeTextAtomically
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 
 data class ConversationMemoryCandidate(
     val id: String,
@@ -47,23 +49,30 @@ private const val MaxCandidateFileBytes = 1 * 1024 * 1024
 private fun candidateFile(context: Context): File = File(context.filesDir, "conversation_memory_candidates.json")
 
 private fun readCandidateJson(context: Context): String {
-    val file = candidateFile(context)
-    if (file.isFile && file.length() <= MaxCandidateFileBytes) {
-        return runCatching { file.readText(Charsets.UTF_8) }.getOrDefault("[]")
+    return runBlocking(Dispatchers.IO) {
+        val file = candidateFile(context)
+        if (file.isFile && file.length() <= MaxCandidateFileBytes) {
+            return@runBlocking runCatching { file.readText(Charsets.UTF_8) }.getOrDefault("[]")
+        }
+        val legacy = context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
+            .getString(ConversationMemoryCandidateKey, "[]") ?: "[]"
+        if (legacy != "[]" && runCatching { writeTextAtomically(file, legacy); true }.getOrDefault(false)) {
+            legacy
+        } else legacy
     }
-    return context.getSharedPreferences(ConversationMemoryCandidatePrefs, Context.MODE_PRIVATE)
-        .getString(ConversationMemoryCandidateKey, "[]") ?: "[]"
 }
 
 private fun writeCandidateJson(context: Context, json: String): Boolean {
-    return runCatching {
-        val bounded = JSONArray(json)
-        while (bounded.length() > MaxCandidateRecords) bounded.remove(bounded.length() - 1)
-        val encoded = bounded.toString()
-        if (encoded.toByteArray(Charsets.UTF_8).size > MaxCandidateFileBytes) return@runCatching false
-        writeTextAtomically(candidateFile(context), encoded)
-        true
-    }.getOrDefault(false)
+    return runBlocking(Dispatchers.IO) {
+        runCatching {
+            val bounded = JSONArray(json)
+            while (bounded.length() > MaxCandidateRecords) bounded.remove(bounded.length() - 1)
+            val encoded = bounded.toString()
+            if (encoded.toByteArray(Charsets.UTF_8).size > MaxCandidateFileBytes) return@runCatching false
+            writeTextAtomically(candidateFile(context), encoded)
+            true
+        }.getOrDefault(false)
+    }
 }
 
 fun loadConversationMemoryCandidates(
@@ -157,8 +166,7 @@ fun saveConversationMemoryCandidates(
         for (index in 0 until existing.length()) {
             updated.put(existing.get(index))
         }
-        writeCandidateJson(context, updated.toString())
-        savedCount
+        if (writeCandidateJson(context, updated.toString())) savedCount else 0
     }
 }
 
@@ -185,7 +193,6 @@ fun updateConversationMemoryCandidate(
         }
         if (!changed) return@synchronized false
         writeCandidateJson(context, existing.toString())
-        true
     }
 }
 
@@ -213,7 +220,6 @@ fun setConversationMemoryCandidateEnabled(
         }
         if (!changed) return@synchronized false
         writeCandidateJson(context, existing.toString())
-        true
     }
 }
 
@@ -247,7 +253,6 @@ fun setConversationMemoryCandidateScope(
         }
         if (!changed) return@synchronized false
         writeCandidateJson(context, existing.toString())
-        true
     }
 }
 
@@ -273,7 +278,6 @@ fun deleteConversationMemoryCandidate(
         }
         if (!removed) return@synchronized false
         writeCandidateJson(context, updated.toString())
-        true
     }
 }
 
