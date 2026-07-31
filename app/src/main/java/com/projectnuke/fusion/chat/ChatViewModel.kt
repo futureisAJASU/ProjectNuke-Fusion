@@ -20,13 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.runBlocking
 
-/**
- * Per-conversation generation state. This state is deliberately not written to
- * [SavedStateHandle]: coroutine jobs and streaming state are valid only for the
- * live Activity-scoped ViewModel.
- */
 data class ConversationGenerationState(
     val isGenerating: Boolean = false,
     val activeRequestId: String? = null,
@@ -70,13 +64,6 @@ data class ComposerSubmissionSnapshot(
     val version: Long,
 )
 
-/**
- * Activity-scoped runtime owner for chat generation and composer drafts.
- *
- * Android retains this ViewModel across configuration changes and clears it
- * only when the Activity is genuinely finished. [SavedStateHandle] contains
- * only navigation and serializable draft identities for process recreation.
- */
 class ChatViewModel(
     private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
     context: Context? = null,
@@ -124,7 +111,6 @@ class ChatViewModel(
         savedStateHandle[CURRENT_CONVERSATION_KEY] = conversationId
     }
 
-    /** Snapshot of [conversationId], or a default if none has been recorded. */
     fun state(conversationId: Long): ConversationGenerationState =
         _states.value[conversationId] ?: ConversationGenerationState()
 
@@ -149,7 +135,6 @@ class ChatViewModel(
         }
     }
 
-    /** Remove the exact terminal request instead of retaining an empty map entry. */
     fun finishRequestState(conversationId: Long, requestId: String) {
         _states.update { current ->
             val existing = current[conversationId] ?: return@update current
@@ -210,9 +195,9 @@ class ChatViewModel(
         }
     }
 
-    fun removePendingAttachment(conversationId: Long, localPath: String): Boolean {
+    suspend fun removePendingAttachment(conversationId: Long, localPath: String): Boolean {
         var removed = false
-        updateDraft(conversationId, immediate = true) { current ->
+        return updateDraftCritical(conversationId) { current ->
             val remaining = current.pendingAttachments.filterNot {
                 if (!removed && it.localPath == localPath) {
                     removed = true
@@ -221,12 +206,11 @@ class ChatViewModel(
                     false
                 }
             }
-            if (!removed) current else current.copy(
+            if (!removed) null else current.copy(
                 pendingAttachments = remaining,
                 version = current.version + 1L,
             )
-        }
-        return removed
+        } && removed
     }
 
     fun beginAttachmentImport(conversationId: Long): ComposerImportOwnership {
@@ -261,86 +245,88 @@ class ChatViewModel(
         return accepted
     }
 
-    fun completeAttachmentImport(
+    suspend fun completeAttachmentImport(
         conversationId: Long,
         token: String,
         attachments: List<PendingAttachmentIdentity>,
     ): Boolean {
         var accepted = false
-        updateDraft(conversationId, immediate = true) { current ->
-            if (current.importOwnership?.token != token) return@updateDraft current
-            accepted = true
-            current.copy(
-                pendingAttachments = current.pendingAttachments + attachments,
-                importOwnership = null,
-                version = current.version + 1L,
-            )
+        val persisted = updateDraftCritical(conversationId) { current ->
+            if (current.importOwnership?.token != token) null
+            else {
+                accepted = true
+                current.copy(
+                    pendingAttachments = current.pendingAttachments + attachments,
+                    importOwnership = null,
+                    version = current.version + 1L,
+                )
+            }
         }
-        return accepted
+        return persisted && accepted
     }
 
-    fun settleAttachmentImport(conversationId: Long, token: String): Boolean {
+    suspend fun settleAttachmentImport(conversationId: Long, token: String): Boolean {
         var accepted = false
-        updateDraft(conversationId, immediate = true) { current ->
-            if (current.importOwnership?.token != token) return@updateDraft current
-            accepted = true
-            current.copy(importOwnership = null, version = current.version + 1L)
-        }
-        return accepted
+        return updateDraftCritical(conversationId) { current ->
+            if (current.importOwnership?.token != token) null
+            else {
+                accepted = true
+                current.copy(importOwnership = null, version = current.version + 1L)
+            }
+        } && accepted
     }
 
-    fun beginSubmission(conversationId: Long): ComposerSubmissionSnapshot? {
+    suspend fun beginSubmission(conversationId: Long): ComposerSubmissionSnapshot? {
         var snapshot: ComposerSubmissionSnapshot? = null
-        updateDraft(conversationId, immediate = true) { current ->
-            if (current.activeSubmissionToken != null) return@updateDraft current
-            val token = UUID.randomUUID().toString()
-            snapshot = ComposerSubmissionSnapshot(
-                token = token,
-                conversationId = conversationId,
-                rawInput = current.rawInput,
-                pendingAttachments = current.pendingAttachments,
-                version = current.version,
-            )
-            current.copy(activeSubmissionToken = token)
+        val persisted = updateDraftCritical(conversationId) { current ->
+            if (current.activeSubmissionToken != null) null
+            else {
+                val token = UUID.randomUUID().toString()
+                snapshot = ComposerSubmissionSnapshot(
+                    token = token,
+                    conversationId = conversationId,
+                    rawInput = current.rawInput,
+                    pendingAttachments = current.pendingAttachments,
+                    version = current.version,
+                )
+                current.copy(activeSubmissionToken = token)
+            }
         }
-        return snapshot
+        return if (persisted) snapshot else null
     }
 
-    fun settleSubmissionOwner(conversationId: Long, token: String) {
-        updateDraft(conversationId, immediate = true) { current ->
-            if (current.activeSubmissionToken != token) current
+    suspend fun settleSubmissionOwner(conversationId: Long, token: String): Boolean {
+        return updateDraftCritical(conversationId) { current ->
+            if (current.activeSubmissionToken != token) null
             else current.copy(activeSubmissionToken = null)
         }
     }
 
-    /**
-     * Reconcile only the captured draft key and exact submission owner. Later
-     * edits survive; attachment paths committed by this submission are removed.
-     */
-    fun reconcileCommittedSubmission(
+    suspend fun reconcileCommittedSubmission(
         snapshot: ComposerSubmissionSnapshot,
         committedPaths: List<String>,
     ): Boolean {
         var accepted = false
-        updateDraft(snapshot.conversationId, immediate = true) { current ->
-            if (current.activeSubmissionToken != snapshot.token) return@updateDraft current
-            accepted = true
-            val committed = committedPaths.toSet()
-            current.copy(
-                rawInput = if (current.rawInput == snapshot.rawInput) "" else current.rawInput,
-                pendingAttachments = current.pendingAttachments.filterNot { it.localPath in committed },
-                activeSubmissionToken = null,
-                version = current.version + 1L,
-            )
-        }
-        return accepted
+        return updateDraftCritical(snapshot.conversationId) { current ->
+            if (current.activeSubmissionToken != snapshot.token) null
+            else {
+                accepted = true
+                val committed = committedPaths.toSet()
+                current.copy(
+                    rawInput = if (current.rawInput == snapshot.rawInput) "" else current.rawInput,
+                    pendingAttachments = current.pendingAttachments.filterNot { it.localPath in committed },
+                    activeSubmissionToken = null,
+                    version = current.version + 1L,
+                )
+            }
+        } && accepted
     }
 
-    fun clearDraft(conversationId: Long) {
+    suspend fun clearDraft(conversationId: Long): Boolean {
         _composerDrafts.update { current ->
             if (conversationId !in current) current else current - conversationId
         }
-        scheduleDraftPersist(immediate = true)
+        return persistDraftCritical()
     }
 
     private inline fun updateDraft(
@@ -357,14 +343,42 @@ class ChatViewModel(
         scheduleDraftPersist(immediate)
     }
 
+    private suspend fun updateDraftCritical(
+        conversationId: Long,
+        transform: (ComposerDraftState) -> ComposerDraftState?,
+    ): Boolean {
+        var changed = false
+        _composerDrafts.update { current ->
+            val existing = current[conversationId] ?: ComposerDraftState()
+            val result = transform(existing) ?: return@update current
+            if (result == existing) return@update current
+            changed = true
+            current + (conversationId to result)
+        }
+        if (!changed) return false
+        locallyMutatedDrafts += conversationId
+        val writeId = ++draftWriteId
+        draftPersistJob?.cancel()
+        val store = draftStore ?: return true
+        draftHydrated.await()
+        return store.write(writeId, _composerDrafts.value)
+    }
+
+    private suspend fun persistDraftCritical(): Boolean {
+        val store = draftStore ?: return true
+        val writeId = ++draftWriteId
+        draftPersistJob?.cancel()
+        draftHydrated.await()
+        return store.write(writeId, _composerDrafts.value)
+    }
+
     private fun scheduleDraftPersist(immediate: Boolean) {
         val store = draftStore ?: return
         val snapshot = _composerDrafts.value
         val writeId = ++draftWriteId
         draftPersistJob?.cancel()
         if (immediate) {
-            // Critical settlement is durably complete before the mutation returns.
-            runBlocking(Dispatchers.IO) {
+            draftPersistJob = viewModelScope.launch(Dispatchers.IO) {
                 draftHydrated.await()
                 store.write(writeId, _composerDrafts.value)
             }

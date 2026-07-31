@@ -32,7 +32,7 @@ internal suspend fun commitAndSettleUserSubmission(
     createConversation: suspend () -> Long,
     insertUserMessage: suspend (conversationId: Long) -> Unit,
     publishConversation: (conversationId: Long) -> Unit,
-    reconcileCommittedDraft: () -> Unit,
+    reconcileCommittedDraft: suspend () -> Unit,
     updateConversationTimestamp: suspend (conversationId: Long) -> Unit,
     onPublicationFailure: (Throwable) -> Unit = {},
     onTimestampFailure: (Throwable) -> Unit = {},
@@ -95,7 +95,7 @@ internal suspend fun commitAndSettleUserSubmission(
 internal suspend fun <T> installGenerationRequestAndSettleOwner(
     owner: MessageSubmissionOwner,
     getActiveOwner: () -> MessageSubmissionOwner?,
-    setActiveOwner: (MessageSubmissionOwner?) -> Unit,
+    setActiveOwner: suspend (MessageSubmissionOwner?) -> Unit,
     install: suspend () -> T,
 ): T {
     return try {

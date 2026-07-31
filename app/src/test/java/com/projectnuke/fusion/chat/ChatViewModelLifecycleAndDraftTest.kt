@@ -42,7 +42,6 @@ class ChatViewModelLifecycleAndDraftTest {
             release.await()
         }
 
-        // A configuration change retains the same instance in the Activity's ViewModelStore.
         val recreatedCompositionOwner = activityViewModel
         assertTrue(recreatedCompositionOwner.registry.isActive(41L, "request-41"))
         assertFalse(session.job.isCancelled)
@@ -74,7 +73,7 @@ class ChatViewModelLifecycleAndDraftTest {
     }
 
     @Test
-    fun `A and B retain independent text and attachment trays`() {
+    fun `A and B retain independent text and attachment trays`() = runTest {
         val vm = ChatViewModel()
         vm.updateDraftText(1L, "draft A")
         vm.updateDraftText(2L, "draft B")
@@ -88,7 +87,7 @@ class ChatViewModelLifecycleAndDraftTest {
     }
 
     @Test
-    fun `stale settlement for A cannot clear visible B`() {
+    fun `stale settlement for A cannot clear visible B`() = runTest {
         val vm = ChatViewModel()
         vm.updateDraftText(1L, "send A")
         addAttachment(vm, 1L, PendingAttachmentIdentity("a", "text/plain", "/managed/a"))
@@ -105,19 +104,19 @@ class ChatViewModelLifecycleAndDraftTest {
     }
 
     @Test
-    fun `new chat draft is isolated from persisted conversations`() {
+    fun `new chat draft is isolated from persisted conversations`() = runTest {
         val vm = ChatViewModel()
         vm.updateDraftText(ChatViewModel.NEW_CONVERSATION_ID, "new chat")
         vm.updateDraftText(9L, "persisted chat")
 
         assertEquals("new chat", vm.draft(ChatViewModel.NEW_CONVERSATION_ID).rawInput)
         assertEquals("persisted chat", vm.draft(9L).rawInput)
-        vm.clearDraft(9L)
+        assertTrue(vm.clearDraft(9L))
         assertEquals("new chat", vm.draft(ChatViewModel.NEW_CONVERSATION_ID).rawInput)
     }
 
     @Test
-    fun `stale import owner cannot mutate a replacement draft owner`() {
+    fun `stale import owner cannot mutate a replacement draft owner`() = runTest {
         val vm = ChatViewModel()
         val old = vm.beginAttachmentImport(1L)
         val replacement = vm.beginAttachmentImport(1L)
@@ -145,7 +144,37 @@ class ChatViewModelLifecycleAndDraftTest {
         assertEquals("B", vm.state(1L).activeRequestId)
     }
 
-    private fun addAttachment(
+    @Test
+    fun `critical removePendingAttachment returns false on failed persistence`() = runTest {
+        val vm = ChatViewModel()
+        vm.updateDraftText(1L, "test")
+        addAttachment(vm, 1L, PendingAttachmentIdentity("a", "text/plain", "/managed/a"))
+        val attachmentPath = vm.draft(1L).pendingAttachments.first().localPath
+
+        assertTrue(vm.removePendingAttachment(1L, attachmentPath))
+        assertTrue(vm.draft(1L).pendingAttachments.isEmpty())
+        assertFalse(vm.removePendingAttachment(1L, attachmentPath))
+    }
+
+    @Test
+    fun `critical beginSubmission returns null on in-flight submission`() = runTest {
+        val vm = ChatViewModel()
+        vm.updateDraftText(1L, "test")
+        val first = vm.beginSubmission(1L)
+        assertTrue(first != null)
+        val second = vm.beginSubmission(1L)
+        assertNull(second)
+    }
+
+    @Test
+    fun `clearDraft removes in-memory state`() = runTest {
+        val vm = ChatViewModel()
+        vm.updateDraftText(1L, "test")
+        assertTrue(vm.clearDraft(1L))
+        assertEquals("", vm.draft(1L).rawInput)
+    }
+
+    private suspend fun addAttachment(
         vm: ChatViewModel,
         conversationId: Long,
         attachment: PendingAttachmentIdentity,

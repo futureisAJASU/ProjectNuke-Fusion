@@ -2237,8 +2237,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
     ) { uris: List<Uri> ->
         val pendingImport = chatViewModel.pendingPickerImport()
         if (uris.isEmpty()) {
-            pendingImport?.let { (draftConversationId, owner) ->
-                chatViewModel.settleAttachmentImport(draftConversationId, owner.token)
+        pendingImport?.let { (draftConversationId, owner) ->
+                scope.launch { chatViewModel.settleAttachmentImport(draftConversationId, owner.token) }
             }
             return@rememberLauncherForActivityResult
         }
@@ -2457,8 +2457,10 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     attachmentRefreshKey = attachmentLifecycleRefreshKey,
                     onRemoveAttachment = { attachment ->
                         if (isGenerating || isSubmittingMessage || isImportingAttachments) return@ChatInputBar
-                        if (!chatViewModel.removePendingAttachment(conversationId, attachment.localPath)) {
-                            return@ChatInputBar
+                        scope.launch {
+                            if (!chatViewModel.removePendingAttachment(conversationId, attachment.localPath)) {
+                                return@launch
+                            }
                         }
                         scope.launch {
                             when (AttachmentStorageManager.discardPendingAttachmentFile(context, attachment.localPath)) {
@@ -2573,14 +2575,14 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                             val capturedDraftAttachments = attachmentsToSend.toList()
 
-                            val submissionSnapshot = chatViewModel.beginSubmission(conversationId)
-                                ?: return@sendClick
-                            val owner = MessageSubmissionOwner(
-                                token = submissionSnapshot.token,
-                                sourceConversationId = submissionSnapshot.conversationId,
-                            )
-
                             chatViewModel.scope.launch {
+                                val submissionSnapshot = chatViewModel.beginSubmission(conversationId)
+                                    ?: return@launch
+                                val owner = MessageSubmissionOwner(
+                                    token = submissionSnapshot.token,
+                                    sourceConversationId = submissionSnapshot.conversationId,
+                                )
+
                                 val commitState = SubmissionCommitState(conversationId = conversationId)
 
                                 try {
