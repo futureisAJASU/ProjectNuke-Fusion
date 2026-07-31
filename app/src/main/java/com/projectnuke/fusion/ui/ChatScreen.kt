@@ -116,6 +116,8 @@ import com.projectnuke.fusion.chat.ComposerImportStatus
 import com.projectnuke.fusion.chat.PendingAttachmentIdentity
 import com.projectnuke.fusion.chat.PromptHistoryBudgetRequest
 import com.projectnuke.fusion.chat.PromptHistoryBudgeter
+import com.projectnuke.fusion.chat.FinalPromptBudget
+import com.projectnuke.fusion.chat.FinalPromptBudgeter
 import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.data.ConversationEntity
@@ -733,7 +735,7 @@ fun ChatScreen(
     ): ExternalAiChatResult {
         return externalAiChatRunner.generateFromMessages(
             messages = buildExternalAiMessages(
-                messages = currentMessages,
+                messages = FinalPromptBudgeter.fit(currentMessages, FinalPromptBudget(null, true, generationSettings.maxTokens)),
                 stripAttachments = { stripSearchSourcesMetadata(parseMessageAttachments(context, it).body) }
             ),
             hasAttachments = hasAttachments,
@@ -1167,7 +1169,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 val retryAttachments = (if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend)
                                     .map { AttachmentRecord(it.name, it.mimeType, it.localPath) }
                                 add(ChatMessage(role = "user", content = buildFinalUserContent(request.promptText, retryAttachments, actualWebSearchUsed, webSearchResult)))
-                            }
+                            }.let { FinalPromptBudgeter.fit(it, FinalPromptBudget(request.selectedModelId, false, request.settings.maxTokens)) }
                             val isImageGeneration = imageAttachments.isNotEmpty()
                             val isReasoningEnabled = request.reasoningEnabled
                             when {
@@ -1374,7 +1376,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 buildConversationSummaryContextText(loadConversationSummary(context, request.conversationId))?.let { add(ChatMessage(role = "system", content = it)) }
                                 addAll(request.history)
                                 add(ChatMessage(role = "user", content = request.promptText))
-                            }
+                            }.let { FinalPromptBudgeter.fit(it, FinalPromptBudget(request.selectedModelId, false, request.settings.maxTokens)) }
                             val isReasoningEnabled = request.reasoningEnabled
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) {
                                 it.copy(generationStatus = if (isReasoningEnabled) "더 깊게 생각하는 중..." else "답변을 다시 작성하는 중입니다.")
