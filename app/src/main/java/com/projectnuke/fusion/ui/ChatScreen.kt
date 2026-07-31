@@ -1061,7 +1061,6 @@ fun ChatScreen(
                 currentRequestChars = userInstruction.length,
                 attachmentCount = attachmentsToSend.size,
                 webSearchPlanned = webSearchEnabled || shouldAutoUseWebSearch(previousUserText),
-                summaryText = conversationSummary?.summary,
             )
         ).messages
 if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
@@ -2611,7 +2610,6 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 attachmentCount = attachmentsToSend.size,
                                                 webSearchPlanned = capturedWebSearchEnabled ||
                                                     shouldAutoUseWebSearch(userInput),
-                                                summaryText = conversationSummary?.summary,
                                             )
                                         ).messages
                                     }

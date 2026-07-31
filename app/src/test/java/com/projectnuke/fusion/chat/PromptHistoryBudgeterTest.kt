@@ -115,6 +115,20 @@ class PromptHistoryBudgeterTest {
         assertWholeTurns(selected.messages.filter { it.role != "system" })
     }
 
+    @Test
+    fun `mandatory context can consume entire budget without forcing history`() {
+        val selected = select(
+            history = listOf(message("user", "old"), message("assistant", "reply")),
+            modelId = "Gemma E2B",
+            maxOutputTokens = 4_000,
+            attachmentCount = 5,
+            webSearchPlanned = true,
+        )
+
+        assertTrue(selected.messages.isEmpty())
+        assertEquals(1, selected.omittedTurnCount)
+    }
+
     private fun select(
         history: List<ChatMessage>,
         modelId: String = "Gemma E2B",

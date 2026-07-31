@@ -30,7 +30,9 @@ internal object PromptHistoryBudgeter {
             request.maxOutputTokens.coerceAtLeast(0) * 4 +
             request.attachmentCount.coerceAtLeast(0) * 2_000 +
             if (request.webSearchPlanned) 6_000 else 0
-        var remaining = (contextChars - reserved).coerceAtLeast(2_000)
+        // Mandatory content may consume the entire context. Never invent history
+        // capacity that would exceed the selected provider/model budget.
+        var remaining = (contextChars - reserved).coerceAtLeast(0)
 
         val systemMessages = request.history
             .filter { it.role == "system" }
