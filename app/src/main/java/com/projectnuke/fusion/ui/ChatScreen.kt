@@ -7556,22 +7556,6 @@ private fun evaluateModelSelectionDecision(
         recommendedMaxTokens = risk.recommendedMaxTokens,
         deviceRamClass = risk.ramClass.label
     )
-    @Suppress("UNREACHABLE_CODE")
-    val sizeGb = spec.modelSizeEstimateGb ?: 0f
-    val eightGbClass = memoryInfo.totalRamGb in 7.0f..8.5f
-    val lowAvailRam = memoryInfo.availableRamGb < 1.25f
-    val highRisk = tier == "주의 필요" || tier == "권장하지 않음" ||
-        spec.memoryClass == ModelMemoryClass.HIGH ||
-        spec.recommendedDeviceClass in listOf(ModelRecommendedDeviceClass.RAM_12GB_RECOMMENDED, ModelRecommendedDeviceClass.RAM_16GB_RECOMMENDED, ModelRecommendedDeviceClass.SERVER_ONLY) && eightGbClass ||
-        (eightGbClass && sizeGb >= 4.0f) || lowAvailRam || !memoryInfo.warning.isNullOrBlank()
-    return ModelSelectionDecision(
-        spec = spec,
-        level = if (highRisk) ModelSelectRiskLevel.CAUTION else ModelSelectRiskLevel.DIRECT,
-        reason = if (highRisk) "caution confirmation" else "selected directly",
-        recommendationTier = tier,
-        recommendedMaxTokens = recommendation?.recommendedTokens ?: buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb).value,
-        deviceRamClass = ramClassLabel(memoryInfo.totalRamGb)
-    )
 }
 
 private fun isSelectableLocally(spec: FusionModelSpec): Boolean {
@@ -8080,7 +8064,6 @@ private fun evaluateModelRecommendation(
         includedInRecommendedLocal = dynamicIncluded,
         includeReason = if (dynamicIncluded) "included" else "risk_excluded"
     )
-    @Suppress("UNREACHABLE_CODE")
     val token = buildDeviceAwareTokenRecommendation(spec, totalRamGb, availableRamGb).value.coerceAtLeast(1024)
     val hintParts = mutableListOf("MTP 끔")
     if (!spec.recommendedReasoningEnabled || totalRamGb <= 8.5f) hintParts += "Reasoning 끔"
@@ -8224,7 +8207,6 @@ private fun buildModelMemoryWarning(
     return evaluation.reason.takeUnless {
         evaluation.tier == FusionModelMemoryRiskLevel.RECOMMENDED.label
     }
-    @Suppress("UNREACHABLE_CODE")
     if (evaluation.tier == "원격 전용") {
         return "이 모델은 모바일 로컬 실행용이 아닙니다."
     }
@@ -8261,7 +8243,6 @@ private fun buildDeviceAwareTokenRecommendation(
         label = if (recommended > 0) "권장 토큰 수: 약 $recommended" else "권장 토큰 수: 원격 실행 권장",
         explanation = "현재 기기의 총 메모리와 사용 가능한 메모리를 기준으로 권장값을 계산했습니다."
     )
-    @Suppress("UNREACHABLE_CODE")
     val sizeGb = spec.modelSizeEstimateGb ?: when (spec.memoryClass) {
         ModelMemoryClass.LOW -> 1.5f
         ModelMemoryClass.MEDIUM -> 3.5f
