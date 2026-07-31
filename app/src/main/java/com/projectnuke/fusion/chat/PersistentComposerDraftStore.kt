@@ -9,7 +9,7 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal class PersistentComposerDraftStore(
+internal open class PersistentComposerDraftStore(
     private val file: File,
     private val resolveManagedAttachment: (String) -> File?,
     private val registerPendingAttachment: (File) -> String?,
@@ -25,7 +25,7 @@ internal class PersistentComposerDraftStore(
     private val writeMutex = Mutex()
     private var latestWriteId = 0L
 
-    suspend fun load(): Map<Long, ComposerDraftState> = writeMutex.withLock {
+    open suspend fun load(): Map<Long, ComposerDraftState> = writeMutex.withLock {
         val raw = runCatching {
             if (!file.isFile || file.length() > MAX_FILE_BYTES) return@runCatching null
             file.readText(Charsets.UTF_8)
@@ -33,7 +33,7 @@ internal class PersistentComposerDraftStore(
         decode(raw)
     }
 
-    suspend fun write(writeId: Long, drafts: Map<Long, ComposerDraftState>): Boolean =
+    open suspend fun write(writeId: Long, drafts: Map<Long, ComposerDraftState>): Boolean =
         writeMutex.withLock {
             if (writeId < latestWriteId) return@withLock false
             latestWriteId = writeId

@@ -20,6 +20,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class ConversationGenerationState(
     val isGenerating: Boolean = false,
@@ -75,11 +77,13 @@ class ChatViewModel(
     private val _states = MutableStateFlow<Map<Long, ConversationGenerationState>>(emptyMap())
     val states: StateFlow<Map<Long, ConversationGenerationState>> = _states.asStateFlow()
 
-    private val draftStore = context?.let(::PersistentComposerDraftStore)
+    private val draftStore: PersistentComposerDraftStore? = context?.let(::PersistentComposerDraftStore)
     private var draftPersistJob: Job? = null
     private var draftWriteId = 0L
     private val draftHydrated = CompletableDeferred<Unit>()
-    private val locallyMutatedDrafts = mutableSetOf<Long>()
+    private val draftMutationLock = Mutex()
+    private val pendingMutations = mutableMapOf<Long, (ComposerDraftState?) -> ComposerDraftState?>()
+    private val deletedBeforeHydration = mutableSetOf<Long>()
     private val _composerDrafts = MutableStateFlow(emptyMap<Long, ComposerDraftState>())
     val composerDrafts: StateFlow<Map<Long, ComposerDraftState>> = _composerDrafts.asStateFlow()
 
@@ -93,10 +97,21 @@ class ChatViewModel(
             viewModelScope.launch(Dispatchers.IO) {
                 try {
                     val restored = store.load()
-                    _composerDrafts.update { current ->
-                        restored + current.mapValues { (id, draft) ->
-                            if (id in locallyMutatedDrafts) draft
-                            else restored[id] ?: draft
+                    draftMutationLock.withLock {
+                        val merged = restored.toMutableMap()
+                        for ((id, mutation) in pendingMutations) {
+                            val current = merged[id]
+                            val result = mutation(current)
+                            if (result != null) merged[id] = result
+                            else merged.remove(id)
+                        }
+                        pendingMutations.clear()
+                        val tombstones = deletedBeforeHydration.toSet()
+                        _composerDrafts.update { current ->
+                            val result = current.toMutableMap()
+                            tombstones.forEach { result.remove(it) }
+                            merged.forEach { (id, draft) -> result[id] = draft }
+                            result
                         }
                     }
                 } finally {
@@ -323,8 +338,18 @@ class ChatViewModel(
     }
 
     suspend fun clearDraft(conversationId: Long): Boolean {
-        _composerDrafts.update { current ->
-            if (conversationId !in current) current else current - conversationId
+        draftMutationLock.withLock {
+            if (draftHydrated.isCompleted) {
+                _composerDrafts.update { current ->
+                    if (conversationId !in current) current else current - conversationId
+                }
+            } else {
+                deletedBeforeHydration += conversationId
+                pendingMutations.remove(conversationId)
+                _composerDrafts.update { current ->
+                    if (conversationId !in current) current else current - conversationId
+                }
+            }
         }
         return persistDraftCritical()
     }
@@ -332,21 +357,38 @@ class ChatViewModel(
     private inline fun updateDraft(
         conversationId: Long,
         immediate: Boolean,
-        transform: (ComposerDraftState) -> ComposerDraftState,
+        crossinline transform: (ComposerDraftState) -> ComposerDraftState,
     ) {
+        val now = draftHydrated.isCompleted
+        if (!now) {
+            viewModelScope.launch {
+                draftMutationLock.withLock {
+                    pendingMutations[conversationId] = { current ->
+                        val base = current ?: ComposerDraftState()
+                        transform(base)
+                    }
+                }
+            }
+        }
         _composerDrafts.update { current ->
             val existing = current[conversationId] ?: ComposerDraftState()
             val updated = transform(existing)
             if (updated == existing) current else current + (conversationId to updated)
         }
-        locallyMutatedDrafts += conversationId
         scheduleDraftPersist(immediate)
     }
 
     private suspend fun updateDraftCritical(
         conversationId: Long,
         transform: (ComposerDraftState) -> ComposerDraftState?,
-    ): Boolean {
+    ): Boolean = draftMutationLock.withLock {
+        if (!draftHydrated.isCompleted) {
+            if (conversationId in deletedBeforeHydration) return@withLock false
+            pendingMutations[conversationId] = { current ->
+                val base = current ?: ComposerDraftState()
+                transform(base)
+            }
+        }
         var changed = false
         _composerDrafts.update { current ->
             val existing = current[conversationId] ?: ComposerDraftState()
@@ -355,13 +397,12 @@ class ChatViewModel(
             changed = true
             current + (conversationId to result)
         }
-        if (!changed) return false
-        locallyMutatedDrafts += conversationId
+        if (!changed) return@withLock false
         val writeId = ++draftWriteId
         draftPersistJob?.cancel()
-        val store = draftStore ?: return true
+        val store = draftStore ?: return@withLock true
         draftHydrated.await()
-        return store.write(writeId, _composerDrafts.value)
+        store.write(writeId, _composerDrafts.value)
     }
 
     private suspend fun persistDraftCritical(): Boolean {
@@ -408,5 +449,12 @@ class ChatViewModel(
                     ) as T
                 }
             }
+
+        internal fun forTesting(store: PersistentComposerDraftStore): ChatViewModel =
+            ChatViewModel().apply { draftStoreField.set(this, store) }
+
+        private val draftStoreField by lazy {
+            ChatViewModel::class.java.getDeclaredField("draftStore").apply { isAccessible = true }
+        }
     }
 }
