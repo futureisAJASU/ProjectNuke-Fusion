@@ -47,9 +47,9 @@ fun saveConversationSummary(
 fun deleteConversationSummary(
     context: Context,
     conversationId: Long
-) {
-    if (conversationId <= 0L) return
-    context.getSharedPreferences(ConversationSummaryPrefs, Context.MODE_PRIVATE)
+): Boolean {
+    if (conversationId <= 0L) return true
+    return context.getSharedPreferences(ConversationSummaryPrefs, Context.MODE_PRIVATE)
         .edit()
         .remove(summaryKey(conversationId))
         .remove(updatedAtKey(conversationId))

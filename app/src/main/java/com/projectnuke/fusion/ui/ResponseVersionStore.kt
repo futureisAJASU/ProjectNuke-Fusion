@@ -36,9 +36,9 @@ internal fun loadResponseVersionState(context: Context, conversationId: Long): R
     }.getOrDefault(ResponseVersionState())
 }
 
-internal fun deleteResponseVersionState(context: Context, conversationId: Long) {
-    if (conversationId <= 0L) return
-    context.getSharedPreferences(ResponseVersionPrefsName, Context.MODE_PRIVATE)
+internal fun deleteResponseVersionState(context: Context, conversationId: Long): Boolean {
+    if (conversationId <= 0L) return true
+    return context.getSharedPreferences(ResponseVersionPrefsName, Context.MODE_PRIVATE)
         .edit()
         .remove(conversationId.toString())
         .commit()

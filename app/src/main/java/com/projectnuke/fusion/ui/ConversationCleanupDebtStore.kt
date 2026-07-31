@@ -43,9 +43,10 @@ internal object ConversationCleanupDebtStore {
 
     suspend fun retry(context: Context, dao: ChatDao, limit: Int = 4) = withContext(Dispatchers.IO) {
         val entries = synchronized(lock) { loadLocked(context) }
-        val processed = entries.take(limit)
+        val pending = entries.filter { it.attempts < MAX_ATTEMPTS }.take(limit)
+        val terminal = entries.filter { it.attempts >= MAX_ATTEMPTS }
         val remaining = entries.toMutableList()
-        processed.forEach { entry ->
+        pending.forEach { entry ->
             val success = runCatching {
                 deleteResponseVersionState(context, entry.conversationId)
                 deleteConversationSummary(context, entry.conversationId)
@@ -57,11 +58,11 @@ internal object ConversationCleanupDebtStore {
                 AttachmentStorageManager.cleanupUnreferencedAttachments(context, dao)
             }.isSuccess
             remaining.remove(entry)
-            if (!success && entry.attempts < MAX_ATTEMPTS) {
+            if (!success) {
                 remaining += entry.copy(attempts = entry.attempts + 1, lastAttemptAt = System.currentTimeMillis())
             }
         }
-        synchronized(lock) { persistLocked(context, remaining.takeLast(MAX_ENTRIES)) }
+        synchronized(lock) { persistLocked(context, (remaining + terminal).takeLast(MAX_ENTRIES)) }
     }
 
     private fun loadLocked(context: Context): List<ConversationCleanupDebt> {

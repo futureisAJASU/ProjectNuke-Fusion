@@ -42,12 +42,12 @@ internal suspend fun deleteConversationProduction(
         },
         cleanupDerivedData = {
             withContext(Dispatchers.IO) {
-                check(deleteResponseVersionStateSafely(appContext, conversationId))
+                deleteResponseVersionStateSafely(appContext, conversationId)
                 deleteConversationSummary(appContext, conversationId)
-                check(deleteConversationOnlyMemoryCandidates(appContext, conversationId))
-                check(FusionResponseRatings.deleteForMessages(appContext, deletedMessageIds))
+                deleteConversationOnlyMemoryCandidates(appContext, conversationId)
+                FusionResponseRatings.deleteForMessages(appContext, deletedMessageIds)
                 targetPendingPaths.forEach { path ->
-                    check(AttachmentStorageManager.deletePendingAttachmentFile(appContext, path))
+                    AttachmentStorageManager.deletePendingAttachmentFile(appContext, path)
                 }
                 AttachmentStorageManager.cleanupUnreferencedAttachments(appContext, dao)
                 removeConversationCleanupDebt(appContext, conversationId)
