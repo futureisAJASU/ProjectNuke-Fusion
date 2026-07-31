@@ -79,9 +79,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.foundation.layout.widthIn
 
@@ -257,33 +259,32 @@ fun ConversationListScreenV2(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val payload = buildSettingsBackupJson(context, prefs)
-        runCatching {
-            val stream = context.contentResolver.openOutputStream(uri)
-                ?: error("Unable to open export target")
-            stream.bufferedWriter().use { it.write(payload) }
-        }.onSuccess {
-            Toast.makeText(context, "설정을 내보냈습니다.", Toast.LENGTH_SHORT).show()
-            Log.d("FusionModelSelect", "settings_export schema=1 keys=settings,modelLibrary success=true")
-        }.onFailure {
-            Toast.makeText(context, "설정 파일을 쓸 수 없습니다.", Toast.LENGTH_SHORT).show()
-            Log.d("FusionModelSelect", "settings_export schema=1 keys=settings,modelLibrary success=false")
+        scope.launch {
+            val success = withContext(Dispatchers.IO) {
+                runCatching {
+                    val payload = buildSettingsBackupJson(context, prefs)
+                    context.contentResolver.openOutputStream(uri)?.use { output ->
+                        writeBoundedSettingsStream(output, payload)
+                    } ?: false
+                }.getOrDefault(false)
+            }
+            Toast.makeText(context, if (success) "Settings backup exported." else "Settings backup could not be written.", Toast.LENGTH_SHORT).show()
         }
     }
     val settingsBackupImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val text = runCatching {
-            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-        }.getOrNull()
-        if (text.isNullOrBlank()) {
-            Toast.makeText(context, "설정 파일을 읽을 수 없습니다.", Toast.LENGTH_SHORT).show()
-        } else {
-            pendingSettingsRestoreJson = text
+        scope.launch {
+            when (val result = readSettingsBackup(context, uri)) {
+                is SettingsBackupReadResult.Success -> {
+                    if (result.text.isBlank()) Toast.makeText(context, "Settings backup is empty.", Toast.LENGTH_SHORT).show()
+                    else pendingSettingsRestoreJson = result.text
+                }
+                else -> Toast.makeText(context, "Settings backup could not be read.", Toast.LENGTH_SHORT).show()
+            }
         }
     }
-
     fun saveSettings() {
         prefs.edit()
             .putBoolean("reasoning_enabled", reasoningEnabled)
