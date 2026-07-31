@@ -926,18 +926,17 @@ fun ChatScreen(
             extractingMemoryCandidates = false
         }
     }
-    LaunchedEffect(chatViewModel, conversationId) {
-        chatViewModel.states.collect { states ->
-            val cur = states[conversationId]
-                ?: com.projectnuke.fusion.chat.ConversationGenerationState()
-            if (currentConversationId == conversationId) {
-                isGenerating = cur.isGenerating
-                streamingAssistantText = cur.streamingText
-                streamingMetricsLine = cur.streamingMetricsLine
-                generationStatus = cur.generationStatus
-                regeneratingMessageId = cur.regeneratingMessageId
-                extractingMemoryCandidates = cur.extractingMemoryCandidates
-            }
+    val generationStates by chatViewModel.states.collectAsStateWithLifecycle()
+    val currentGenerationState = generationStates[conversationId]
+        ?: com.projectnuke.fusion.chat.ConversationGenerationState()
+    LaunchedEffect(currentGenerationState, currentConversationId, conversationId) {
+        if (currentConversationId == conversationId) {
+            isGenerating = currentGenerationState.isGenerating
+            streamingAssistantText = currentGenerationState.streamingText
+            streamingMetricsLine = currentGenerationState.streamingMetricsLine
+            generationStatus = currentGenerationState.generationStatus
+            regeneratingMessageId = currentGenerationState.regeneratingMessageId
+            extractingMemoryCandidates = currentGenerationState.extractingMemoryCandidates
         }
     }
 

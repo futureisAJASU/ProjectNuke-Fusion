@@ -6,6 +6,7 @@ import java.net.URL
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
@@ -58,12 +59,14 @@ internal class BoundedHttpClient(
     suspend fun execute(request: BoundedHttpRequest): BoundedHttpResponse =
         withContext(Dispatchers.IO) {
             val activeConnection = AtomicReference<HttpURLConnection?>()
+            val cancelled = AtomicBoolean(false)
             suspendCancellableCoroutine { continuation ->
                 continuation.invokeOnCancellation {
+                    cancelled.set(true)
                     activeConnection.getAndSet(null)?.disconnect()
                 }
                 try {
-                    val response = executeBlocking(request, activeConnection)
+                    val response = executeBlocking(request, activeConnection, cancelled)
                     if (continuation.isActive) continuation.resume(response)
                 } catch (cancellation: CancellationException) {
                     if (continuation.isActive) continuation.cancel(cancellation)
@@ -76,6 +79,7 @@ internal class BoundedHttpClient(
     private fun executeBlocking(
         initialRequest: BoundedHttpRequest,
         activeConnection: AtomicReference<HttpURLConnection?>,
+        cancelled: AtomicBoolean,
     ): BoundedHttpResponse {
         var currentUrl = URL(initialRequest.url)
         var method = initialRequest.method.uppercase()
@@ -83,6 +87,7 @@ internal class BoundedHttpClient(
         val hasSensitiveHeaders = initialRequest.headers.keys.any(::isSensitiveHeader)
 
         repeat(MAX_REDIRECTS + 1) { redirectIndex ->
+            checkCancellation(cancelled)
             val connection = connectionFactory.open(currentUrl).apply {
                 requestMethod = method
                 connectTimeout = connectTimeoutMs
@@ -103,6 +108,7 @@ internal class BoundedHttpClient(
                 }
                 val status = connection.responseCode
                 if (status in REDIRECT_STATUSES) {
+                    checkCancellation(cancelled)
                     if (redirectIndex >= MAX_REDIRECTS) {
                         throw BoundedHttpException(
                             BoundedHttpFailure.TOO_MANY_REDIRECTS,
@@ -161,6 +167,7 @@ internal class BoundedHttpClient(
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     var total = 0
                     while (true) {
+                        checkCancellation(cancelled)
                         val read = input.read(buffer)
                         if (read < 0) break
                         if (read == 0) continue
@@ -196,6 +203,10 @@ internal class BoundedHttpClient(
             BoundedHttpFailure.TOO_MANY_REDIRECTS,
             "Too many redirects",
         )
+    }
+
+    private fun checkCancellation(cancelled: AtomicBoolean) {
+        if (cancelled.get()) throw CancellationException("HTTP request cancelled")
     }
 
     private fun String?.charsetFromContentType(): Charset {
