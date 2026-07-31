@@ -100,7 +100,9 @@ internal class BoundedHttpClient(
             activeConnection.set(connection)
             var handedOff = false
             try {
+                checkCancellation(cancelled)
                 body?.let { requestBody ->
+                    checkCancellation(cancelled)
                     connection.outputStream.use { output ->
                         output.write(requestBody)
                         output.flush()
