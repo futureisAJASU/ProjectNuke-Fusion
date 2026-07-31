@@ -86,6 +86,7 @@ internal class ModelDownloadCoordinator(
         }
 
         val part = File(parent, ".${target.name}.${UUID.randomUUID()}.part")
+        val backup = File(parent, ".${target.name}.${UUID.randomUUID()}.bak")
         runCatching { if (part.exists()) part.delete() }
 
         var connection: HttpURLConnection? = null
@@ -167,14 +168,26 @@ internal class ModelDownloadCoordinator(
                 return ModelDownloadResult.Failure(ModelDownloadFailure.STORAGE_FULL, status)
             }
 
+            val hadPrevious = target.isFile
+            if (hadPrevious) {
+                runCatching {
+                    Files.move(target.toPath(), backup.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                }.getOrElse {
+                    return ModelDownloadResult.Failure(ModelDownloadFailure.ATOMIC_ADOPTION, status)
+                }
+            }
             try {
                 atomicAdopter.adopt(part.toPath(), target.toPath())
             } catch (_: Exception) {
+                if (hadPrevious && !target.exists()) runCatching { Files.move(backup.toPath(), target.toPath()) }
                 return ModelDownloadResult.Failure(ModelDownloadFailure.ATOMIC_ADOPTION, status)
             }
             if (!target.isFile || target.length() != copied) {
+                runCatching { if (target.exists()) target.delete() }
+                if (hadPrevious) runCatching { Files.move(backup.toPath(), target.toPath()) }
                 return ModelDownloadResult.Failure(ModelDownloadFailure.ATOMIC_ADOPTION, status)
             }
+            runCatching { if (backup.exists()) backup.delete() }
 
             onProgress(100)
             return ModelDownloadResult.Success(target, copied)
@@ -188,6 +201,10 @@ internal class ModelDownloadCoordinator(
             connection?.disconnect()
             if (part.exists() && !runCatching { part.delete() }.getOrDefault(false)) {
                 part.deleteOnExit()
+            }
+            if (backup.exists()) {
+                if (!target.exists()) runCatching { Files.move(backup.toPath(), target.toPath()) }
+                else runCatching { backup.delete() }
             }
         }
     }
