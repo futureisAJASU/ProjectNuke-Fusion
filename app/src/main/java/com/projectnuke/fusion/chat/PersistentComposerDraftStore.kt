@@ -48,6 +48,15 @@ internal open class PersistentComposerDraftStore(
             }
         }
 
+    /** The draft owner assigns the sequence; callers must not write this file directly. */
+    open suspend fun write(drafts: Map<Long, ComposerDraftState>): Boolean {
+        val nextWriteId = synchronized(this@PersistentComposerDraftStore) {
+            latestWriteId += 1L
+            latestWriteId
+        }
+        return write(nextWriteId, drafts)
+    }
+
     private fun decode(raw: String): Map<Long, ComposerDraftState> = runCatching {
         val result = LinkedHashMap<Long, ComposerDraftState>()
         val array = JSONArray(raw)

@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Single serialized owner of every draft mutation and of hydration.
@@ -34,7 +33,6 @@ internal class ChatDraftStateMachine(
     private val _drafts = MutableStateFlow(emptyMap<Long, ComposerDraftState>())
     val drafts: StateFlow<Map<Long, ComposerDraftState>> = _drafts.asStateFlow()
     private val hydrated = CompletableDeferred<Unit>()
-    private val writeIds = AtomicLong(0L)
     private var debounceJob: Job? = null
     private var hydrationApplied = false
     private val tombstoned = mutableSetOf<Long>()
@@ -111,6 +109,25 @@ internal class ChatDraftStateMachine(
         return reply.await()
     }
 
+    suspend fun reconcileCommittedSubmission(
+        draftKey: Long,
+        token: String,
+        capturedRawInput: String,
+        committedPaths: Set<String>,
+    ): Boolean {
+        val reply = CompletableDeferred<Boolean>()
+        commands.trySend(
+            DraftCommand.ReconcileCommitted(
+                draftKey = draftKey,
+                token = token,
+                capturedRawInput = capturedRawInput,
+                committedPaths = committedPaths,
+                reply = reply,
+            )
+        )
+        return reply.await()
+    }
+
     fun importOwnership(conversationId: Long): ComposerImportOwnership? =
         drafts.value[conversationId]?.importOwnership
 
@@ -119,6 +136,7 @@ internal class ChatDraftStateMachine(
             is DraftCommand.Hydrate -> hydrate(command)
             is DraftCommand.Mutate -> mutate(command)
             is DraftCommand.Clear -> clear(command)
+            is DraftCommand.ReconcileCommitted -> reconcileCommitted(command)
             is DraftCommand.PersistDebounced -> persistDebounced(command)
         }
     }
@@ -247,9 +265,33 @@ internal class ChatDraftStateMachine(
         durableWrite()
     }
 
+    private suspend fun reconcileCommitted(command: DraftCommand.ReconcileCommitted) {
+        val before = _drafts.value
+        val current = before[command.draftKey]
+        if (current == null || current.activeSubmissionToken != command.token) {
+            command.reply.complete(true)
+            return
+        }
+        val updated = current.copy(
+            rawInput = if (current.rawInput == command.capturedRawInput) "" else current.rawInput,
+            pendingAttachments = current.pendingAttachments.filterNot {
+                it.localPath in command.committedPaths
+            },
+            activeSubmissionToken = null,
+            version = current.version + 1L,
+        )
+        _drafts.value = before + (command.draftKey to updated)
+        if (durableWrite()) {
+            command.reply.complete(true)
+        } else {
+            _drafts.value = before
+            command.reply.complete(false)
+        }
+    }
+
     private suspend fun durableWrite(): Boolean {
         val store = store ?: return true
-        return store.write(writeIds.incrementAndGet(), _drafts.value)
+        return store.write(_drafts.value)
     }
 
     private fun scheduleDebouncedPersist(debounceMs: Long) {
@@ -280,6 +322,14 @@ internal sealed interface DraftCommand {
     data class Clear(
         val conversationId: Long,
         val reply: CompletableDeferred<Boolean>?,
+    ) : DraftCommand
+
+    data class ReconcileCommitted(
+        val draftKey: Long,
+        val token: String,
+        val capturedRawInput: String,
+        val committedPaths: Set<String>,
+        val reply: CompletableDeferred<Boolean>,
     ) : DraftCommand
 
     data class PersistDebounced(val store: PersistentComposerDraftStore) : DraftCommand

@@ -9,8 +9,10 @@ import androidx.lifecycle.createSavedStateHandle
 import android.content.Context
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -143,10 +145,12 @@ class ChatViewModel(
         cleanupDerivedData: suspend () -> Unit,
         recordCleanupDebt: suspend () -> Unit,
     ): Deferred<ConversationDeletionResult> {
-        val existing = deletionDeferreds[conversationId]
-        if (existing != null && !existing.isCompleted) return existing
+        deletionDeferreds[conversationId]?.let { return it }
+        val candidate = CompletableDeferred<ConversationDeletionResult>()
+        val installed = deletionDeferreds.putIfAbsent(conversationId, candidate)
+        if (installed != null) return installed
 
-        val deferred = viewModelScope.async {
+        val worker = viewModelScope.launch {
             val deletionReason = "delete-conversation"
             val ownsDeletionOwnership =
                 registry.claimDeletionOwnership(conversationId, deletionReason)
@@ -162,20 +166,22 @@ class ChatViewModel(
                     cleanupDerivedData = cleanupDerivedData,
                     recordCleanupDebt = recordCleanupDebt,
                 )
-                deletionDeferreds.remove(conversationId)
-                result
+                candidate.complete(result)
+            } catch (cancelled: CancellationException) {
+                candidate.cancel(cancelled)
+            } catch (failure: Throwable) {
+                candidate.completeExceptionally(failure)
             } finally {
                 if (ownsDeletionOwnership) {
                     registry.releaseDeletionOwnership(conversationId, deletionReason)
                 }
+                deletionDeferreds.remove(conversationId, candidate)
             }
         }
-        val previous = deletionDeferreds.putIfAbsent(conversationId, deferred)
-        if (previous != null) {
-            deferred.cancel()
-            return previous
+        candidate.invokeOnCompletion { cause ->
+            if (cause is CancellationException) worker.cancel(cause)
         }
-        return deferred
+        return candidate
     }
 
     fun draft(conversationId: Long): ComposerDraftState =
@@ -304,20 +310,12 @@ class ChatViewModel(
         snapshot: ComposerSubmissionSnapshot,
         committedPaths: List<String>,
     ): Boolean {
-        var accepted = false
-        return draftMachine.updateCritical(snapshot.conversationId) { current ->
-            if (current.activeSubmissionToken != snapshot.token) null
-            else {
-                accepted = true
-                val committed = committedPaths.toSet()
-                current.copy(
-                    rawInput = if (current.rawInput == snapshot.rawInput) "" else current.rawInput,
-                    pendingAttachments = current.pendingAttachments.filterNot { it.localPath in committed },
-                    activeSubmissionToken = null,
-                    version = current.version + 1L,
-                )
-            }
-        } && accepted
+        return draftMachine.reconcileCommittedSubmission(
+            draftKey = snapshot.conversationId,
+            token = snapshot.token,
+            capturedRawInput = snapshot.rawInput,
+            committedPaths = committedPaths.toSet(),
+        )
     }
 
     suspend fun clearDraft(conversationId: Long): Boolean =

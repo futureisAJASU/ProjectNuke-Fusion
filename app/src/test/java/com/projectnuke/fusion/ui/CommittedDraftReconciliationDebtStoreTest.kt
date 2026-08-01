@@ -19,15 +19,15 @@ class CommittedDraftReconciliationDebtStoreTest {
         val debt = CommittedDraftReconciliationDebt(1L, "token-a", "hello", setOf("/managed/a"), 0, 0L)
 
         repeat(70) { i ->
-            CommittedDraftReconciliationDebtStore.record(file, debt.copy(conversationId = i.toLong()))
+            CommittedDraftReconciliationDebtStore.record(file, debt.copy(draftKey = i.toLong()))
         }
-        CommittedDraftReconciliationDebtStore.record(file, debt.copy(conversationId = 1L, token = "token-b"))
+        CommittedDraftReconciliationDebtStore.record(file, debt.copy(draftKey = 1L, token = "token-b"))
         CommittedDraftReconciliationDebtStore.record(file, debt)
         assertEquals(64, loadAll(file).size)
 
         CommittedDraftReconciliationDebtStore.remove(file, 1L, "token-a")
-        assertTrue(loadAll(file).none { it.conversationId == 1L && it.token == "token-a" })
-        assertTrue(loadAll(file).any { it.conversationId == 1L && it.token == "token-b" })
+        assertTrue(loadAll(file).none { it.draftKey == 1L && it.token == "token-a" })
+        assertTrue(loadAll(file).any { it.draftKey == 1L && it.token == "token-b" })
         dir.deleteRecursively()
     }
 
@@ -80,7 +80,7 @@ class CommittedDraftReconciliationDebtStoreTest {
         CommittedDraftReconciliationDebtStore.record(
             debtFile,
             CommittedDraftReconciliationDebt(
-                conversationId = 7L,
+                draftKey = 7L,
                 token = "token-a",
                 capturedRawInput = "hello",
                 committedPaths = setOf(managedA.absolutePath),
@@ -90,7 +90,17 @@ class CommittedDraftReconciliationDebtStoreTest {
         )
 
         val reconciled = CommittedDraftReconciliationDebtStore.retry(
-            store = store,
+            owner = DraftReconciliationOwner { debt ->
+                val drafts = store.load()
+                val current = drafts[debt.draftKey] ?: return@DraftReconciliationOwner DraftReconciliationResult(true, true)
+                if (current.activeSubmissionToken != debt.token) return@DraftReconciliationOwner DraftReconciliationResult(true, false)
+                DraftReconciliationResult(store.write(drafts + (debt.draftKey to current.copy(
+                    rawInput = if (current.rawInput == debt.capturedRawInput) "" else current.rawInput,
+                    pendingAttachments = current.pendingAttachments.filterNot { it.localPath in debt.committedPaths },
+                    activeSubmissionToken = null,
+                    version = current.version + 1L,
+                ))), true)
+            },
             unregisterPath = { unregistered += it },
             file = debtFile,
             limit = 4,
@@ -131,7 +141,7 @@ class CommittedDraftReconciliationDebtStoreTest {
         CommittedDraftReconciliationDebtStore.record(
             debtFile,
             CommittedDraftReconciliationDebt(
-                conversationId = 7L,
+                draftKey = 7L,
                 token = "token-stale",
                 capturedRawInput = "hello",
                 committedPaths = setOf("/managed/a"),
@@ -141,7 +151,11 @@ class CommittedDraftReconciliationDebtStoreTest {
         )
 
         val reconciled = CommittedDraftReconciliationDebtStore.retry(
-            store = store,
+            owner = DraftReconciliationOwner { debt ->
+                val current = store.load()[debt.draftKey] ?: return@DraftReconciliationOwner DraftReconciliationResult(true, true)
+                if (current.activeSubmissionToken != debt.token) return@DraftReconciliationOwner DraftReconciliationResult(true, false)
+                DraftReconciliationResult(store.write(store.load()), true)
+            },
             unregisterPath = { unregistered += it },
             file = debtFile,
             limit = 4,
@@ -170,7 +184,7 @@ class CommittedDraftReconciliationDebtStoreTest {
         CommittedDraftReconciliationDebtStore.record(
             debtFile,
             CommittedDraftReconciliationDebt(
-                conversationId = 7L,
+                draftKey = 7L,
                 token = "token-a",
                 capturedRawInput = "hello",
                 committedPaths = setOf("/managed/a"),
@@ -180,7 +194,7 @@ class CommittedDraftReconciliationDebtStoreTest {
         )
 
         val reconciled = CommittedDraftReconciliationDebtStore.retry(
-            store = store,
+            owner = DraftReconciliationOwner { DraftReconciliationResult(true, true) },
             unregisterPath = { unregistered += it },
             file = debtFile,
             limit = 4,
@@ -200,7 +214,7 @@ class CommittedDraftReconciliationDebtStoreTest {
         CommittedDraftReconciliationDebtStore.record(
             debtFile,
             CommittedDraftReconciliationDebt(
-                conversationId = 7L,
+                draftKey = 7L,
                 token = "token-a",
                 capturedRawInput = "hello",
                 committedPaths = setOf("/managed/a"),
@@ -210,7 +224,7 @@ class CommittedDraftReconciliationDebtStoreTest {
         )
 
         val reconciled = CommittedDraftReconciliationDebtStore.retry(
-            store = store,
+            owner = DraftReconciliationOwner { DraftReconciliationResult(false, false) },
             unregisterPath = {},
             file = debtFile,
             limit = 4,
@@ -218,7 +232,7 @@ class CommittedDraftReconciliationDebtStoreTest {
 
         assertEquals(0, reconciled)
         val retained = loadAll(debtFile).single()
-        assertEquals(7L, retained.conversationId)
+        assertEquals(7L, retained.draftKey)
         assertEquals(1, retained.attempts)
         dir.deleteRecursively()
     }
@@ -229,7 +243,7 @@ class CommittedDraftReconciliationDebtStoreTest {
         return (0 until array.length()).mapNotNull { index ->
             val item = array.optJSONObject(index) ?: return@mapNotNull null
             CommittedDraftReconciliationDebt(
-                conversationId = item.optLong("id"),
+                draftKey = item.optLong("id"),
                 token = item.optString("token"),
                 capturedRawInput = item.optString("rawInput"),
                 committedPaths = item.optJSONArray("paths")?.let { paths ->

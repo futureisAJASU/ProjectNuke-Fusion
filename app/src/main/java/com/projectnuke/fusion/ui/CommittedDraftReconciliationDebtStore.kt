@@ -1,8 +1,6 @@
 package com.projectnuke.fusion.ui
 
 import android.content.Context
-import com.projectnuke.fusion.chat.PersistentComposerDraftStore
-import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.writeTextAtomically
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -11,13 +9,22 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 internal data class CommittedDraftReconciliationDebt(
-    val conversationId: Long,
+    val draftKey: Long,
     val token: String,
     val capturedRawInput: String,
     val committedPaths: Set<String>,
     val attempts: Int,
     val lastAttemptAt: Long,
 )
+
+internal data class DraftReconciliationResult(
+    val success: Boolean,
+    val releasePaths: Boolean,
+)
+
+internal fun interface DraftReconciliationOwner {
+    suspend fun reconcile(debt: CommittedDraftReconciliationDebt): DraftReconciliationResult
+}
 
 /**
  * Durable record of a composer reconciliation that could not settle when the message was
@@ -41,7 +48,7 @@ internal object CommittedDraftReconciliationDebtStore {
 
     fun record(file: File, debt: CommittedDraftReconciliationDebt): Boolean = synchronized(lock) {
         val current = loadLocked(file).filterNot {
-            it.conversationId == debt.conversationId && it.token == debt.token
+            it.draftKey == debt.draftKey && it.token == debt.token
         }
         val bounded = (current + debt.copy(
             token = debt.token.take(MAX_TOKEN_CHARS),
@@ -51,25 +58,17 @@ internal object CommittedDraftReconciliationDebtStore {
         persistLocked(file, bounded)
     }
 
-    fun remove(context: Context, conversationId: Long, token: String): Boolean =
-        remove(File(context.filesDir, FILE_NAME), conversationId, token)
+    fun remove(context: Context, draftKey: Long, token: String): Boolean =
+        remove(File(context.filesDir, FILE_NAME), draftKey, token)
 
-    fun remove(file: File, conversationId: Long, token: String): Boolean = synchronized(lock) {
+    fun remove(file: File, draftKey: Long, token: String): Boolean = synchronized(lock) {
         persistLocked(file, loadLocked(file).filterNot {
-            it.conversationId == conversationId && it.token == token
+            it.draftKey == draftKey && it.token == token
         })
     }
 
-    suspend fun retry(context: Context, limit: Int = 4): Int =
-        retry(
-            store = PersistentComposerDraftStore(context),
-            unregisterPath = AttachmentStorageManager::unregisterPendingAttachment,
-            file = File(context.filesDir, FILE_NAME),
-            limit = limit,
-        )
-
     suspend fun retry(
-        store: PersistentComposerDraftStore,
+        owner: DraftReconciliationOwner,
         unregisterPath: (String) -> Unit,
         file: File,
         limit: Int = 4,
@@ -80,11 +79,14 @@ internal object CommittedDraftReconciliationDebtStore {
         val remaining = entries.toMutableList()
         var reconciled = 0
         pending.forEach { entry ->
-            val success = runCatching {
-                reconcileOne(store, unregisterPath, entry)
-            }.isSuccess
+            val result = try {
+                owner.reconcile(entry)
+            } catch (_: Throwable) {
+                DraftReconciliationResult(success = false, releasePaths = false)
+            }
             remaining.remove(entry)
-            if (success) {
+            if (result.success) {
+                if (result.releasePaths) entry.committedPaths.forEach(unregisterPath)
                 reconciled++
             } else {
                 remaining += entry.copy(attempts = entry.attempts + 1, lastAttemptAt = System.currentTimeMillis())
@@ -94,33 +96,6 @@ internal object CommittedDraftReconciliationDebtStore {
         reconciled
     }
 
-    private suspend fun reconcileOne(
-        store: PersistentComposerDraftStore,
-        unregisterPath: (String) -> Unit,
-        entry: CommittedDraftReconciliationDebt,
-    ) {
-        val drafts = store.load()
-        val current = drafts[entry.conversationId] ?: run {
-            entry.committedPaths.forEach(unregisterPath)
-            return
-        }
-        if (current.activeSubmissionToken != entry.token) return
-        check(
-            store.write(
-                1L,
-                drafts + (entry.conversationId to current.copy(
-                    rawInput = if (current.rawInput == entry.capturedRawInput) "" else current.rawInput,
-                    pendingAttachments = current.pendingAttachments.filterNot {
-                        it.localPath in entry.committedPaths
-                    },
-                    activeSubmissionToken = null,
-                    version = current.version + 1L,
-                )),
-            )
-        )
-        entry.committedPaths.forEach(unregisterPath)
-    }
-
     private fun loadLocked(file: File): List<CommittedDraftReconciliationDebt> {
         val raw = runCatching { if (file.length() > 512 * 1024) return emptyList(); file.readText() }.getOrNull()
             ?: return emptyList()
@@ -128,7 +103,8 @@ internal object CommittedDraftReconciliationDebtStore {
             val array = JSONArray(raw)
             (0 until minOf(array.length(), MAX_ENTRIES)).mapNotNull { index ->
                 val item = array.optJSONObject(index) ?: return@mapNotNull null
-                val id = item.optLong("id", -1L).takeIf { it > 0L } ?: return@mapNotNull null
+                val id = item.optLong("id", Long.MIN_VALUE)
+                    .takeIf { it >= 0L } ?: return@mapNotNull null
                 val token = item.optString("token").takeIf { it.length in 1..MAX_TOKEN_CHARS }
                     ?: return@mapNotNull null
                 val paths = item.optJSONArray("paths")?.let { values ->
@@ -137,7 +113,7 @@ internal object CommittedDraftReconciliationDebtStore {
                     }.toSet()
                 }.orEmpty()
                 CommittedDraftReconciliationDebt(
-                    conversationId = id,
+                    draftKey = id,
                     token = token,
                     capturedRawInput = item.optString("rawInput").take(MAX_RAW_INPUT_CHARS),
                     committedPaths = paths,
@@ -153,7 +129,7 @@ internal object CommittedDraftReconciliationDebtStore {
         debts.takeLast(MAX_ENTRIES).forEach { debt ->
             array.put(
                 JSONObject()
-                    .put("id", debt.conversationId)
+                    .put("id", debt.draftKey)
                     .put("token", debt.token.take(MAX_TOKEN_CHARS))
                     .put("rawInput", debt.capturedRawInput.take(MAX_RAW_INPUT_CHARS))
                     .put("attempts", debt.attempts)
