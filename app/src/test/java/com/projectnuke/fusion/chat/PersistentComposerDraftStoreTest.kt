@@ -33,6 +33,25 @@ class PersistentComposerDraftStoreTest {
     }
 
     @Test
+    fun `submission ownership token survives restart for reconciliation retry`() = runTest {
+        val file = Files.createTempFile("fusion-drafts", ".json").toFile()
+        val store = PersistentComposerDraftStore(file, { null }, { it.absolutePath })
+        val token = "submission-token-1"
+
+        store.write(1, mapOf(4L to ComposerDraftState(
+            rawInput = "draft",
+            activeSubmissionToken = token,
+            version = 2,
+        )))
+
+        val restored = store.load()[4L]!!
+        assertEquals(token, restored.activeSubmissionToken)
+        assertEquals("draft", restored.rawInput)
+        assertEquals(2L, restored.version)
+        file.delete()
+    }
+
+    @Test
     fun `restoration keeps only managed regular attachments and re-registers them`() = runTest {
         val file = Files.createTempFile("fusion-drafts", ".json").toFile()
         val managed = file.parentFile.resolve("managed.txt").apply { writeText("ok") }

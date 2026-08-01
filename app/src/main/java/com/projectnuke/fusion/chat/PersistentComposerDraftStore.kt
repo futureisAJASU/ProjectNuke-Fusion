@@ -76,6 +76,8 @@ internal open class PersistentComposerDraftStore(
                 rawInput = input,
                 pendingAttachments = attachments,
                 version = item.optLong("version").coerceAtLeast(0L),
+                activeSubmissionToken = item.optString("submissionToken")
+                    .takeIf { it.length in 1..MAX_TOKEN_CHARS },
             )
         }
         result
@@ -98,6 +100,7 @@ internal open class PersistentComposerDraftStore(
                     .put("id", id)
                     .put("input", draft.rawInput.take(MAX_INPUT_CHARS))
                     .put("version", draft.version)
+                    .put("submissionToken", draft.activeSubmissionToken?.take(MAX_TOKEN_CHARS))
                     .put("attachments", attachments))
             }
         return array.toString()
@@ -110,6 +113,7 @@ internal open class PersistentComposerDraftStore(
         const val MAX_INPUT_CHARS = 32_768
         const val MAX_FIELD_CHARS = 512
         const val MAX_PATH_CHARS = 4_096
+        const val MAX_TOKEN_CHARS = 128
         const val MAX_FILE_BYTES = 2 * 1024 * 1024
         fun durableAttachmentPaths(context: Context): Set<String> = runCatching {
             val file = File(context.applicationContext.filesDir, FILE_NAME)

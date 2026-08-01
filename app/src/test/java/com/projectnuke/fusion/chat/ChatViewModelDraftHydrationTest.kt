@@ -291,6 +291,86 @@ class ChatViewModelDraftHydrationTest {
         val sorted = storeWrapper.writeIds.sorted()
         assertEquals(sorted, storeWrapper.writeIds)
     }
+
+    @Test
+    fun `failed critical write after hydration rolls back the in-memory mutation`() = runTest {
+        val storeWrapper = FlakyWriteDraftStore()
+        val vm = ChatViewModel.forTesting(storeWrapper).also { this@ChatViewModelDraftHydrationTest.vm = it }
+        vm.updateDraftText(1L, "hello")
+
+        storeWrapper.releaseLoad(emptyMap())
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val submission = async {
+            storeWrapper.failWrites = true
+            withTimeout(2_000) { vm.beginSubmission(1L) }
+        }
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        assertNull(submission.await())
+        assertEquals("hello", vm.draft(1L).rawInput)
+        assertNull(vm.draft(1L).activeSubmissionToken)
+    }
+
+    @Test
+    fun `beginSubmission leaks no submission token when the critical write fails`() = runTest {
+        val storeWrapper = FailingWriteDraftStore()
+        val vm = ChatViewModel.forTesting(storeWrapper).also { this@ChatViewModelDraftHydrationTest.vm = it }
+        vm.updateDraftText(1L, "hello")
+
+        var snapshot: ComposerSubmissionSnapshot? = null
+        val submission = async {
+            snapshot = withTimeout(2_000) { vm.beginSubmission(1L) }
+        }
+        testDispatcher.scheduler.runCurrent()
+        storeWrapper.releaseLoad(emptyMap())
+        submission.await()
+
+        assertNull(snapshot)
+        assertEquals("hello", vm.draft(1L).rawInput)
+        assertNull(vm.draft(1L).activeSubmissionToken)
+    }
+
+    @Test
+    fun `beginAttachmentCopy reports the exact in-memory outcome`() = runTest {
+        val storeWrapper = DelayedHydrationDraftStore()
+        val vm = ChatViewModel.forTesting(storeWrapper).also { this@ChatViewModelDraftHydrationTest.vm = it }
+
+        val owner = vm.beginAttachmentImport(1L)
+        storeWrapper.releaseLoad(emptyMap())
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val copied = async {
+            withTimeout(2_000) { vm.beginAttachmentCopy(1L, owner.token) }
+        }
+        testDispatcher.scheduler.advanceUntilIdle()
+        assertEquals(true, copied.await())
+
+        val stale = async {
+            withTimeout(2_000) { vm.beginAttachmentCopy(1L, "stale-token") }
+        }
+        testDispatcher.scheduler.advanceUntilIdle()
+        assertEquals(false, stale.await())
+        assertEquals(ComposerImportStatus.COPYING, vm.draft(1L).importOwnership?.status)
+    }
+}
+
+private class FlakyWriteDraftStore : PersistentComposerDraftStore(
+    file = Files.createTempFile("fusion-drafts", ".json").toFile(),
+    resolveManagedAttachment = { null },
+    registerPendingAttachment = { it.absolutePath },
+) {
+    private val loadDeferred = CompletableDeferred<Map<Long, ComposerDraftState>>()
+    var failWrites = false
+
+    fun releaseLoad(data: Map<Long, ComposerDraftState>) {
+        loadDeferred.complete(data)
+    }
+
+    override suspend fun load(): Map<Long, ComposerDraftState> = loadDeferred.await()
+
+    override suspend fun write(writeId: Long, drafts: Map<Long, ComposerDraftState>): Boolean =
+        !failWrites
 }
 
 private class DelayedHydrationDraftStore : PersistentComposerDraftStore(

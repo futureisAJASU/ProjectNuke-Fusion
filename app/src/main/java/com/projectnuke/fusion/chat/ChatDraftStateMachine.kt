@@ -63,7 +63,21 @@ internal class ChatDraftStateMachine(
         scheduleDebouncedPersist(DRAFT_PERSIST_DEBOUNCE_MS)
     }
 
-    fun updateImmediate(conversationId: Long, transform: (ComposerDraftState) -> ComposerDraftState) {
+    suspend fun updateImmediate(conversationId: Long, transform: (ComposerDraftState) -> ComposerDraftState): Boolean {
+        val reply = CompletableDeferred<Boolean>()
+        commands.trySend(
+            DraftCommand.Mutate(
+                conversationId = conversationId,
+                durable = false,
+                transform = transform,
+                reply = reply,
+            )
+        )
+        scheduleDebouncedPersist(0L)
+        return reply.await()
+    }
+
+    fun queueImmediate(conversationId: Long, transform: (ComposerDraftState) -> ComposerDraftState) {
         commands.trySend(
             DraftCommand.Mutate(
                 conversationId = conversationId,
@@ -191,12 +205,20 @@ internal class ChatDraftStateMachine(
             return
         }
         _drafts.value = before + (conversationId to result)
-        if (!command.durable) return
+        if (!command.durable) {
+            command.reply?.complete(true)
+            return
+        }
         if (!hydrationApplied) {
             deferredDurable += command.reply!! to before
             return
         }
-        command.reply?.complete(durableWrite())
+        if (durableWrite()) {
+            command.reply?.complete(true)
+        } else {
+            _drafts.value = before
+            command.reply?.complete(false)
+        }
     }
 
     private suspend fun clear(command: DraftCommand.Clear) {
@@ -212,7 +234,12 @@ internal class ChatDraftStateMachine(
             deferredDurable += command.reply!! to before
             return
         }
-        command.reply?.complete(durableWrite())
+        if (durableWrite()) {
+            command.reply?.complete(true)
+        } else {
+            _drafts.value = before
+            command.reply?.complete(false)
+        }
     }
 
     private suspend fun persistDebounced(command: DraftCommand.PersistDebounced) {

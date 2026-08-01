@@ -13,6 +13,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.ui.FusionApp
 import com.projectnuke.fusion.ui.ConversationCleanupDebtStore
+import com.projectnuke.fusion.ui.CommittedDraftReconciliationDebtStore
 import com.projectnuke.fusion.data.AppDatabase
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch(Dispatchers.IO) {
             ConversationCleanupDebtStore.retry(this@MainActivity, AppDatabase.getInstance(this@MainActivity).chatDao())
+            CommittedDraftReconciliationDebtStore.retry(this@MainActivity)
         }
     }
 

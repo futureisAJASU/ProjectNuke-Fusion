@@ -15,6 +15,7 @@ internal data class SubmissionCommitResult(
     val conversationId: Long,
     val conversationWasCreated: Boolean,
     val publicationFailure: Throwable?,
+    val reconciliationFailed: Boolean,
 )
 
 /**
@@ -32,7 +33,7 @@ internal suspend fun commitAndSettleUserSubmission(
     createConversation: suspend () -> Long,
     insertUserMessage: suspend (conversationId: Long) -> Unit,
     publishConversation: (conversationId: Long) -> Unit,
-    reconcileCommittedDraft: suspend () -> Unit,
+    reconcileCommittedDraft: suspend () -> Boolean,
     updateConversationTimestamp: suspend (conversationId: Long) -> Unit,
     onPublicationFailure: (Throwable) -> Unit = {},
     onTimestampFailure: (Throwable) -> Unit = {},
@@ -76,8 +77,13 @@ internal suspend fun commitAndSettleUserSubmission(
     }
 
     // The message is committed at this point. Reconcile the exact captured composer identity
-    // regardless of whether publishing the newly created conversation succeeded.
-    reconcileCommittedDraft()
+    // regardless of whether publishing the newly created conversation succeeded. The boolean
+    // outcome is surfaced so the caller can record durable reconciliation debt for a retry.
+    val reconciliationFailed = try {
+        !reconcileCommittedDraft()
+    } catch (_: Exception) {
+        true
+    }
 
     try {
         updateConversationTimestamp(state.conversationId)
@@ -89,6 +95,7 @@ internal suspend fun commitAndSettleUserSubmission(
         conversationId = state.conversationId,
         conversationWasCreated = state.conversationWasCreated,
         publicationFailure = publicationFailure,
+        reconciliationFailed = reconciliationFailed,
     )
 }
 

@@ -2247,13 +2247,14 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         val import = pendingImport ?: return@rememberLauncherForActivityResult
         val originConversationId = import.first
         val importOwner = import.second
-        if (!chatViewModel.beginAttachmentCopy(originConversationId, importOwner.token)) {
-            return@rememberLauncherForActivityResult
-        }
-
-        Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
 
         chatViewModel.scope.launch {
+            if (!chatViewModel.beginAttachmentCopy(originConversationId, importOwner.token)) {
+                return@launch
+            }
+
+            Toast.makeText(context, "첨부 파일 복사 중...", Toast.LENGTH_SHORT).show()
+
             val copiedBatch = mutableListOf<LocalAttachment>()
             val importCoordinator = AttachmentImportCoordinator(context.applicationContext)
             try {
@@ -2655,17 +2656,32 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             }
                                         },
                                         reconcileCommittedDraft = {
-                                            chatViewModel.reconcileCommittedSubmission(
+                                            val reconciled = chatViewModel.reconcileCommittedSubmission(
                                                 snapshot = submissionSnapshot,
                                                 committedPaths = capturedDraftAttachments.map { it.localPath },
                                             )
-                                            capturedDraftAttachments.map { it.localPath }.distinct().forEach { committedPath ->
+                                            val committedPaths = capturedDraftAttachments.map { it.localPath }.distinct()
+                                            committedPaths.forEach { committedPath ->
                                                 runCatching {
                                                     AttachmentStorageManager.unregisterPendingAttachment(committedPath)
                                                 }.onFailure { failure ->
                                                     Log.e("FusionEngine", "Failed to release committed attachment registration", failure)
                                                 }
                                             }
+                                            if (!reconciled) {
+                                                CommittedDraftReconciliationDebtStore.record(
+                                                    context,
+                                                    CommittedDraftReconciliationDebt(
+                                                        conversationId = owner.sourceConversationId,
+                                                        token = owner.token,
+                                                        capturedRawInput = submissionSnapshot.rawInput,
+                                                        committedPaths = committedPaths.toSet(),
+                                                        attempts = 0,
+                                                        lastAttemptAt = System.currentTimeMillis(),
+                                                    ),
+                                                )
+                                            }
+                                            reconciled
                                         },
                                         updateConversationTimestamp = { committedConversationId ->
                                             dao.updateConversationTime(committedConversationId, now)

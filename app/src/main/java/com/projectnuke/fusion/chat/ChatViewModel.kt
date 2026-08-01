@@ -210,7 +210,7 @@ class ChatViewModel(
             token = UUID.randomUUID().toString(),
             status = ComposerImportStatus.PICKER_OPEN,
         )
-        draftMachine.updateImmediate(conversationId) { current ->
+        draftMachine.queueImmediate(conversationId) { current ->
             current.copy(importOwnership = owner, version = current.version + 1L)
         }
         return owner
@@ -223,17 +223,15 @@ class ChatViewModel(
                 ?.let { conversationId to it }
         }
 
-    fun beginAttachmentCopy(conversationId: Long, token: String): Boolean {
-        if (draftMachine.importOwnership(conversationId)?.token != token) return false
-        draftMachine.updateImmediate(conversationId) { current ->
+    suspend fun beginAttachmentCopy(conversationId: Long, token: String): Boolean {
+        return draftMachine.updateImmediate(conversationId) { current ->
             val owner = current.importOwnership
-            if (owner?.token != token) return@updateImmediate current
-            current.copy(
+            if (owner?.token != token) current
+            else current.copy(
                 importOwnership = owner.copy(status = ComposerImportStatus.COPYING),
                 version = current.version + 1L,
             )
         }
-        return true
     }
 
     suspend fun completeAttachmentImport(

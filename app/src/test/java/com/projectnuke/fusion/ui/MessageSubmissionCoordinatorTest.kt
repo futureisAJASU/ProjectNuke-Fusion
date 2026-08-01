@@ -36,7 +36,7 @@ class MessageSubmissionCoordinatorTest {
             },
             insertUserMessage = { id -> events += "message-insert:$id" },
             publishConversation = { id -> events += "publish:$id" },
-            reconcileCommittedDraft = { events += "reconcile" },
+            reconcileCommittedDraft = { events += "reconcile"; true },
             updateConversationTimestamp = { id -> events += "timestamp:$id" },
         )
 
@@ -82,7 +82,7 @@ class MessageSubmissionCoordinatorTest {
                     throw expected
                 },
                 publishConversation = { events += "publish" },
-                reconcileCommittedDraft = { events += "reconcile" },
+                reconcileCommittedDraft = { events += "reconcile"; true },
                 updateConversationTimestamp = { events += "timestamp" },
             )
             fail("Expected insert failure")
@@ -112,7 +112,7 @@ class MessageSubmissionCoordinatorTest {
                 createConversation = { error("must not create") },
                 insertUserMessage = { throw IllegalArgumentException("failed") },
                 publishConversation = { error("must not publish") },
-                reconcileCommittedDraft = { settled = true },
+                reconcileCommittedDraft = { settled = true; true },
                 updateConversationTimestamp = { error("must not update") },
             )
             fail("Expected insert failure")
@@ -138,7 +138,7 @@ class MessageSubmissionCoordinatorTest {
                 createConversation = { sideEffects++; 1L },
                 insertUserMessage = { sideEffects++ },
                 publishConversation = { sideEffects++ },
-                reconcileCommittedDraft = { sideEffects++ },
+                reconcileCommittedDraft = { sideEffects++; true },
                 updateConversationTimestamp = { sideEffects++ },
             )
             fail("Expected cancellation")
@@ -165,7 +165,7 @@ class MessageSubmissionCoordinatorTest {
             },
             insertUserMessage = { events += "message-insert" },
             publishConversation = { events += "publish" },
-            reconcileCommittedDraft = { events += "reconcile" },
+            reconcileCommittedDraft = { events += "reconcile"; true },
             updateConversationTimestamp = { events += "timestamp" },
         )
 
@@ -193,7 +193,7 @@ class MessageSubmissionCoordinatorTest {
                 createConversation = { 33L },
                 insertUserMessage = { events += "message-insert" },
                 publishConversation = { events += "publish" },
-                reconcileCommittedDraft = { events += "reconcile" },
+                reconcileCommittedDraft = { events += "reconcile"; true },
                 updateConversationTimestamp = { events += "timestamp" },
             )
             fail("Expected transaction failure")
@@ -220,7 +220,7 @@ class MessageSubmissionCoordinatorTest {
             createConversation = { 12L },
             insertUserMessage = {},
             publishConversation = { throw publicationFailure },
-            reconcileCommittedDraft = { reconciled = true },
+            reconcileCommittedDraft = { reconciled = true; true },
             updateConversationTimestamp = {},
             onPublicationFailure = { reported = it },
         )
@@ -242,13 +242,63 @@ class MessageSubmissionCoordinatorTest {
             createConversation = { error("must not create") },
             insertUserMessage = {},
             publishConversation = {},
-            reconcileCommittedDraft = {},
+            reconcileCommittedDraft = { true },
             updateConversationTimestamp = { throw timestampFailure },
             onTimestampFailure = { reported = it },
         )
 
         assertEquals(3L, result.conversationId)
         assertSame(timestampFailure, reported)
+    }
+
+    @Test
+    fun `failed reconciliation is surfaced and timestamp settlement still runs`() = runBlocking {
+        val result = commitAndSettleUserSubmission(
+            state = SubmissionCommitState(3L),
+            parentJob = Job(),
+            runInTransaction = { block -> block() },
+            createConversation = { error("must not create") },
+            insertUserMessage = {},
+            publishConversation = {},
+            reconcileCommittedDraft = { false },
+            updateConversationTimestamp = {},
+        )
+
+        assertEquals(3L, result.conversationId)
+        assertTrue(result.reconciliationFailed)
+    }
+
+    @Test
+    fun `successful reconciliation is reported as settled`() = runBlocking {
+        val result = commitAndSettleUserSubmission(
+            state = SubmissionCommitState(3L),
+            parentJob = Job(),
+            runInTransaction = { block -> block() },
+            createConversation = { error("must not create") },
+            insertUserMessage = {},
+            publishConversation = {},
+            reconcileCommittedDraft = { true },
+            updateConversationTimestamp = {},
+        )
+
+        assertFalse(result.reconciliationFailed)
+    }
+
+    @Test
+    fun `reconciliation exception is reported as failed without aborting settlement`() = runBlocking {
+        val result = commitAndSettleUserSubmission(
+            state = SubmissionCommitState(3L),
+            parentJob = Job(),
+            runInTransaction = { block -> block() },
+            createConversation = { error("must not create") },
+            insertUserMessage = {},
+            publishConversation = {},
+            reconcileCommittedDraft = { throw IllegalStateException("draft store unavailable") },
+            updateConversationTimestamp = {},
+        )
+
+        assertEquals(3L, result.conversationId)
+        assertTrue(result.reconciliationFailed)
     }
 
     @Test
