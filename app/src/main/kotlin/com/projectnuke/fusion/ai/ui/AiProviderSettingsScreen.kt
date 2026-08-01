@@ -40,6 +40,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.ai.data.AiProviderRepository
+import com.projectnuke.fusion.ai.data.AiProviderValidator
 import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiProviderAuthMode
 import com.projectnuke.fusion.ai.model.AiProviderType
@@ -162,10 +163,13 @@ fun AiProviderSettingsScreen(
         if (!config.isEnabled) {
             return ProviderStatus("비활성화됨", "이 제공자는 현재 사용하지 않습니다.", TextSecondary)
         }
+        if (config.authMode != AiProviderAuthMode.NONE && !hasApiKey) {
+            return ProviderStatus("설정 필요", "복호화 가능한 API 키가 필요합니다.", WarningColor)
+        }
         val missing = buildList {
-            if (!hasApiKey) add("API 키")
             if (config.baseUrl.isBlank()) add("Base URL")
             if (config.modelId.isBlank()) add("모델 ID")
+            if (config.authMode == AiProviderAuthMode.CUSTOM_HEADER && config.authHeaderName.isNullOrBlank()) add("헤더 이름")
         }
         if (missing.isEmpty()) {
             return ProviderStatus("사용 가능", "즉시 외부 AI API 대화에 사용할 수 있습니다.", SuccessColor)
@@ -182,15 +186,24 @@ fun AiProviderSettingsScreen(
             draft.displayName.isBlank() -> "표시 이름을 입력해 주세요."
             draft.baseUrl.isBlank() -> "Base URL을 입력해 주세요."
             draft.modelId.isBlank() -> "모델 ID를 입력해 주세요."
+            draft.authMode == AiProviderAuthMode.CUSTOM_HEADER -> {
+                val name = draft.authHeaderName.orEmpty()
+                if (name.isBlank() || name.length > AiProviderValidator.MAX_HEADER_NAME || !name.matches(Regex("[A-Za-z0-9-]+")))
+                    "유효한 헤더 이름을 입력해 주세요."
+                else null
+            }
             else -> null
         }
     }
 
+    var decryptableMap by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+
     suspend fun refreshProviders() {
         providers = repository.getProviders()
+        decryptableMap = providers.associate { it.id to repository.hasDecryptableSecret(it) }
         val selected = repository.getSelectedProvider() ?: providers.firstOrNull()
         loadEditor(selected)
-        decryptableSecret = selected?.let { repository.hasDecryptableSecret(it) } == true
+        decryptableSecret = selected?.let { decryptableMap[it.id] } == true
     }
 
     LaunchedEffect(Unit) {
@@ -201,7 +214,7 @@ fun AiProviderSettingsScreen(
     val editorStatus = currentDraft?.let {
         buildProviderStatus(
             config = it.toConfig(),
-            hasApiKey = it.apiKeyInput.isNotBlank() || decryptableSecret
+            hasApiKey = it.authMode == AiProviderAuthMode.NONE || it.apiKeyInput.isNotBlank() || decryptableSecret
         )
     }
 
@@ -230,6 +243,7 @@ fun AiProviderSettingsScreen(
                     ProviderRow(
                         config = provider,
                         selected = provider.id == selectedId,
+                        decryptable = decryptableMap[provider.id] == true,
                         onClick = {
                             loadEditor(provider)
                             scope.launch { repository.setSelectedProvider(provider.id) }
@@ -367,13 +381,22 @@ fun AiProviderSettingsScreen(
                                     return@Button
                                 }
                                 busy = true
+                                val operationId = currentDraft?.id ?: return@Button
+                                busy = true
                                 scope.launch {
-                                    repository.saveProvider(draft.toConfig(), draft.apiKeyInput.ifBlank { null })
-                                    repository.setSelectedProvider(draft.id)
-                                    refreshProviders()
-                                    apiKey = ""
-                                    busy = false
-                                    statusText = "설정을 저장했습니다."
+                                    try {
+                                        val saved = repository.saveProvider(draft.toConfig(), draft.apiKeyInput.ifBlank { null })
+                                        if (!saved) {
+                                            if (selectedId == operationId) statusText = "저장 실패"
+                                            return@launch
+                                        }
+                                        repository.setSelectedProvider(draft.id)
+                                        refreshProviders()
+                                        apiKey = ""
+                                        if (selectedId == operationId) statusText = "설정을 저장했습니다."
+                                    } finally {
+                                        busy = false
+                                    }
                                 }
                             }
                         ) { Text("저장") }
@@ -387,22 +410,29 @@ fun AiProviderSettingsScreen(
                                     statusText = it
                                     return@Button
                                 }
-                                if (draft.apiKeyInput.isBlank() && draft.apiKeySecretId.isNullOrBlank()) {
+                                if (draft.authMode != AiProviderAuthMode.NONE && draft.apiKeyInput.isBlank() && draft.apiKeySecretId.isNullOrBlank()) {
                                     statusText = "API 키를 입력한 뒤 연결 테스트를 진행해 주세요."
                                     return@Button
                                 }
                                 busy = true
+                                val operationIdForTest = currentDraft?.id ?: return@Button
                                 scope.launch {
-                                    val savedConfig = if (draft.apiKeyInput.isNotBlank()) {
-                                        repository.saveProvider(draft.toConfig(), draft.apiKeyInput)
-                                        repository.getProviders().firstOrNull { it.id == draft.id } ?: draft.toConfig()
-                                    } else {
-                                        draft.toConfig()
+                                    try {
+                                        val savedConfig = if (draft.apiKeyInput.isNotBlank()) {
+                                            if (!repository.saveProvider(draft.toConfig(), draft.apiKeyInput)) {
+                                                if (selectedId == operationIdForTest) statusText = "키 저장 실패"
+                                                return@launch
+                                            }
+                                            repository.getProviders().firstOrNull { it.id == draft.id } ?: draft.toConfig()
+                                        } else {
+                                            draft.toConfig()
+                                        }
+                                        val result = tester(savedConfig)
+                                        if (selectedId == operationIdForTest) statusText = result.getOrElse { it.message ?: "연결 테스트에 실패했습니다." }
+                                        apiKey = ""
+                                    } finally {
+                                        busy = false
                                     }
-                                    val result = tester(savedConfig)
-                                    statusText = result.getOrElse { it.message ?: "연결 테스트에 실패했습니다." }
-                                    apiKey = ""
-                                    busy = false
                                 }
                             }
                         ) { Text("테스트") }
@@ -421,12 +451,18 @@ fun AiProviderSettingsScreen(
                                     return@TextButton
                                 }
                                 busy = true
+                                val operationIdForKeyDelete = currentDraft?.id ?: return@TextButton
                                 scope.launch {
-                                    secretStore.deleteSecret(secretId)
-                                    repository.saveProvider(draft.toConfig().copy(apiKeySecretId = null), rawApiKey = null)
-                                    refreshProviders()
-                                    busy = false
-                                    statusText = "저장된 API 키를 삭제했습니다."
+                                    try {
+                                        if (!repository.saveProvider(draft.toConfig().copy(apiKeySecretId = null), rawApiKey = null)) {
+                                            if (selectedId == operationIdForKeyDelete) statusText = "키 삭제 실패"
+                                            return@launch
+                                        }
+                                        refreshProviders()
+                                        if (selectedId == operationIdForKeyDelete) statusText = "저장된 API 키를 삭제했습니다."
+                                    } finally {
+                                        busy = false
+                                    }
                                 }
                             }
                         ) { Text("API 키 삭제", color = DangerColor) }
@@ -440,10 +476,16 @@ fun AiProviderSettingsScreen(
                                     return@TextButton
                                 }
                                 busy = true
+                                val deletionTargetId = selectedId ?: return@TextButton
                                 scope.launch {
-                                    repository.deleteProvider(id)
-                                    refreshProviders()
-                                    busy = false
+                                    try {
+                                        if (!repository.deleteProvider(deletionTargetId)) {
+                                            statusText = "제공자 삭제가 완료되지 않았습니다."
+                                        }
+                                        refreshProviders()
+                                    } finally {
+                                        busy = false
+                                    }
                                 }
                             }
                         ) { Text("제공자 삭제", color = DangerColor) }
@@ -463,14 +505,13 @@ fun AiProviderSettingsScreen(
 private fun ProviderRow(
     config: AiProviderConfig,
     selected: Boolean,
+    decryptable: Boolean = false,
     onClick: () -> Unit
 ) {
     val status = when {
         !config.isEnabled -> ProviderStatus("비활성화됨", "현재 사용하지 않습니다.", TextSecondary)
-        config.apiKeySecretId.isNullOrBlank() && config.baseUrl.isBlank() && config.modelId.isBlank() ->
-            ProviderStatus("설정 필요", "API 키, Base URL, 모델 ID가 필요합니다.", WarningColor)
-        config.apiKeySecretId.isNullOrBlank() ->
-            ProviderStatus("설정 필요", "API 키가 필요합니다.", WarningColor)
+        config.authMode != AiProviderAuthMode.NONE && !decryptable ->
+            ProviderStatus("설정 필요", "복호화 가능한 API 키가 필요합니다.", WarningColor)
         config.baseUrl.isBlank() ->
             ProviderStatus("설정 필요", "Base URL이 필요합니다.", WarningColor)
         config.modelId.isBlank() ->

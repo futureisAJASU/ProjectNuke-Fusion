@@ -47,7 +47,8 @@ internal object AiProviderValidator {
         require(uri.scheme == "https" || uri.scheme == "http") { "Endpoint scheme is invalid" }
         val host = uri.host.orEmpty().lowercase()
         val local = host == "localhost" || host == "127.0.0.1" || host == "::1" ||
-            host.startsWith("10.") || host.startsWith("192.168.") || host.startsWith("172.16.")
+            host.startsWith("10.") || host.startsWith("192.168.") ||
+            isPrivate172Range(host)
         if (uri.scheme == "http" && !local) require(false) { "Cleartext public endpoints are not allowed" }
         if (config.authMode != AiProviderAuthMode.NONE) {
             require(secret == null || secret.length <= MAX_SECRET) { "Secret is too long" }
@@ -61,6 +62,12 @@ internal object AiProviderValidator {
     fun normalizeEndpoint(value: String): String {
         val trimmed = value.trim().trimEnd('/')
         return if (trimmed.endsWith("/chat/completions")) trimmed else "$trimmed/chat/completions"
+    }
+
+    /** Recognizes the full 172.16.0.0/12 private range: 172.16.x.x through 172.31.x.x */
+    fun isPrivate172Range(host: String): Boolean {
+        val parts = host.split(".").take(4).mapNotNull { it.toIntOrNull() }
+        return parts.size == 4 && parts[0] == 172 && parts[1] in 16..31
     }
 }
 
