@@ -2661,18 +2661,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 committedPaths = capturedDraftAttachments.map { it.localPath },
                                             )
                                             val committedPaths = capturedDraftAttachments.map { it.localPath }.distinct()
-                                            committedPaths.forEach { committedPath ->
-                                                runCatching {
-                                                    AttachmentStorageManager.unregisterPendingAttachment(committedPath)
-                                                }.onFailure { failure ->
-                                                    Log.e("FusionEngine", "Failed to release committed attachment registration", failure)
-                                                }
-                                            }
-                                            if (!reconciled) {
+                                            val debtRecorded = if (!reconciled) {
                                                 CommittedDraftReconciliationDebtStore.record(
                                                     context,
                                                     CommittedDraftReconciliationDebt(
-                                                        conversationId = owner.sourceConversationId,
+                                                        draftKey = submissionSnapshot.conversationId,
                                                         token = owner.token,
                                                         capturedRawInput = submissionSnapshot.rawInput,
                                                         committedPaths = committedPaths.toSet(),
@@ -2680,8 +2673,23 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                         lastAttemptAt = System.currentTimeMillis(),
                                                     ),
                                                 )
+                                            } else {
+                                                true
                                             }
-                                            reconciled
+                                            if (reconciled || debtRecorded) {
+                                                committedPaths.forEach { committedPath ->
+                                                    runCatching {
+                                                        AttachmentStorageManager.unregisterPendingAttachment(committedPath)
+                                                    }.onFailure { failure ->
+                                                        Log.e("FusionEngine", "Failed to release committed attachment registration", failure)
+                                                    }
+                                                }
+                                            } else {
+                                                chatViewModel.update(submissionSnapshot.conversationId) {
+                                                    it.copy(generationStatus = "복구가 필요한 전송 상태입니다.")
+                                                }
+                                            }
+                                            reconciled || debtRecorded
                                         },
                                         updateConversationTimestamp = { committedConversationId ->
                                             dao.updateConversationTime(committedConversationId, now)
