@@ -902,8 +902,8 @@ fun ChatScreen(
     val conversationSummary = remember(conversationId, conversationSummaryRefreshKey) {
         loadConversationSummary(context, conversationId)
     }
-    val savedMemoryCandidates = remember(conversationId, memoryCandidateText) {
-        loadConversationMemoryCandidates(context, conversationId)
+    val savedMemoryCandidates by produceState<List<ConversationMemoryCandidate>>(emptyList(), conversationId, memoryCandidateText) {
+        value = loadConversationMemoryCandidates(context, conversationId)
     }
     LaunchedEffect(conversationId) {
         memoryCandidateText = ""
@@ -3965,21 +3965,25 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 }
             },
             onSaveSelected = { selectedItems ->
-                val savedCount = saveConversationMemoryCandidates(context, conversationId, selectedItems)
-                if (savedCount <= 0) {
-                    Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
-                    DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
+                scope.launch {
+                    val savedCount = saveConversationMemoryCandidates(context, conversationId, selectedItems)
+                    if (savedCount <= 0) {
+                        Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                        DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
+                    }
                 }
             },
             onSaveAll = {
-                val savedCount = saveConversationMemoryCandidates(context, conversationId, parseMemoryCandidateLines(memoryCandidateText))
-                if (savedCount <= 0) {
-                    Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
-                    DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
+                scope.launch {
+                    val savedCount = saveConversationMemoryCandidates(context, conversationId, parseMemoryCandidateLines(memoryCandidateText))
+                    if (savedCount <= 0) {
+                        Toast.makeText(context, "저장할 메모리 후보가 없습니다.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        Toast.makeText(context, "메모리 후보를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                        DeveloperLogStore.record(context, "memory", "메모리 후보 저장", "conversationId=$conversationId, count=$savedCount")
+                    }
                 }
             },
             onDismiss = { showMemoryCandidateDialog = false }

@@ -34,7 +34,7 @@ suspend fun buildFusionDeveloperLogSnapshotAsync(
     )
 }
 
-fun buildFusionDeveloperLogSnapshotFromHistory(
+suspend fun buildFusionDeveloperLogSnapshotFromHistory(
     context: Context,
     prefs: SharedPreferences,
     benchmarkResults: List<BenchmarkResultEntity>,

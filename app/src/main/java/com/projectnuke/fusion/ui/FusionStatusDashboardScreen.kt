@@ -20,6 +20,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -65,11 +66,9 @@ fun FusionStatusDashboardDialog(
     }
 
     val abHistory = abHistoryState
-    val snapshot = remember(context, benchmarkResults, abHistory) {
+    val snapshot by produceState<FusionStatusDashboardSnapshot?>(null, context, benchmarkResults, abHistory) {
         if (abHistory != null) {
-            buildFusionStatusDashboardSnapshot(context, prefs, benchmarkResults, abHistory)
-        } else {
-            null
+            value = buildFusionStatusDashboardSnapshot(context, prefs, benchmarkResults, abHistory)
         }
     }
 
@@ -91,11 +90,11 @@ fun FusionStatusDashboardDialog(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        item { StatusCard("현재 모델", snapshot.modelText) }
-                        item { StatusCard("메모리", snapshot.memoryText) }
-                        item { StatusCard("성능", snapshot.performanceText) }
-                        item { StatusCard("기기", snapshot.deviceText) }
-                        item { StatusCard("앱", snapshot.appText) }
+                        item { StatusCard("현재 모델", snapshot?.modelText ?: "") }
+                        item { StatusCard("메모리", snapshot?.memoryText ?: "") }
+                        item { StatusCard("성능", snapshot?.performanceText ?: "") }
+                        item { StatusCard("기기", snapshot?.deviceText ?: "") }
+                        item { StatusCard("앱", snapshot?.appText ?: "") }
                     }
                 }
             }
@@ -145,7 +144,7 @@ private fun StatusCard(title: String, body: String) {
     }
 }
 
-private fun buildFusionStatusDashboardSnapshot(
+private suspend fun buildFusionStatusDashboardSnapshot(
     context: Context,
     prefs: SharedPreferences,
     benchmarkResults: List<BenchmarkResultEntity>,

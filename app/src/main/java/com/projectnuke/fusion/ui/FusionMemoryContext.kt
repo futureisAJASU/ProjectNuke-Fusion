@@ -22,7 +22,7 @@ fun isSavedMemoryContextEnabled(prefs: SharedPreferences): Boolean {
     return prefs.getBoolean(PrefSavedMemoryContextEnabled, false)
 }
 
-fun buildSavedMemoryContext(
+suspend fun buildSavedMemoryContext(
     context: Context,
     prefs: SharedPreferences,
     currentConversationId: Long?,

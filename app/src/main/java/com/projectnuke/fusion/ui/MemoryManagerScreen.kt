@@ -26,8 +26,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ClipboardManager
@@ -65,6 +68,7 @@ fun MemoryManagerDialog(
     onDismiss: () -> Unit,
     currentConversationId: Long? = null
 ) {
+    val scope = rememberCoroutineScope()
     var refreshKey by remember { mutableStateOf(0) }
     var searchQuery by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf(MemoryFilter.ALL) }
@@ -93,11 +97,13 @@ fun MemoryManagerDialog(
     val conversationMap = remember(conversations, archivedConversations) {
         (conversations + archivedConversations).associateBy { it.id }
     }
-    val savedMemories = remember(refreshKey) { loadAllConversationMemoryCandidates(context) }
+    val savedMemories by produceState<List<ConversationMemoryCandidate>>(emptyList(), refreshKey) {
+        value = loadAllConversationMemoryCandidates(context)
+    }
     val savedSummaries = remember(refreshKey) { loadAllConversationSummaries(context) }
     val selectedModel = settingsPrefs.getString("selected_model", null)
-    val memoryContext = remember(refreshKey, memoryContextEnabled, selectedModel, currentConversationId) {
-        buildSavedMemoryContext(
+    val memoryContext by produceState<FusionSavedMemoryContext?>(null, refreshKey, memoryContextEnabled, selectedModel, currentConversationId) {
+        value = buildSavedMemoryContext(
             context = context,
             prefs = settingsPrefs,
             currentConversationId = currentConversationId,
@@ -372,10 +378,12 @@ fun MemoryManagerDialog(
             onValueChange = { editingMemoryText = it },
             onDismiss = { editingMemory = null },
             onSave = {
-                if (updateConversationMemoryCandidate(context, candidate.id, editingMemoryText)) {
-                    refreshKey++
-                    editingMemory = null
-                    Toast.makeText(context, "메모리를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                scope.launch {
+                    if (updateConversationMemoryCandidate(context, candidate.id, editingMemoryText)) {
+                        refreshKey++
+                        editingMemory = null
+                        Toast.makeText(context, "메모리를 저장했습니다.", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         )
@@ -386,10 +394,12 @@ fun MemoryManagerDialog(
             message = "저장된 메모리만 삭제되며 채팅 기록은 삭제되지 않습니다.",
             onDismiss = { deletingMemory = null },
             onDelete = {
-                if (deleteConversationMemoryCandidate(context, candidate.id)) {
-                    refreshKey++
-                    deletingMemory = null
-                    Toast.makeText(context, "메모리를 삭제했습니다.", Toast.LENGTH_SHORT).show()
+                scope.launch {
+                    if (deleteConversationMemoryCandidate(context, candidate.id)) {
+                        refreshKey++
+                        deletingMemory = null
+                        Toast.makeText(context, "메모리를 삭제했습니다.", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         )
@@ -429,7 +439,7 @@ private fun MemoryContextPreviewDialog(
     clipboard: ClipboardManager,
     context: Context,
     memoryContextEnabled: Boolean,
-    memoryContext: FusionSavedMemoryContext,
+    memoryContext: FusionSavedMemoryContext?,
     globalPreviewOnly: Boolean,
     onDismiss: () -> Unit
 ) {
@@ -443,12 +453,12 @@ private fun MemoryContextPreviewDialog(
                     Text("현재 대화 기준 정보가 없어 전체 메모리 기준으로 표시합니다.", color = MemoryManagerTextSecondary, fontSize = 12.sp)
                 }
                 Text("메모리 사용: ${if (memoryContextEnabled) "켜짐" else "꺼짐"}", color = MemoryManagerTextPrimary, fontSize = 13.sp)
-                Text("저장된 메모리: ${memoryContext.totalSavedCount}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
-                Text("사용 중인 메모리: ${memoryContext.enabledCount}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
-                Text("현재 포함 메모리: ${memoryContext.itemCount}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
-                Text("적용 범위로 제외됨: ${memoryContext.excludedByScopeCount}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
-                Text("예상 문자 수: ${memoryContext.characterCount}", color = MemoryManagerTextPrimary, fontSize = 13.sp)
-                Text("길이 제한 적용: ${if (memoryContext.trimmed) "예" else "아니요"}", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                Text("저장된 메모리: ${memoryContext?.totalSavedCount ?: 0}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                Text("사용 중인 메모리: ${memoryContext?.enabledCount ?: 0}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                Text("현재 포함 메모리: ${memoryContext?.itemCount ?: 0}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                Text("적용 범위로 제외됨: ${memoryContext?.excludedByScopeCount ?: 0}개", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                Text("예상 문자 수: ${memoryContext?.characterCount ?: 0}", color = MemoryManagerTextPrimary, fontSize = 13.sp)
+                Text("길이 제한 적용: ${if (memoryContext?.trimmed == true) "예" else "아니요"}", color = MemoryManagerTextPrimary, fontSize = 13.sp)
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
@@ -457,8 +467,8 @@ private fun MemoryContextPreviewDialog(
                     Text(
                         text = when {
                             !memoryContextEnabled -> "메모리 사용이 꺼져 있습니다."
-                            memoryContext.text.isNullOrBlank() -> "답변 생성에 포함될 메모리가 없습니다."
-                            else -> memoryContext.text
+                            memoryContext?.text.isNullOrBlank() -> "답변 생성에 포함될 메모리가 없습니다."
+                            else -> memoryContext?.text ?: ""
                         },
                         modifier = Modifier.padding(10.dp),
                         color = MemoryManagerTextSecondary,
@@ -470,12 +480,12 @@ private fun MemoryContextPreviewDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    memoryContext.text?.takeIf { it.isNotBlank() }?.let {
+                    memoryContext?.text?.takeIf { it.isNotBlank() }?.let {
                         clipboard.setText(AnnotatedString(it))
                         Toast.makeText(context, "메모리 컨텍스트를 복사했습니다.", Toast.LENGTH_SHORT).show()
                     }
                 },
-                enabled = !memoryContext.text.isNullOrBlank()
+                enabled = !memoryContext?.text.isNullOrBlank()
             ) { Text("복사", color = MemoryManagerAccentBlue) }
         },
         dismissButton = {
@@ -495,10 +505,13 @@ private fun MemoryScopeDialog(
     onDismiss: () -> Unit,
     onScopeChanged: () -> Unit
 ) {
-    fun applyScope(scope: MemoryScope, modelId: String? = null) {
-        if (setConversationMemoryCandidateScope(context, candidate.id, scope, modelId)) {
-            Toast.makeText(context, "메모리 적용 범위를 변경했습니다.", Toast.LENGTH_SHORT).show()
-            onScopeChanged()
+    val scope = rememberCoroutineScope()
+    fun applyScope(scopeValue: MemoryScope, modelId: String? = null) {
+        scope.launch {
+            if (setConversationMemoryCandidateScope(context, candidate.id, scopeValue, modelId)) {
+                Toast.makeText(context, "메모리 적용 범위를 변경했습니다.", Toast.LENGTH_SHORT).show()
+                onScopeChanged()
+            }
         }
     }
     AlertDialog(
