@@ -80,3 +80,8 @@
 - Added final-prompt assembly budgeting for local and external generation paths.
 - Added durable draft attachment reference discovery and rollback-safe model adoption.
 - Hardened deletion, settings backup, candidate persistence, and HTTP cancellation ownership.
+# Ownership and import follow-up
+
+- Reconciliation commands are serialized with draft hydration and debounced writes.
+- Cleanup debt retries use bounded exponential backoff and preserve failed debt records.
+- Imported model files are staged as unique `.part` files, fsynced, validated, then atomically adopted.

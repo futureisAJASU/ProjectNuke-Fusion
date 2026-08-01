@@ -34,3 +34,9 @@ Fusion의 핵심 채팅 기능을 실제 일상 사용에 가까운 조건에서
 - Durable draft attachment cleanup references.
 - Cancellation-safe conversation deletion and settings restore truthfulness.
 - Bounded UTF-8 backup streaming, prompt budgeting, HTTP cancellation, and rollback-safe model replacement.
+# 1.0.0-beta-stable ownership follow-up
+
+- Draft reconciliation now uses the single serialized draft owner, including new-conversation draft key `0`.
+- Post-commit attachment release waits for durable reconciliation or durable recovery debt.
+- Custom provider metadata uses UUID-backed providers, validated endpoints, Keystore-only secrets, and durable metadata commits.
+- Model imports use a process-owned coordinator with bounded staged copies and validation before adoption.
