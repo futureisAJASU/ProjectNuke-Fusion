@@ -492,7 +492,7 @@ class OpenAiCompatibleClientTest {
 
     private class FakeSecretStore(private val key: String?) : SecretStore {
         override suspend fun getSecret(id: String): String? = key
-        override suspend fun putSecret(id: String, value: String) {}
-        override suspend fun deleteSecret(id: String) {}
+        override suspend fun putSecret(id: String, value: String): Boolean = true
+        override suspend fun deleteSecret(id: String): Boolean = true
     }
 }

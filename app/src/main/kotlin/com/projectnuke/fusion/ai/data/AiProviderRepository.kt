@@ -87,13 +87,16 @@ class AiProviderRepository(
             require(input.length <= AiProviderValidator.MAX_SECRET) { "Secret is too long" }
         }
         val newSecretId = if (input.isNotEmpty()) {
-            config.apiKeySecretId ?: "ai_key_${config.id}_${UUID.randomUUID()}"
+            "ai_key_${config.id}_${UUID.randomUUID()}"
         } else config.apiKeySecretId
-        if (input.isNotEmpty()) secretStore.putSecret(newSecretId!!, input)
+        val secretWritten = if (input.isNotEmpty() && newSecretId != null) {
+            secretStore.putSecret(newSecretId, input)
+        } else true
+        if (!secretWritten) return false
         val validated = try {
             AiProviderValidator.validate(config.copy(apiKeySecretId = newSecretId), input.ifEmpty { null }).config
         } catch (failure: Throwable) {
-            if (input.isNotEmpty()) runCatching { secretStore.deleteSecret(newSecretId!!) }
+            if (input.isNotEmpty() && newSecretId != null) runCatching { secretStore.deleteSecret(newSecretId) }
             throw failure
         }
         val committed = withContext(Dispatchers.IO) {
@@ -101,15 +104,17 @@ class AiProviderRepository(
             prefs.edit().putString(KeyProviders, providersToJson(updated).toString()).commit()
         }
         if (!committed) {
-            if (input.isNotEmpty()) runCatching { secretStore.deleteSecret(newSecretId!!) }
+            if (input.isNotEmpty() && newSecretId != null) runCatching { secretStore.deleteSecret(newSecretId) }
             return false
         }
         val oldSecretId = previous?.apiKeySecretId
-        val oldSecretDeleted = oldSecretId == null || oldSecretId == newSecretId || runCatching { secretStore.deleteSecret(oldSecretId); true }.getOrDefault(false)
+        val oldCleanupSuccess = if (oldSecretId != null && oldSecretId != newSecretId) {
+            runCatching { secretStore.deleteSecret(oldSecretId) }.getOrDefault(false)
+        } else true
         if (prefs.getString(KeySelectedProvider, null) == null) {
             withContext(Dispatchers.IO) { prefs.edit().putString(KeySelectedProvider, validated.id).commit() }
         }
-        return oldSecretDeleted
+        return oldCleanupSuccess
     }
 
     suspend fun createCustomProvider(): AiProviderConfig {
@@ -130,7 +135,10 @@ class AiProviderRepository(
                 .putString(KeySelectedProvider, updated.firstOrNull()?.id).commit()
         }
         if (!committed) return false
-        return existing.apiKeySecretId == null || runCatching { secretStore.deleteSecret(existing.apiKeySecretId); true }.getOrDefault(false)
+        val secretCleanupSuccess = if (existing.apiKeySecretId != null) {
+            runCatching { secretStore.deleteSecret(existing.apiKeySecretId) }.getOrDefault(false)
+        } else true
+        return secretCleanupSuccess
     }
 
     suspend fun getSelectedProvider(): AiProviderConfig? {

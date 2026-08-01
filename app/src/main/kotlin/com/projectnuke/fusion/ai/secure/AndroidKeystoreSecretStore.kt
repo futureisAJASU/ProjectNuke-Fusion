@@ -18,15 +18,15 @@ class AndroidKeystoreSecretStore(
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PrefsName, Context.MODE_PRIVATE)
 
-    override suspend fun putSecret(id: String, value: String) {
-        withContext(Dispatchers.IO) {
+    override suspend fun putSecret(id: String, value: String): Boolean {
+        return withContext(Dispatchers.IO) {
             val cipher = Cipher.getInstance(Transformation)
             cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
             val ciphertext = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
             val payload = cipher.iv + ciphertext
             prefs.edit()
                 .putString(id, Base64.encodeToString(payload, Base64.NO_WRAP))
-                .apply()
+                .commit()
         }
     }
 
@@ -45,9 +45,9 @@ class AndroidKeystoreSecretStore(
         }
     }
 
-    override suspend fun deleteSecret(id: String) {
-        withContext(Dispatchers.IO) {
-            prefs.edit().remove(id).apply()
+    override suspend fun deleteSecret(id: String): Boolean {
+        return withContext(Dispatchers.IO) {
+            prefs.edit().remove(id).commit()
         }
     }
 
