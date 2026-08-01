@@ -72,6 +72,10 @@ internal class ModelImportCoordinator(
     private val activeBySource = ConcurrentHashMap<String, String>()
     private val cancelledTokens = ConcurrentHashMap.newKeySet<String>()
 
+    companion object {
+        private const val ORPHAN_GRACE_MS = 300_000L
+    }
+
     suspend fun import(
         request: ModelImportRequest,
         onProgress: suspend (Int) -> Unit = {},
@@ -84,7 +88,6 @@ internal class ModelImportCoordinator(
         var part: File? = null
         var adopted: File? = null
         try {
-            cleanupAbandoned(root)
             if (!(root.exists() || root.mkdirs()) || !root.isDirectory) {
                 return@withContext ModelImportResult.Failure(ModelImportFailure.STORAGE_FULL, request.token)
             }
@@ -163,7 +166,7 @@ internal class ModelImportCoordinator(
             cancelledTokens.remove(request.token)
             withContext(NonCancellable) {
                 part?.takeIf { it.exists() }?.delete()
-                if (adopted == null) adopted?.delete()
+                if (adopted != null) adopted?.delete()
             }
         }
     }
@@ -173,12 +176,20 @@ internal class ModelImportCoordinator(
     }
 
     fun cleanupAbandoned() {
-        cleanupAbandoned(modelDirectory)
+        val activeTokens = activeBySource.values.toSet() + cancelledTokens.toSet()
+        cleanupAbandoned(modelDirectory, activeTokens)
     }
 
-    private fun cleanupAbandoned(root: File) {
+    private fun cleanupAbandoned(root: File, activeTokens: Set<String>) {
+        val cutoff = System.currentTimeMillis() - ORPHAN_GRACE_MS
         root.listFiles()?.forEach { file ->
-            if (file.name.endsWith(".part") || file.name.endsWith(".bak")) file.delete()
+            val name = file.name
+            if (name.startsWith(".") && (name.endsWith(".part") || name.endsWith(".bak"))) {
+                val ownedByActive = activeTokens.any { it in name }
+                if (!ownedByActive && file.lastModified() < cutoff) {
+                    file.delete()
+                }
+            }
         }
     }
 
