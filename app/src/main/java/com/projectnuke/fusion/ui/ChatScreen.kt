@@ -152,6 +152,9 @@ import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.modelzoo.ModelDownloadCoordinator
 import com.projectnuke.fusion.modelzoo.ModelDownloadFailure
 import com.projectnuke.fusion.modelzoo.ModelDownloadResult
+import com.projectnuke.fusion.modelzoo.ModelImportCoordinator
+import com.projectnuke.fusion.modelzoo.ModelImportRequest
+import com.projectnuke.fusion.modelzoo.ModelImportCoordinatorRegistry
 import com.projectnuke.fusion.modelzoo.ModelFamily
 import com.projectnuke.fusion.modelzoo.ModelMemoryClass
 import com.projectnuke.fusion.modelzoo.ModelRecommendedDeviceClass
@@ -228,6 +231,7 @@ private data class PendingExternalModel(
     val fileSizeBytes: Long?
 )
 private data class PendingModelImport(
+    val token: String = UUID.randomUUID().toString(),
     val displayName: String,
     val originalFileName: String,
     val uri: Uri,
@@ -678,6 +682,7 @@ fun ChatScreen(
     }
 
     val modelDownloadCoordinator = remember { ModelDownloadCoordinator() }
+    val modelImportCoordinator = remember(context) { ModelImportCoordinatorRegistry.forContext(context) }
     val customModels = remember { mutableStateListOf<LocalModel>() }
     var pendingModelImport by remember { mutableStateOf<PendingModelImport?>(null) }
     var showModelStorageManager by remember { mutableStateOf(false) }
@@ -3658,6 +3663,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
             onCopyForRun = { family ->
                 scope.launch {
                     val copiedFile = copyUriToModelFile(
+                        coordinator = modelImportCoordinator,
+                        token = pending.token,
                         context = context,
                         uri = pending.uri,
                         displayName = pending.displayName
@@ -3686,7 +3693,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                         )
                     }
                     storageRefreshKey += 1
-                    pendingModelImport = null
+                    if (pendingModelImport?.token == pending.token) pendingModelImport = null
                     when (spec.availability) {
                         ModelAvailability.CUSTOM_IMPORTED -> Toast.makeText(context, "모델 파일을 가져왔습니다.", Toast.LENGTH_SHORT).show()
                         ModelAvailability.NEEDS_CONVERSION -> Toast.makeText(context, "이 모델은 변환 후 사용할 수 있습니다.", Toast.LENGTH_SHORT).show()
@@ -8764,6 +8771,8 @@ private fun ModelStorageManagerDialog(
                                     FusionTextButton(onClick = {
                                         scope.launch {
                                             val copied = copyUriToModelFile(
+                                                coordinator = ModelImportCoordinatorRegistry.forContext(context),
+                                                token = UUID.randomUUID().toString(),
                                                 context = context,
                                                 uri = Uri.parse(spec.uriString),
                                                 displayName = spec.originalFileName ?: spec.fileName ?: spec.displayName
@@ -9936,10 +9945,18 @@ private fun isModelDownloaded(
 
 }
 private suspend fun copyUriToModelFile(
+    coordinator: ModelImportCoordinator,
+    token: String,
     context: Context,
     uri: Uri,
     displayName: String
 ): File? {
+    val result = coordinator.import(
+        ModelImportRequest(token = token, sourceIdentity = uri.toString(), displayName = displayName),
+    )
+    if (result is com.projectnuke.fusion.modelzoo.ModelImportResult.Success) return result.file
+    return null
+    /*
     var temporaryFile: File? = null
     var adoptedFile: File? = null
 
@@ -10009,6 +10026,8 @@ private suspend fun copyUriToModelFile(
         Log.e("FusionModel", "Failed to copy model into managed storage", failure)
         return null
     }
+}
+*/
 }
 
 private fun releasePersistedReadPermission(context: Context, uri: Uri) {
