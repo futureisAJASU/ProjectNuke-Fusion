@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.ai.data.AiProviderRepository
 import com.projectnuke.fusion.ai.model.AiProviderConfig
+import com.projectnuke.fusion.ai.model.AiProviderAuthMode
 import com.projectnuke.fusion.ai.model.AiProviderType
 import com.projectnuke.fusion.ai.network.OpenAiCompatibleClient
 import com.projectnuke.fusion.ai.provider.AiProviderPresets
@@ -75,6 +76,8 @@ private data class ProviderDraft(
     val isEnabled: Boolean,
     val temperatureText: String,
     val maxTokensText: String
+    ,val authMode: AiProviderAuthMode
+    ,val authHeaderName: String?
 )
 
 @Composable
@@ -97,6 +100,8 @@ fun AiProviderSettingsScreen(
     var enabled by remember { mutableStateOf(true) }
     var temperatureText by remember { mutableStateOf("0.7") }
     var maxTokensText by remember { mutableStateOf("") }
+    var authMode by remember { mutableStateOf(AiProviderAuthMode.BEARER_API_KEY) }
+    var authHeaderName by remember { mutableStateOf("") }
     var statusText by remember { mutableStateOf<String?>(null) }
     var decryptableSecret by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -113,6 +118,8 @@ fun AiProviderSettingsScreen(
         enabled = target.isEnabled
         temperatureText = target.temperature.toString()
         maxTokensText = target.maxTokens?.toString().orEmpty()
+        authMode = target.authMode
+        authHeaderName = target.authHeaderName.orEmpty()
         statusText = null
     }
 
@@ -130,6 +137,8 @@ fun AiProviderSettingsScreen(
             isEnabled = enabled,
             temperatureText = temperatureText.trim(),
             maxTokensText = maxTokensText.trim()
+            ,authMode = authMode
+            ,authHeaderName = authHeaderName.trim().ifBlank { null }
         )
     }
 
@@ -144,6 +153,8 @@ fun AiProviderSettingsScreen(
             isEnabled = isEnabled,
             temperature = temperatureText.toDoubleOrNull() ?: 0.7,
             maxTokens = maxTokensText.toIntOrNull()
+            ,authMode = authMode
+            ,authHeaderName = authHeaderName
         )
     }
 
@@ -246,6 +257,16 @@ fun AiProviderSettingsScreen(
                 }
 
                 item { SectionTitle("편집") }
+                item {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PresetButton("Bearer API key") { authMode = AiProviderAuthMode.BEARER_API_KEY }
+                        PresetButton("No auth (local)") { authMode = AiProviderAuthMode.NONE }
+                        PresetButton("Custom header") { authMode = AiProviderAuthMode.CUSTOM_HEADER }
+                    }
+                }
+                if (authMode == AiProviderAuthMode.CUSTOM_HEADER) item {
+                    OutlinedTextField(value = authHeaderName, onValueChange = { authHeaderName = it }, label = { Text("Secret header name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
                 item {
                     OutlinedTextField(
                         value = displayName,
