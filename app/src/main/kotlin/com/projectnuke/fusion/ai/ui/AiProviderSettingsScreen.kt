@@ -98,6 +98,7 @@ fun AiProviderSettingsScreen(
     var temperatureText by remember { mutableStateOf("0.7") }
     var maxTokensText by remember { mutableStateOf("") }
     var statusText by remember { mutableStateOf<String?>(null) }
+    var decryptableSecret by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
 
     fun loadEditor(config: AiProviderConfig?) {
@@ -108,6 +109,7 @@ fun AiProviderSettingsScreen(
         baseUrl = target.baseUrl
         modelId = target.modelId
         apiKey = ""
+        decryptableSecret = false
         enabled = target.isEnabled
         temperatureText = target.temperature.toString()
         maxTokensText = target.maxTokens?.toString().orEmpty()
@@ -175,7 +177,9 @@ fun AiProviderSettingsScreen(
 
     suspend fun refreshProviders() {
         providers = repository.getProviders()
-        loadEditor(repository.getSelectedProvider() ?: providers.firstOrNull())
+        val selected = repository.getSelectedProvider() ?: providers.firstOrNull()
+        loadEditor(selected)
+        decryptableSecret = selected?.let { repository.hasDecryptableSecret(it) } == true
     }
 
     LaunchedEffect(Unit) {
@@ -186,7 +190,7 @@ fun AiProviderSettingsScreen(
     val editorStatus = currentDraft?.let {
         buildProviderStatus(
             config = it.toConfig(),
-            hasApiKey = it.apiKeyInput.isNotBlank() || !it.apiKeySecretId.isNullOrBlank()
+            hasApiKey = it.apiKeyInput.isNotBlank() || decryptableSecret
         )
     }
 
@@ -230,7 +234,14 @@ fun AiProviderSettingsScreen(
                 }
                 item {
                     PresetButton("Custom OpenAI-Compatible") {
-                        loadEditor(AiProviderPresets.CustomOpenAiCompatible)
+                        scope.launch {
+                            runCatching { repository.createCustomProvider() }
+                                .onSuccess {
+                                    refreshProviders()
+                                    loadEditor(it)
+                                }
+                                .onFailure { statusText = "Provider could not be created" }
+                        }
                     }
                 }
 
@@ -242,6 +253,13 @@ fun AiProviderSettingsScreen(
                         label = { Text("표시 이름") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                item {
+                    Text(
+                        text = "Endpoint example: https://api.example.com/v1 or https://api.example.com/v1/chat/completions",
+                        color = TextSecondary,
+                        fontSize = 11.sp,
                     )
                 }
                 item {

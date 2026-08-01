@@ -47,7 +47,11 @@ class OpenAiCompatibleClient(
             ?: throw AiProviderClientException("API 키를 입력해 주세요.")
         val apiKey = secretStore.getSecret(secretId)?.takeIf { it.isNotBlank() }
             ?: throw AiProviderClientException("API 키를 입력해 주세요.")
-        val endpoint = "${normalizedBaseUrl}chat/completions"
+        val endpoint = if (normalizedBaseUrl.endsWith("chat/completions/")) {
+            normalizedBaseUrl.trimEnd('/')
+        } else {
+            "${normalizedBaseUrl}chat/completions"
+        }
 
         return withContext(Dispatchers.IO) {
             val connection = createConnection(endpoint, apiKey)
@@ -92,7 +96,7 @@ class OpenAiCompatibleClient(
                     if (status !in 200..299) {
                         throw AiProviderClientException(buildHttpErrorMessage(status, responseText))
                     }
-                    val response = parseResponse(responseText)
+                    val response = parseResponse(responseText, config.reasoningContentEnabled)
 
                     ctx.ensureActive()
                     onBeforeCompletion()
@@ -131,6 +135,7 @@ class OpenAiCompatibleClient(
             connectTimeout = ConnectTimeoutMillis
             readTimeout = ReadTimeoutMillis
             doOutput = true
+            instanceFollowRedirects = false
             setRequestProperty("Authorization", "Bearer $apiKey")
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
@@ -156,15 +161,34 @@ class OpenAiCompatibleClient(
             }
     }
 
-    private fun parseResponse(raw: String): AiChatResponse {
+    private fun parseResponse(raw: String, reasoningContentEnabled: Boolean): AiChatResponse {
         val json = JSONObject(raw)
         val choices = json.optJSONArray("choices")
         val message = choices?.optJSONObject(0)?.optJSONObject("message")
         return AiChatResponse(
             id = json.optString("id").takeIf { it.isNotBlank() },
             model = json.optString("model").takeIf { it.isNotBlank() },
-            content = message?.optString("content").orEmpty()
+            content = extractCompatibleContent(message, reasoningContentEnabled)
         )
+    }
+
+    private fun extractCompatibleContent(message: JSONObject?, reasoningEnabled: Boolean): String {
+        if (message == null) throw AiProviderClientException("Provider response has no message")
+        val content = when (val raw = message.opt("content")) {
+            is String -> raw
+            is JSONArray -> buildString {
+                for (index in 0 until minOf(raw.length(), 128)) {
+                    val part = raw.optJSONObject(index) ?: continue
+                    if (part.optString("type") == "text" || part.has("text")) append(part.optString("text"))
+                }
+            }
+            else -> ""
+        }
+        val fallback = if (reasoningEnabled) {
+            message.optString("reasoning_content").ifBlank { message.optString("reasoningContent") }
+        } else ""
+        return content.ifBlank { fallback }.takeIf { it.isNotBlank() }
+            ?: throw AiProviderClientException("Provider returned an empty response")
     }
 
     private fun normalizeBaseUrl(baseUrl: String): String {
