@@ -11,6 +11,20 @@ import org.junit.Test
 
 class ModelImportCoordinatorTest {
     @Test
+    fun `default validator rejects random bytes renamed to litertlm`() = runTest {
+        val root = Files.createTempDirectory("fusion-model-import").toFile()
+        val coordinator = ModelImportCoordinator(
+            modelDirectory = root,
+            openSource = { ByteArrayInputStream(ByteArray(1024 * 1024) { 7 }) },
+            usableSpace = { Long.MAX_VALUE },
+        )
+        val result = coordinator.import(ModelImportRequest(sourceIdentity = "random", displayName = "random.litertlm"))
+        assertEquals(ModelImportFailure.INVALID_MODEL, (result as ModelImportResult.Failure).kind)
+        assertTrue(root.listFiles().orEmpty().none { it.name.endsWith(".litertlm") })
+        root.deleteRecursively()
+    }
+
+    @Test
     fun `invalid staged model is never adopted`() = runTest {
         val root = Files.createTempDirectory("fusion-model-import").toFile()
         val coordinator = ModelImportCoordinator(

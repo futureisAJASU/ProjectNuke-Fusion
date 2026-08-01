@@ -1,8 +1,8 @@
 package com.projectnuke.fusion.modelzoo
 
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -42,6 +42,21 @@ internal fun interface LiteRtLmValidator {
     fun validate(file: File): Boolean
 }
 
+internal object LiteRtLmPackageValidator : LiteRtLmValidator {
+    private val magic = "LITERTLM".toByteArray(Charsets.US_ASCII)
+
+    override fun validate(file: File): Boolean {
+        if (!file.isFile || !file.extension.equals("litertlm", true) || file.length() < magic.size) return false
+        return runCatching {
+            RandomAccessFile(file, "r").use { input ->
+                val header = ByteArray(magic.size)
+                input.readFully(header)
+                header.contentEquals(magic)
+            }
+        }.getOrDefault(false)
+    }
+}
+
 /** Process-owned, single-adoption coordinator for imported local models. */
 internal class ModelImportCoordinator(
     private val modelDirectory: File,
@@ -51,7 +66,7 @@ internal class ModelImportCoordinator(
     private val maximumBytes: Long = 12L * 1024L * 1024L * 1024L,
     private val reserveBytes: Long = 512L * 1024L * 1024L,
     private val validator: LiteRtLmValidator = LiteRtLmValidator { file ->
-        file.isFile && file.length() >= 1024L * 1024L && file.extension.equals("litertlm", true)
+        file.length() >= 1024L * 1024L && LiteRtLmPackageValidator.validate(file)
     },
 ) {
     private val activeBySource = ConcurrentHashMap<String, String>()
