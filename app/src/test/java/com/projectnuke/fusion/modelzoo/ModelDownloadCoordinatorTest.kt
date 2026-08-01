@@ -122,6 +122,19 @@ class ModelDownloadCoordinatorTest {
     }
 
     @Test
+    fun `successful adoption validates header and cleans up backup`() = runBlocking {
+        val previous = byteArrayOf(1, 2, 3)
+        val target = temp.root.resolve("model.litertlm").apply { writeBytes(previous) }
+        val body = ByteArray(16) { 1 }
+        val result = coordinator(FakeConnection(body = body, declaredLength = body.size.toLong()))
+            .download("https://example.test/model", target)
+
+        assertEquals(ModelDownloadResult.Success::class, result::class)
+        assertArrayEquals(body, target.readBytes())
+        assertFalse(temp.root.listFiles { f -> f.name.endsWith(".bak") }!!.isNotEmpty())
+    }
+
+    @Test
     fun `cancellation is rethrown disconnects and cleans partial file`() = runBlocking {
         val firstRead = CountDownLatch(1)
         val releaseRead = CountDownLatch(1)

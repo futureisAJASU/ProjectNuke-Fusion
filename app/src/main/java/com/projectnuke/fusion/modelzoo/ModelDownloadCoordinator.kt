@@ -187,7 +187,14 @@ internal class ModelDownloadCoordinator(
                 if (hadPrevious) runCatching { Files.move(backup.toPath(), target.toPath()) }
                 return ModelDownloadResult.Failure(ModelDownloadFailure.ATOMIC_ADOPTION, status)
             }
-            runCatching { if (backup.exists()) backup.delete() }
+            if (headerCount > 0 && !stagedHeaderMatches(target, header, headerCount)) {
+                runCatching { if (target.exists()) target.delete() }
+                if (hadPrevious) runCatching { Files.move(backup.toPath(), target.toPath()) }
+                return ModelDownloadResult.Failure(ModelDownloadFailure.INVALID_PAYLOAD, status)
+            }
+            if (backup.exists()) {
+                runCatching { backup.delete() }
+            }
 
             onProgress(100)
             return ModelDownloadResult.Success(target, copied)
@@ -288,6 +295,25 @@ internal class ModelDownloadCoordinator(
         return prefix.startsWith("<!doctype html") ||
             prefix.startsWith("<html") ||
             prefix.startsWith("<?xml") && "<html" in prefix
+    }
+
+    private fun stagedHeaderMatches(target: File, sniffsHeader: ByteArray, sniffsCount: Int): Boolean {
+        if (sniffsCount <= 0) return true
+        if (!target.isFile) return false
+        val targetBytes = ByteArray(sniffsCount)
+        var read = 0
+        target.inputStream().use { input ->
+            while (read < sniffsCount) {
+                val got = input.read(targetBytes, read, sniffsCount - read)
+                if (got <= 0) break
+                read += got
+            }
+        }
+        if (read < sniffsCount) return false
+        for (i in 0 until sniffsCount) {
+            if (targetBytes[i] != sniffsHeader[i]) return false
+        }
+        return true
     }
 
     private sealed interface OpenResult {
