@@ -6,8 +6,14 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.util.ManagedModelPathPolicy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+
+private val settingsRestoreLock = Mutex()
 
 private const val SettingsBackupSchemaVersion = 1
 
@@ -80,17 +86,17 @@ fun buildSettingsBackupJson(context: Context, prefs: SharedPreferences): String 
     return root.toString(2)
 }
 
-fun restoreSettingsBackupJson(
+suspend fun restoreSettingsBackupJson(
     context: Context,
     prefs: SharedPreferences,
     raw: String
-): SettingsRestoreResult {
+): SettingsRestoreResult = settingsRestoreLock.withLock {
     if (raw.toByteArray(Charsets.UTF_8).size > MaxSettingsBackupBytes) {
-        return SettingsRestoreResult.TooLarge
+        return@withLock SettingsRestoreResult.TooLarge
     }
-    val root = runCatching { JSONObject(raw) }.getOrNull() ?: return SettingsRestoreResult.InvalidJson
+    val root = runCatching { JSONObject(raw) }.getOrNull() ?: return@withLock SettingsRestoreResult.InvalidJson
     if (root.optString("app") != "Fusion" || root.optInt("schemaVersion", -1) != SettingsBackupSchemaVersion) {
-        return SettingsRestoreResult.UnsupportedSchema
+        return@withLock SettingsRestoreResult.UnsupportedSchema
     }
     val settings = root.optJSONObject("settings") ?: JSONObject()
     val modelLibrary = root.optJSONObject("modelLibrary") ?: JSONObject()
@@ -99,7 +105,7 @@ fun restoreSettingsBackupJson(
         modelLibrary.length() > MaxBackupObjectFields ||
         containsOversizedValue(root)
     ) {
-        return SettingsRestoreResult.InvalidFields
+        return@withLock SettingsRestoreResult.InvalidFields
     }
     val restoredKeys = mutableListOf<String>()
     val editor = prefs.edit()
@@ -173,10 +179,14 @@ fun restoreSettingsBackupJson(
         editor.putString(PrefModelLibrarySortMode, sortMode.takeIf { it in allowedSortModes } ?: "recommendation")
         restoredKeys += PrefModelLibrarySortMode
     }
-    if (modelPathMissing) return SettingsRestoreResult.ModelPathMissing
-    if (!editor.commit()) return SettingsRestoreResult.CommitFailed
+    val committed = withContext(Dispatchers.IO) { editor.commit() }
+    if (!committed) return@withLock SettingsRestoreResult.CommitFailed
+    if (modelPathMissing) {
+        Log.d("FusionModelSelect", "settings_restore schema=${root.optInt("schemaVersion", -1)} keys=${restoredKeys.joinToString(",")} ModelPathMissing retained_current=true")
+        return@withLock SettingsRestoreResult.ModelPathMissing
+    }
     Log.d("FusionModelSelect", "settings_restore schema=${root.optInt("schemaVersion", -1)} keys=${restoredKeys.joinToString(",")} success=true")
-    return SettingsRestoreResult.Success
+    return@withLock SettingsRestoreResult.Success
 }
 
 private fun containsOversizedValue(value: Any?): Boolean = when (value) {
