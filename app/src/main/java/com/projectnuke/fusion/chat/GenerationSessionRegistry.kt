@@ -23,6 +23,7 @@ class GenerationSessionRegistry {
     private val sessions = ConcurrentHashMap<Long, GenerationSession>()
     private val latestTokens = ConcurrentHashMap<Long, PendingStart>()
     private val lockStripes = Array(16) { Mutex() }
+    private val deletionOwners = ConcurrentHashMap<Long, String>()
 
     internal class PendingStart(
         val conversationId: Long,
@@ -34,6 +35,14 @@ class GenerationSessionRegistry {
 
         @Volatile
         var predecessor: PendingStart? = null
+
+        /**
+         * True when this start's token was claimed while a deletion owned the
+         * conversation. The refusal survives the deletion's release so a start
+         * that began during a deletion can never install afterwards.
+         */
+        @Volatile
+        var claimedDuringDeletion: Boolean = false
 
         enum class State { PENDING, STARTING, INSTALLED, CANCELLED }
 
@@ -62,6 +71,22 @@ class GenerationSessionRegistry {
     private fun stripeFor(conversationId: Long): Mutex =
         lockStripes[(conversationId and 15L).toInt()]
 
+    /**
+     * Claims exclusive deferred ownership of a conversation for an in-flight
+     * deletion. While owned, [start] refuses to install a new session for the
+     * conversation so a generation can never outlive a deletion that already
+     * began cancelling it. Must be paired with [releaseDeletionOwnership].
+     */
+    fun claimDeletionOwnership(conversationId: Long, reason: String): Boolean =
+        deletionOwners.putIfAbsent(conversationId, reason) == null
+
+    fun releaseDeletionOwnership(conversationId: Long, reason: String) {
+        deletionOwners.remove(conversationId, reason)
+    }
+
+    internal fun deletionOwner(conversationId: Long): String? =
+        deletionOwners[conversationId]
+
     suspend fun start(
         scope: CoroutineScope,
         snapshot: GenerationRequestSnapshot,
@@ -77,10 +102,22 @@ class GenerationSessionRegistry {
             latestTokens.compute(conversationId) { _, previous ->
                 token.predecessor = previous
                 previous?.cancel("superseded-by-$requestId")
+                token.claimedDuringDeletion = deletionOwners.containsKey(conversationId)
                 token
             }
 
             return lock.withLock {
+                if (token.claimedDuringDeletion) {
+                    throw CancellationException(
+                        "Conversation $conversationId was being deleted when request $requestId began"
+                    )
+                }
+                deletionOwners[conversationId]?.let { ownerReason ->
+                    throw CancellationException(
+                        "Conversation $conversationId is being deleted ($ownerReason)"
+                    )
+                }
+
                 if (!token.tryBeginStarting()) {
                     throw token.cancellationException()
                 }
@@ -110,7 +147,23 @@ class GenerationSessionRegistry {
                 )
 
                 token.publishedSession.set(gs)
-                sessions[conversationId] = gs
+                var owner = sessions.putIfAbsent(conversationId, gs)
+                if (owner != null && owner.job.isCompleted) {
+                    sessions.remove(conversationId, owner)
+                    owner = sessions.putIfAbsent(conversationId, gs)
+                }
+                if (owner != null) {
+                    sessions.remove(conversationId, gs)
+                    if (!coroutineJob.isCompleted) {
+                        coroutineJob.cancel(CancellationException(
+                            "Request $requestId lost the conversation slot to ${owner.requestId}"
+                        ))
+                        coroutineJob.join()
+                    }
+                    throw CancellationException(
+                        "Request $requestId superseded by ${owner.requestId} before install"
+                    )
+                }
 
                 onBeforeInstall()
 
@@ -159,22 +212,31 @@ class GenerationSessionRegistry {
   } finally {
             if (token.state() != PendingStart.State.INSTALLED) {
                 latestTokens.remove(conversationId, token)
+                token.publishedSession.get()?.let { session ->
+                    sessions.remove(conversationId, session)
+                    if (!session.job.isCompleted) {
+                        session.job.cancel(CancellationException("start-aborted"))
+                    }
+                }
             }
             token.completed.complete(Unit)
         }
     }
 
+    private fun GenerationSession.isBusy(): Boolean =
+        job.isActive && !job.isCancelled
+
     fun activeSession(conversationId: Long): GenerationSession? =
-        sessions[conversationId]?.takeIf { it.job.isActive }
+        sessions[conversationId]?.takeIf { it.isBusy() }
 
     fun isActive(conversationId: Long, requestId: String): Boolean =
         sessions[conversationId]?.let {
-            it.requestId == requestId && it.job.isActive
+            it.requestId == requestId && it.isBusy()
         } == true
 
     fun cancel(conversationId: Long, reason: String): Boolean {
         val session = sessions[conversationId] ?: return false
-        if (!session.job.isActive) return false
+        if (!session.isBusy()) return false
         session.job.cancel(CancellationException(reason))
         return true
     }
@@ -293,10 +355,10 @@ class GenerationSessionRegistry {
     }
 
     fun hasActiveSession(conversationId: Long): Boolean =
-        sessions[conversationId]?.job?.isActive == true
+        sessions[conversationId]?.isBusy() == true
 
     fun activeConversationIds(): Set<Long> =
-        sessions.filterValues { it.job.isActive }.keys.toSet()
+        sessions.filterValues { it.isBusy() }.keys.toSet()
 
     internal fun isPending(conversationId: Long, requestId: String): Boolean {
         val token = latestTokens[conversationId] ?: return false

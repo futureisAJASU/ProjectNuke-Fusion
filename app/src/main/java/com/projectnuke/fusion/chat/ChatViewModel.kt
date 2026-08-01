@@ -147,19 +147,28 @@ class ChatViewModel(
         if (existing != null && !existing.isCompleted) return existing
 
         val deferred = viewModelScope.async {
-            val result = deletionCoordinator.delete(
-                conversationId = conversationId,
-                cancelAndJoin = {
-                    cancelAndAwait(conversationId, reason = "delete-conversation")
-                },
-                exists = exists,
-                commitDelete = commitDelete,
-                settleTarget = settleTarget,
-                cleanupDerivedData = cleanupDerivedData,
-                recordCleanupDebt = recordCleanupDebt,
-            )
-            deletionDeferreds.remove(conversationId)
-            result
+            val deletionReason = "delete-conversation"
+            val ownsDeletionOwnership =
+                registry.claimDeletionOwnership(conversationId, deletionReason)
+            try {
+                val result = deletionCoordinator.delete(
+                    conversationId = conversationId,
+                    cancelAndJoin = {
+                        cancelAndAwait(conversationId, reason = "delete-conversation")
+                    },
+                    exists = exists,
+                    commitDelete = commitDelete,
+                    settleTarget = settleTarget,
+                    cleanupDerivedData = cleanupDerivedData,
+                    recordCleanupDebt = recordCleanupDebt,
+                )
+                deletionDeferreds.remove(conversationId)
+                result
+            } finally {
+                if (ownsDeletionOwnership) {
+                    registry.releaseDeletionOwnership(conversationId, deletionReason)
+                }
+            }
         }
         val previous = deletionDeferreds.putIfAbsent(conversationId, deferred)
         if (previous != null) {

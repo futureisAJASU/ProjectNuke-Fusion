@@ -2043,6 +2043,203 @@ class GenerationSessionRegistryTest {
         }
     }
 
+    @Test
+    fun `start during deletion ownership refuses and installs nothing`() = runBlocking {
+        val scope = testScope()
+        val release = CompletableDeferred<Unit>()
+        try {
+            val registry = GenerationSessionRegistry()
+            assertTrue("first deletion claim should succeed",
+                registry.claimDeletionOwnership(21L, "delete-21"))
+
+            val startResult = async(Dispatchers.Default) {
+                try {
+                    registry.start(scope, snapshot(21L, "r21")) { release.await() }
+                    "installed"
+                } catch (e: CancellationException) { "cancelled" }
+            }
+
+            assertEquals("cancelled", withTimeout(2000) { startResult.await() })
+            assertNull("no session must install while deletion owns the conversation",
+                registry.activeSession(21L))
+            assertNull("no lifecycle token must remain after refused start",
+                registry.latestToken(21L))
+            assertFalse("refused request must not be pending",
+                registry.isPending(21L, "r21"))
+
+            registry.releaseDeletionOwnership(21L, "delete-21")
+
+            val session = withTimeout(2000) {
+                registry.start(scope, snapshot(21L, "r21b")) { release.await() }
+            }
+            assertTrue("start must succeed after ownership release",
+                registry.isActive(21L, "r21b"))
+            session.job.cancel()
+            session.job.join()
+        } finally {
+            release.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `deletion ownership is exclusive per conversation and releases on exact reason`() = runBlocking {
+        val registry = GenerationSessionRegistry()
+        assertTrue(registry.claimDeletionOwnership(31L, "first"))
+        assertFalse("second claim must be refused",
+            registry.claimDeletionOwnership(31L, "second"))
+        assertTrue("other conversations must be independent",
+            registry.claimDeletionOwnership(32L, "other"))
+        assertEquals("first", registry.deletionOwner(31L))
+
+        registry.releaseDeletionOwnership(31L, "wrong-reason")
+        assertEquals("release must require the exact owning reason",
+            "first", registry.deletionOwner(31L))
+
+        registry.releaseDeletionOwnership(31L, "first")
+        assertNull(registry.deletionOwner(31L))
+        assertTrue("claim must succeed after release",
+            registry.claimDeletionOwnership(31L, "third"))
+    }
+
+    @Test
+    fun `start blocked on the stripe lock during deletion ownership refuses after the lock`() = runBlocking {
+        val scope = testScope()
+        val blockerInOnBeforeInstall = CountDownLatch(1)
+        val onBeforeInstallRelease = CompletableDeferred<Unit>()
+        val blockerRelease = CompletableDeferred<Unit>()
+        try {
+            val registry = GenerationSessionRegistry()
+            registry.onBeforeInstall = {
+                blockerInOnBeforeInstall.countDown()
+                onBeforeInstallRelease.await()
+            }
+
+            val stripeBlocker = async(Dispatchers.Default) {
+                try {
+                    registry.start(scope, snapshot(17L, "blocker")) { blockerRelease.await() }
+                    "installed"
+                } catch (_: CancellationException) { "cancelled" }
+            }
+            awaitGate(blockerInOnBeforeInstall)
+
+            val target = async(Dispatchers.Default) {
+                try {
+                    registry.start(scope, snapshot(1L, "target")) {
+                        CompletableDeferred<Unit>().await()
+                    }
+                    "installed"
+                } catch (e: CancellationException) { "cancelled:${e.message}" }
+            }
+            withTimeout(2000) {
+                while (!registry.isPending(1L, "target")) { yield() }
+            }
+
+            assertTrue("claim must succeed while target waits on the lock",
+                registry.claimDeletionOwnership(1L, "delete-1"))
+
+            onBeforeInstallRelease.complete(Unit)
+            withTimeout(2000) { stripeBlocker.await() }
+
+            assertTrue("target must be refused once it reaches the barrier",
+                withTimeout(2000) { target.await() }.startsWith("cancelled:"))
+            assertNull("target must not install", registry.activeSession(1L))
+            assertNull("target lifecycle token must be gone", registry.latestToken(1L))
+        } finally {
+            onBeforeInstallRelease.complete(Unit)
+            blockerRelease.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `non-cancellation failure before install releases the slot and the token`() = runBlocking {
+        val scope = testScope()
+        val release = CompletableDeferred<Unit>()
+        try {
+            val registry = GenerationSessionRegistry()
+            registry.onBeforeInstall = { error("install precondition failed") }
+
+            val startResult = async(Dispatchers.Default) {
+                try {
+                    registry.start(scope, snapshot(41L, "r41")) { release.await() }
+                    "installed"
+                } catch (e: IllegalStateException) { "failed:${e.message}" }
+            }
+
+            assertEquals("failed:install precondition failed",
+                withTimeout(2000) { startResult.await() })
+            assertNull("slot must be released after failed start",
+                registry.activeSession(41L))
+            assertNull("token must be released after failed start",
+                registry.latestToken(41L))
+            assertFalse("failed start must not leave a busy session",
+                registry.hasActiveSession(41L))
+            assertTrue("failed start must not be exposed as active",
+                registry.activeConversationIds().isEmpty())
+
+            registry.onBeforeInstall = {}
+            val session = withTimeout(2000) {
+                registry.start(scope, snapshot(41L, "r41b")) { release.await() }
+            }
+            assertTrue("subsequent start must install normally",
+                registry.isActive(41L, "r41b"))
+            session.job.cancel()
+            session.job.join()
+        } finally {
+            release.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
+    @Test
+    fun `cancelled session is not reported busy while cleanup is still running`() = runBlocking {
+        val scope = testScope()
+        val cleanupRelease = CompletableDeferred<Unit>()
+        val entered = CountDownLatch(1)
+        try {
+            val registry = GenerationSessionRegistry()
+            val session = withTimeout(2000) {
+                registry.start(scope, snapshot(51L, "r51")) {
+                    entered.countDown()
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } finally {
+                        withContext(NonCancellable) { cleanupRelease.await() }
+                    }
+                }
+            }
+            awaitGate(entered)
+            assertTrue("session must be busy before cancellation",
+                registry.isActive(51L, "r51"))
+
+            assertTrue("cancel must succeed while busy",
+                registry.cancel(51L, "stop"))
+            assertFalse("cancel must be a no-op once already cancelled",
+                registry.cancel(51L, "stop-again"))
+
+            assertFalse("cancelled session must not report active while cleanup runs",
+                registry.isActive(51L, "r51"))
+            assertNull("cancelled session must not be exposed",
+                registry.activeSession(51L))
+            assertFalse("cancelled session must not report busy",
+                registry.hasActiveSession(51L))
+            assertTrue("cancelled session must not appear in active ids",
+                registry.activeConversationIds().isEmpty())
+
+            cleanupRelease.complete(Unit)
+            withTimeout(2000) { session.job.join() }
+            assertNull("completed session must be removed", registry.activeSession(51L))
+        } finally {
+            cleanupRelease.complete(Unit)
+            scope.cancel()
+            withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
+        }
+    }
+
     private fun testScope(): CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default)
 

@@ -1,5 +1,6 @@
 package com.projectnuke.fusion.chat
 
+import com.projectnuke.fusion.chat.GenerationSessionRegistry.PendingStart
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
@@ -301,6 +302,8 @@ class ChatViewModelRequestStateTest {
         val aStarted = CountDownLatch(1)
         val bBlockEntered = CountDownLatch(1)
         val bHold = CompletableDeferred<Unit>()
+        val bPreInstall = CountDownLatch(1)
+        val bPreInstallRelease = CompletableDeferred<Unit>()
         try {
             val vm = ChatViewModel()
             val convId = 107L
@@ -361,11 +364,13 @@ class ChatViewModelRequestStateTest {
                 }
             }
 
+            vm.registry.onBeforeInstall = {
+                bPreInstall.countDown()
+                bPreInstallRelease.await()
+            }
+
             withTimeout(2000) {
-                while (
-                    !vm.registry.isPending(convId, "B") &&
-                    !vm.registry.isStarting(convId, "B")
-                ) {
+                while (vm.registry.latestToken(convId)?.requestId != "B") {
                     yield()
                 }
             }
@@ -375,6 +380,13 @@ class ChatViewModelRequestStateTest {
             }
 
             aCleanupRelease.complete(Unit)
+            awaitGate(bPreInstall)
+            withTimeout(2000) {
+                while (vm.registry.latestToken(convId)?.state() != PendingStart.State.CANCELLED) {
+                    yield()
+                }
+            }
+            bPreInstallRelease.complete(Unit)
 
             val bResult = withTimeout(2000) { bDeferred.await() }
             assertTrue("B start should have thrown CancellationException", bResult is CancellationException)
@@ -400,6 +412,7 @@ class ChatViewModelRequestStateTest {
         } finally {
             aCleanupRelease.complete(Unit)
             bHold.complete(Unit)
+            bPreInstallRelease.complete(Unit)
             scope.cancel()
             withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
@@ -413,6 +426,8 @@ class ChatViewModelRequestStateTest {
         val aStarted = CountDownLatch(1)
         val bBlockEntered = CountDownLatch(1)
         val bHold = CompletableDeferred<Unit>()
+        val bPreInstall = CountDownLatch(1)
+        val bPreInstallRelease = CompletableDeferred<Unit>()
         try {
             val vm = ChatViewModel()
             val convId = 108L
@@ -457,11 +472,13 @@ class ChatViewModelRequestStateTest {
                 }
             }
 
+            vm.registry.onBeforeInstall = {
+                bPreInstall.countDown()
+                bPreInstallRelease.await()
+            }
+
             withTimeout(2000) {
-                while (
-                    !vm.registry.isPending(convId, "B") &&
-                    !vm.registry.isStarting(convId, "B")
-                ) {
+                while (vm.registry.latestToken(convId)?.requestId != "B") {
                     yield()
                 }
             }
@@ -470,13 +487,14 @@ class ChatViewModelRequestStateTest {
                 vm.cancelAndAwait(convId, "delete")
             }
 
+            aCleanupRelease.complete(Unit)
+            awaitGate(bPreInstall)
             withTimeout(2000) {
-                while (vm.registry.isPending(convId, "B")) {
+                while (vm.registry.latestToken(convId)?.state() != PendingStart.State.CANCELLED) {
                     yield()
                 }
             }
-
-            aCleanupRelease.complete(Unit)
+            bPreInstallRelease.complete(Unit)
 
             val bResult = withTimeout(2000) { bDeferred.await() }
             assertTrue("B start should have thrown CancellationException",
@@ -500,6 +518,7 @@ class ChatViewModelRequestStateTest {
         } finally {
             aCleanupRelease.complete(Unit)
             bHold.complete(Unit)
+            bPreInstallRelease.complete(Unit)
             scope.cancel()
             withTimeout(2000) { scope.coroutineContext[Job]!!.join() }
         }
