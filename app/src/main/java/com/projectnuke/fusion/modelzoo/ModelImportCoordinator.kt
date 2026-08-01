@@ -10,6 +10,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -119,8 +120,11 @@ internal class ModelImportCoordinator(
                         if (read < 0) break
                         if (read == 0) continue
                         copied += read
-                        if (copied > maximumBytes || !hasSpace(root, copied)) {
+                        if (copied > maximumBytes) {
                             return@withContext ModelImportResult.Failure(ModelImportFailure.TOO_LARGE, request.token)
+                        }
+                        if (!hasSpace(root, read + reserveBytes)) {
+                            return@withContext ModelImportResult.Failure(ModelImportFailure.STORAGE_FULL, request.token)
                         }
                         output.write(buffer, 0, read)
                         val progress = if (declared != null && declared > 0) {
@@ -216,7 +220,20 @@ internal object ModelImportCoordinatorRegistry {
             ModelImportCoordinator(
                 modelDirectory = ManagedModelPathPolicy.getModelDirectory(app),
                 openSource = { source -> app.contentResolver.openInputStream(Uri.parse(source)) },
-                sourceLength = { source -> null },
+                sourceLength = { source ->
+                    runCatching {
+                        app.contentResolver.query(
+                            Uri.parse(source), null, null, null, null
+                        )?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                                    cursor.getLong(sizeIndex)
+                                } else null
+                            } else null
+                        }
+                    }.getOrNull()
+                },
             )
         }
     }
