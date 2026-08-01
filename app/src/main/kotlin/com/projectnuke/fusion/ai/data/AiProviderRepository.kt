@@ -105,11 +105,11 @@ class AiProviderRepository(
             return false
         }
         val oldSecretId = previous?.apiKeySecretId
-        if (oldSecretId != null && oldSecretId != newSecretId) runCatching { secretStore.deleteSecret(oldSecretId) }
+        val oldSecretDeleted = oldSecretId == null || oldSecretId == newSecretId || runCatching { secretStore.deleteSecret(oldSecretId); true }.getOrDefault(false)
         if (prefs.getString(KeySelectedProvider, null) == null) {
             withContext(Dispatchers.IO) { prefs.edit().putString(KeySelectedProvider, validated.id).commit() }
         }
-        return true
+        return oldSecretDeleted
     }
 
     suspend fun createCustomProvider(): AiProviderConfig {
@@ -129,10 +129,8 @@ class AiProviderRepository(
             prefs.edit().putString(KeyProviders, providersToJson(updated).toString())
                 .putString(KeySelectedProvider, updated.firstOrNull()?.id).commit()
         }
-        if (committed && existing.apiKeySecretId != null) {
-            runCatching { secretStore.deleteSecret(existing.apiKeySecretId) }
-        }
-        return committed
+        if (!committed) return false
+        return existing.apiKeySecretId == null || runCatching { secretStore.deleteSecret(existing.apiKeySecretId); true }.getOrDefault(false)
     }
 
     suspend fun getSelectedProvider(): AiProviderConfig? {
