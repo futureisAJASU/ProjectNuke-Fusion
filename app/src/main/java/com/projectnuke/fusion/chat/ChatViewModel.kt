@@ -15,13 +15,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 
 data class ConversationGenerationState(
@@ -79,49 +72,18 @@ class ChatViewModel(
     private val _states = MutableStateFlow<Map<Long, ConversationGenerationState>>(emptyMap())
     val states: StateFlow<Map<Long, ConversationGenerationState>> = _states.asStateFlow()
 
-    private val draftStore: PersistentComposerDraftStore? = context?.let(::PersistentComposerDraftStore)
-    private var draftPersistJob: Job? = null
-    private var draftWriteId = 0L
-    private val draftHydrated = CompletableDeferred<Unit>()
-    private val draftMutationLock = Mutex()
-    private val pendingMutations = mutableMapOf<Long, (ComposerDraftState?) -> ComposerDraftState?>()
-    private val deletedBeforeHydration = mutableSetOf<Long>()
-    private val _composerDrafts = MutableStateFlow(emptyMap<Long, ComposerDraftState>())
-    val composerDrafts: StateFlow<Map<Long, ComposerDraftState>> = _composerDrafts.asStateFlow()
+    internal var draftMachine: ChatDraftStateMachine = ChatDraftStateMachine(
+        store = context?.let(::PersistentComposerDraftStore),
+        scope = viewModelScope,
+    )
+
+    val composerDrafts: StateFlow<Map<Long, ComposerDraftState>>
+        get() = draftMachine.drafts
 
     private val _currentConversationId = MutableStateFlow(
         savedStateHandle[CURRENT_CONVERSATION_KEY] ?: NEW_CONVERSATION_ID
     )
     val currentConversationId: StateFlow<Long> = _currentConversationId.asStateFlow()
-
-    init {
-        draftStore?.let { store ->
-            viewModelScope.launch(Dispatchers.IO) {
-                try {
-                    val restored = store.load()
-                    draftMutationLock.withLock {
-                        val merged = restored.toMutableMap()
-                        for ((id, mutation) in pendingMutations) {
-                            val current = merged[id]
-                            val result = mutation(current)
-                            if (result != null) merged[id] = result
-                            else merged.remove(id)
-                        }
-                        pendingMutations.clear()
-                        val tombstones = deletedBeforeHydration.toSet()
-                        _composerDrafts.update { current ->
-                            val result = current.toMutableMap()
-                            tombstones.forEach { result.remove(it) }
-                            merged.forEach { (id, draft) -> result[id] = draft }
-                            result
-                        }
-                    }
-                } finally {
-                    draftHydrated.complete(Unit)
-                }
-            }
-        } ?: draftHydrated.complete(Unit)
-    }
 
     fun selectConversation(conversationId: Long) {
         _currentConversationId.value = conversationId
@@ -208,16 +170,16 @@ class ChatViewModel(
     }
 
     fun draft(conversationId: Long): ComposerDraftState =
-        _composerDrafts.value[conversationId] ?: ComposerDraftState()
+        draftMachine.drafts.value[conversationId] ?: ComposerDraftState()
 
     fun updateDraftText(conversationId: Long, rawInput: String) {
-        updateDraft(conversationId, immediate = false) { current ->
+        draftMachine.updateText(conversationId) { current ->
             current.copy(rawInput = rawInput, version = current.version + 1L)
         }
     }
 
     fun appendQuickPrompt(conversationId: Long, prompt: String, append: (String, String) -> String) {
-        updateDraft(conversationId, immediate = false) { current ->
+        draftMachine.updateText(conversationId) { current ->
             current.copy(
                 rawInput = append(current.rawInput, prompt),
                 version = current.version + 1L,
@@ -227,7 +189,7 @@ class ChatViewModel(
 
     suspend fun removePendingAttachment(conversationId: Long, localPath: String): Boolean {
         var removed = false
-        return updateDraftCritical(conversationId) { current ->
+        return draftMachine.updateCritical(conversationId) { current ->
             val remaining = current.pendingAttachments.filterNot {
                 if (!removed && it.localPath == localPath) {
                     removed = true
@@ -248,31 +210,30 @@ class ChatViewModel(
             token = UUID.randomUUID().toString(),
             status = ComposerImportStatus.PICKER_OPEN,
         )
-        updateDraft(conversationId, immediate = true) { current ->
+        draftMachine.updateImmediate(conversationId) { current ->
             current.copy(importOwnership = owner, version = current.version + 1L)
         }
         return owner
     }
 
     fun pendingPickerImport(): Pair<Long, ComposerImportOwnership>? =
-        _composerDrafts.value.entries.firstNotNullOfOrNull { (conversationId, draft) ->
+        draftMachine.drafts.value.entries.firstNotNullOfOrNull { (conversationId, draft) ->
             draft.importOwnership
                 ?.takeIf { it.status == ComposerImportStatus.PICKER_OPEN }
                 ?.let { conversationId to it }
         }
 
     fun beginAttachmentCopy(conversationId: Long, token: String): Boolean {
-        var accepted = false
-        updateDraft(conversationId, immediate = true) { current ->
+        if (draftMachine.importOwnership(conversationId)?.token != token) return false
+        draftMachine.updateImmediate(conversationId) { current ->
             val owner = current.importOwnership
-            if (owner?.token != token) return@updateDraft current
-            accepted = true
+            if (owner?.token != token) return@updateImmediate current
             current.copy(
                 importOwnership = owner.copy(status = ComposerImportStatus.COPYING),
                 version = current.version + 1L,
             )
         }
-        return accepted
+        return true
     }
 
     suspend fun completeAttachmentImport(
@@ -281,7 +242,7 @@ class ChatViewModel(
         attachments: List<PendingAttachmentIdentity>,
     ): Boolean {
         var accepted = false
-        val persisted = updateDraftCritical(conversationId) { current ->
+        val persisted = draftMachine.updateCritical(conversationId) { current ->
             if (current.importOwnership?.token != token) null
             else {
                 accepted = true
@@ -297,7 +258,7 @@ class ChatViewModel(
 
     suspend fun settleAttachmentImport(conversationId: Long, token: String): Boolean {
         var accepted = false
-        return updateDraftCritical(conversationId) { current ->
+        return draftMachine.updateCritical(conversationId) { current ->
             if (current.importOwnership?.token != token) null
             else {
                 accepted = true
@@ -308,7 +269,7 @@ class ChatViewModel(
 
     suspend fun beginSubmission(conversationId: Long): ComposerSubmissionSnapshot? {
         var snapshot: ComposerSubmissionSnapshot? = null
-        val persisted = updateDraftCritical(conversationId) { current ->
+        val persisted = draftMachine.updateCritical(conversationId) { current ->
             if (current.activeSubmissionToken != null) null
             else {
                 val token = UUID.randomUUID().toString()
@@ -326,7 +287,7 @@ class ChatViewModel(
     }
 
     suspend fun settleSubmissionOwner(conversationId: Long, token: String): Boolean {
-        return updateDraftCritical(conversationId) { current ->
+        return draftMachine.updateCritical(conversationId) { current ->
             if (current.activeSubmissionToken != token) null
             else current.copy(activeSubmissionToken = null)
         }
@@ -337,7 +298,7 @@ class ChatViewModel(
         committedPaths: List<String>,
     ): Boolean {
         var accepted = false
-        return updateDraftCritical(snapshot.conversationId) { current ->
+        return draftMachine.updateCritical(snapshot.conversationId) { current ->
             if (current.activeSubmissionToken != snapshot.token) null
             else {
                 accepted = true
@@ -352,105 +313,12 @@ class ChatViewModel(
         } && accepted
     }
 
-    suspend fun clearDraft(conversationId: Long): Boolean {
-        draftMutationLock.withLock {
-            if (draftHydrated.isCompleted) {
-                _composerDrafts.update { current ->
-                    if (conversationId !in current) current else current - conversationId
-                }
-            } else {
-                deletedBeforeHydration += conversationId
-                pendingMutations.remove(conversationId)
-                _composerDrafts.update { current ->
-                    if (conversationId !in current) current else current - conversationId
-                }
-            }
-        }
-        return persistDraftCritical()
-    }
-
-    private inline fun updateDraft(
-        conversationId: Long,
-        immediate: Boolean,
-        crossinline transform: (ComposerDraftState) -> ComposerDraftState,
-    ) {
-        val now = draftHydrated.isCompleted
-        if (!now) {
-            viewModelScope.launch {
-                draftMutationLock.withLock {
-                    pendingMutations[conversationId] = { current ->
-                        val base = current ?: ComposerDraftState()
-                        transform(base)
-                    }
-                }
-            }
-        }
-        _composerDrafts.update { current ->
-            val existing = current[conversationId] ?: ComposerDraftState()
-            val updated = transform(existing)
-            if (updated == existing) current else current + (conversationId to updated)
-        }
-        scheduleDraftPersist(immediate)
-    }
-
-    private suspend fun updateDraftCritical(
-        conversationId: Long,
-        transform: (ComposerDraftState) -> ComposerDraftState?,
-    ): Boolean = draftMutationLock.withLock {
-        if (!draftHydrated.isCompleted) {
-            if (conversationId in deletedBeforeHydration) return@withLock false
-            pendingMutations[conversationId] = { current ->
-                val base = current ?: ComposerDraftState()
-                transform(base)
-            }
-        }
-        var changed = false
-        _composerDrafts.update { current ->
-            val existing = current[conversationId] ?: ComposerDraftState()
-            val result = transform(existing) ?: return@update current
-            if (result == existing) return@update current
-            changed = true
-            current + (conversationId to result)
-        }
-        if (!changed) return@withLock false
-        val writeId = ++draftWriteId
-        draftPersistJob?.cancel()
-        val store = draftStore ?: return@withLock true
-        draftHydrated.await()
-        store.write(writeId, _composerDrafts.value)
-    }
-
-    private suspend fun persistDraftCritical(): Boolean {
-        val store = draftStore ?: return true
-        val writeId = ++draftWriteId
-        draftPersistJob?.cancel()
-        draftHydrated.await()
-        return store.write(writeId, _composerDrafts.value)
-    }
-
-    private fun scheduleDraftPersist(immediate: Boolean) {
-        val store = draftStore ?: return
-        val snapshot = _composerDrafts.value
-        val writeId = ++draftWriteId
-        draftPersistJob?.cancel()
-        if (immediate) {
-            draftPersistJob = viewModelScope.launch(Dispatchers.IO) {
-                draftHydrated.await()
-                store.write(writeId, _composerDrafts.value)
-            }
-        } else {
-            draftPersistJob = viewModelScope.launch(Dispatchers.IO) {
-                draftHydrated.await()
-                delay(DRAFT_PERSIST_DEBOUNCE_MS)
-                store.write(writeId, _composerDrafts.value)
-            }
-        }
-    }
+    suspend fun clearDraft(conversationId: Long): Boolean =
+        draftMachine.clearDraft(conversationId)
 
     companion object {
         const val NEW_CONVERSATION_ID = 0L
         private const val CURRENT_CONVERSATION_KEY = "current_conversation_id"
-        private const val DRAFT_PERSIST_DEBOUNCE_MS = 300L
 
         fun factory(context: Context): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
@@ -466,10 +334,16 @@ class ChatViewModel(
             }
 
         internal fun forTesting(store: PersistentComposerDraftStore): ChatViewModel =
-            ChatViewModel().apply { draftStoreField.set(this, store) }
+            ChatViewModel().apply {
+                val machine = ChatDraftStateMachine(
+                    store = store,
+                    scope = viewModelScope,
+                )
+                draftMachineField.set(this, machine)
+            }
 
-        private val draftStoreField by lazy {
-            ChatViewModel::class.java.getDeclaredField("draftStore").apply { isAccessible = true }
+        private val draftMachineField by lazy {
+            ChatViewModel::class.java.getDeclaredField("draftMachine").apply { isAccessible = true }
         }
     }
 }

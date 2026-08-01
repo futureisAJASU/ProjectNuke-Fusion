@@ -4,8 +4,10 @@ import android.content.Context
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.writeTextAtomically
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -25,21 +27,25 @@ internal open class PersistentComposerDraftStore(
     private val writeMutex = Mutex()
     private var latestWriteId = 0L
 
-    open suspend fun load(): Map<Long, ComposerDraftState> = writeMutex.withLock {
-        val raw = runCatching {
-            if (!file.isFile || file.length() > MAX_FILE_BYTES) return@runCatching null
-            file.readText(Charsets.UTF_8)
-        }.getOrNull() ?: return@withLock emptyMap()
-        decode(raw)
+    open suspend fun load(): Map<Long, ComposerDraftState> = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            val raw = runCatching {
+                if (!file.isFile || file.length() > MAX_FILE_BYTES) return@runCatching null
+                file.readText(Charsets.UTF_8)
+            }.getOrNull() ?: return@withLock emptyMap()
+            decode(raw)
+        }
     }
 
     open suspend fun write(writeId: Long, drafts: Map<Long, ComposerDraftState>): Boolean =
-        writeMutex.withLock {
-            if (writeId < latestWriteId) return@withLock false
-            latestWriteId = writeId
-            val encoded = encode(drafts)
-            if (encoded.toByteArray(Charsets.UTF_8).size > MAX_FILE_BYTES) return@withLock false
-            runCatching { writeTextAtomically(file, encoded) }.isSuccess
+        withContext(Dispatchers.IO) {
+            writeMutex.withLock {
+                if (writeId < latestWriteId) return@withLock false
+                latestWriteId = writeId
+                val encoded = encode(drafts)
+                if (encoded.toByteArray(Charsets.UTF_8).size > MAX_FILE_BYTES) return@withLock false
+                runCatching { writeTextAtomically(file, encoded) }.isSuccess
+            }
         }
 
     private fun decode(raw: String): Map<Long, ComposerDraftState> = runCatching {
