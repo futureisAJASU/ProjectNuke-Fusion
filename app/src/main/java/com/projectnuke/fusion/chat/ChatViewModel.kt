@@ -144,6 +144,7 @@ class ChatViewModel(
         settleTarget: suspend () -> Unit,
         cleanupDerivedData: suspend () -> Unit,
         recordCleanupDebt: suspend () -> Unit,
+        recordCleanupDebtResult: (suspend () -> Boolean)? = null,
     ): Deferred<ConversationDeletionResult> {
         deletionDeferreds[conversationId]?.let { return it }
         val candidate = CompletableDeferred<ConversationDeletionResult>()
@@ -165,6 +166,7 @@ class ChatViewModel(
                     settleTarget = settleTarget,
                     cleanupDerivedData = cleanupDerivedData,
                     recordCleanupDebt = recordCleanupDebt,
+                    recordCleanupDebtResult = recordCleanupDebtResult,
                 )
                 candidate.complete(result)
             } catch (cancelled: CancellationException) {

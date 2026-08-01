@@ -25,6 +25,7 @@ internal object ConversationCleanupDebtStore {
     private const val MAX_PATHS = 64
     private const val MAX_PATH_CHARS = 4_096
     private const val MAX_ATTEMPTS = 100
+    private const val RETRY_BASE_DELAY_MS = 5_000L
     private const val FILE_NAME = "conversation_cleanup_debt.json"
     private val lock = Any()
 
@@ -43,7 +44,11 @@ internal object ConversationCleanupDebtStore {
 
     suspend fun retry(context: Context, dao: ChatDao, limit: Int = 4) = withContext(Dispatchers.IO) {
         val entries = synchronized(lock) { loadLocked(context) }
-        val pending = entries.filter { it.attempts < MAX_ATTEMPTS }.take(limit)
+        val now = System.currentTimeMillis()
+        val pending = entries.filter {
+            it.attempts < MAX_ATTEMPTS &&
+                (it.lastAttemptAt <= 0L || now - it.lastAttemptAt >= retryDelayMs(it.attempts))
+        }.take(limit)
         val terminal = entries.filter { it.attempts >= MAX_ATTEMPTS }
         val remaining = entries.toMutableList()
         pending.forEach { entry ->
@@ -62,8 +67,11 @@ internal object ConversationCleanupDebtStore {
                 remaining += entry.copy(attempts = entry.attempts + 1, lastAttemptAt = System.currentTimeMillis())
             }
         }
-        synchronized(lock) { persistLocked(context, (remaining + terminal).takeLast(MAX_ENTRIES)) }
+        check(synchronized(lock) { persistLocked(context, (remaining + terminal).takeLast(MAX_ENTRIES)) })
     }
+
+    private fun retryDelayMs(attempts: Int): Long =
+        RETRY_BASE_DELAY_MS * (1L shl attempts.coerceIn(0, 10))
 
     private fun loadLocked(context: Context): List<ConversationCleanupDebt> {
         val file = File(context.filesDir, FILE_NAME)

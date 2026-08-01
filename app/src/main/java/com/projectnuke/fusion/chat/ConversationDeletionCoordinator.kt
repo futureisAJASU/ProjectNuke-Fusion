@@ -27,6 +27,7 @@ internal class ConversationDeletionCoordinator {
         settleTarget: suspend () -> Unit,
         cleanupDerivedData: suspend () -> Unit,
         recordCleanupDebt: suspend () -> Unit,
+        recordCleanupDebtResult: (suspend () -> Boolean)? = null,
     ): ConversationDeletionResult {
         require(conversationId > 0L)
         val owner = UUID.randomUUID().toString()
@@ -43,7 +44,12 @@ internal class ConversationDeletionCoordinator {
                 withContext(NonCancellable) {
                     settleTarget()
                     runCatching { cleanupDerivedData() }
-                        .onFailure { runCatching { recordCleanupDebt() } }
+                        .onFailure {
+                            runCatching {
+                                if (recordCleanupDebtResult?.invoke() == false) throw IllegalStateException("cleanup debt was not durably recorded")
+                                if (recordCleanupDebtResult == null) recordCleanupDebt()
+                            }
+                        }
                 }
                 ConversationDeletionResult.ALREADY_ABSENT
             } else {
@@ -51,9 +57,19 @@ internal class ConversationDeletionCoordinator {
                     commitDelete()
                     committed = true
                     runCatching { settleTarget() }
-                        .onFailure { runCatching { recordCleanupDebt() } }
+                        .onFailure {
+                            runCatching {
+                                if (recordCleanupDebtResult?.invoke() == false) throw IllegalStateException("cleanup debt was not durably recorded")
+                                if (recordCleanupDebtResult == null) recordCleanupDebt()
+                            }
+                        }
                     runCatching { cleanupDerivedData() }
-                        .onFailure { runCatching { recordCleanupDebt() } }
+                        .onFailure {
+                            runCatching {
+                                if (recordCleanupDebtResult?.invoke() == false) throw IllegalStateException("cleanup debt was not durably recorded")
+                                if (recordCleanupDebtResult == null) recordCleanupDebt()
+                            }
+                        }
                 }
                 ConversationDeletionResult.DELETED
             }

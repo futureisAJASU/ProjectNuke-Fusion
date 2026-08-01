@@ -33,7 +33,12 @@ internal suspend fun deleteConversationProduction(
         commitDelete = { dao.deleteConversation(conversationId) },
         settleTarget = {
             chatViewModel.clear(conversationId)
-            chatViewModel.clearDraft(conversationId)
+            val draft = chatViewModel.draft(conversationId)
+            if (draft.rawInput.isNotEmpty() || draft.pendingAttachments.isNotEmpty() ||
+                draft.importOwnership != null || draft.activeSubmissionToken != null
+            ) {
+                check(chatViewModel.clearDraft(conversationId))
+            }
             if (chatViewModel.currentConversationId.value == conversationId) {
                 chatViewModel.selectConversation(
                     dao.getLatestConversation()?.id ?: ChatViewModel.NEW_CONVERSATION_ID
@@ -42,18 +47,26 @@ internal suspend fun deleteConversationProduction(
         },
         cleanupDerivedData = {
             withContext(Dispatchers.IO) {
-                deleteResponseVersionStateSafely(appContext, conversationId)
-                deleteConversationSummary(appContext, conversationId)
-                deleteConversationOnlyMemoryCandidates(appContext, conversationId)
-                FusionResponseRatings.deleteForMessages(appContext, deletedMessageIds)
+                check(deleteResponseVersionState(appContext, conversationId))
+                check(deleteConversationSummary(appContext, conversationId))
+                check(deleteConversationOnlyMemoryCandidates(appContext, conversationId))
+                check(FusionResponseRatings.deleteForMessages(appContext, deletedMessageIds))
                 targetPendingPaths.forEach { path ->
-                    AttachmentStorageManager.deletePendingAttachmentFile(appContext, path)
+                    check(AttachmentStorageManager.deletePendingAttachmentFile(appContext, path))
                 }
                 AttachmentStorageManager.cleanupUnreferencedAttachments(appContext, dao)
-                removeConversationCleanupDebt(appContext, conversationId)
+                check(removeConversationCleanupDebt(appContext, conversationId))
             }
         },
         recordCleanupDebt = {
+            withContext(Dispatchers.IO) {
+                check(ConversationCleanupDebtStore.record(
+                    appContext,
+                    ConversationCleanupDebt(conversationId, deletedMessageIds, targetPendingPaths, 0, 0L),
+                ))
+            }
+        },
+        recordCleanupDebtResult = {
             withContext(Dispatchers.IO) {
                 ConversationCleanupDebtStore.record(
                     appContext,
@@ -65,12 +78,5 @@ internal suspend fun deleteConversationProduction(
     return deferred.await()
 }
 
-private fun deleteResponseVersionStateSafely(context: Context, conversationId: Long): Boolean =
-    runCatching {
-        deleteResponseVersionState(context, conversationId)
-        true
-    }.getOrDefault(false)
-
-private fun removeConversationCleanupDebt(context: Context, conversationId: Long) {
+private fun removeConversationCleanupDebt(context: Context, conversationId: Long): Boolean =
     ConversationCleanupDebtStore.remove(context, conversationId)
-}
