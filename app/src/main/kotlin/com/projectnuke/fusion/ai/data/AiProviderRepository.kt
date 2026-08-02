@@ -2,6 +2,7 @@ package com.projectnuke.fusion.ai.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.projectnuke.fusion.ai.ExternalAiProviderSource
 import com.projectnuke.fusion.ai.model.AiProviderAuthMode
 import com.projectnuke.fusion.ai.model.AiProviderConfig
@@ -44,18 +45,14 @@ internal object AiProviderValidator {
         }
         val normalized = normalizeEndpoint(config.baseUrl)
         val uri = URI(normalized)
-        require(uri.scheme == "https" || uri.scheme == "http") { "Endpoint scheme is invalid" }
-        val host = uri.host.orEmpty().lowercase()
-        val local = host == "localhost" || host == "127.0.0.1" || host == "::1" ||
-            host.startsWith("10.") || host.startsWith("192.168.") ||
-            isPrivate172Range(host)
-        if (uri.scheme == "http" && !local) require(false) { "Cleartext public endpoints are not allowed" }
+        // Beta Stable: HTTPS-only for all endpoints. No cleartext HTTP allowed.
+        require(uri.scheme == "https") { "Endpoint must use HTTPS" }
         if (config.authMode != AiProviderAuthMode.NONE) {
             require(secret == null || secret.length <= MAX_SECRET) { "Secret is too long" }
         }
         return ProviderValidationResult(
             config = config.copy(baseUrl = normalized),
-            warning = if (uri.scheme == "http" && local) "Cleartext local endpoint" else null,
+            warning = null,
         )
     }
 
@@ -115,13 +112,17 @@ class AiProviderRepository(
             return false
         }
         val oldSecretId = previous?.apiKeySecretId
-        val oldCleanupSuccess = if (oldSecretId != null && oldSecretId != newSecretId) {
-            runCatching { secretStore.deleteSecret(oldSecretId) }.getOrDefault(false)
-        } else true
+        if (oldSecretId != null && oldSecretId != newSecretId) {
+            runCatching { secretStore.deleteSecret(oldSecretId) }.onFailure { e ->
+                // Obsolete-secret cleanup debt: log but don't fail the save.
+                // The old secret will be cleaned up on next save or app restart.
+                Log.w("AiProviderRepository", "Failed to delete obsolete secret $oldSecretId", e)
+            }
+        }
         if (prefs.getString(KeySelectedProvider, null) == null) {
             withContext(Dispatchers.IO) { prefs.edit().putString(KeySelectedProvider, validated.id).commit() }
         }
-        return oldCleanupSuccess
+        return true
     }
 
     suspend fun createCustomProvider(): AiProviderConfig {
