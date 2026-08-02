@@ -27,7 +27,13 @@ import java.io.IOException
 
 @OptIn(ExperimentalApi::class)
 class LiteRtLlmEngine(
-    private val context: Context
+    private val context: Context,
+    private val engineFactory: (EngineConfig) -> Engine = { config ->
+        Engine(config).also { it.initialize() }
+    },
+    private val flagSetter: (Boolean) -> Boolean = { enabled ->
+        runCatching { ExperimentalFlags.enableSpeculativeDecoding = enabled }.isSuccess
+    }
 ) : LlmEngine {
 
     private var engine: Engine? = null
@@ -350,54 +356,36 @@ class LiteRtLlmEngine(
         var selectedMtpEnabled = false
         var mtpFlagAppliedForMtp = false
         var failure: Throwable? = null
-        for (candidate in ladder) {
-            val backend = when (candidate.backend) {
-                "CPU" -> Backend.CPU()
-                else -> Backend.GPU()
-            }
-            val flagApplied = configureSpeculativeDecodingFlag(candidate.mtpEnabled)
-            if (candidate.mtpEnabled && flagApplied) {
-                mtpFlagAppliedForMtp = true
-            }
-            val visionBackend = if (enableVisionBackend) backend else null
-            val attempt = createEngine(
-                modelPath = modelPath,
-                backend = backend,
-                visionBackend = visionBackend,
-                maxNumTokens = maxNumTokens
-            )
-            if (attempt.isSuccess) {
-                newEngine = attempt.getOrThrow()
-                selectedMtpEnabled = candidate.mtpEnabled && flagApplied
-                Log.i(
-                    "FusionLiteRT",
-                    "Engine initialized with ${candidate.backend}" +
-                        (if (candidate.mtpEnabled && flagApplied) " + MTP" else " without MTP")
-                )
-                break
-            }
-            if (enableVisionBackend && candidate.backend == "GPU") {
-                val visionRetry = createEngine(
+        val selection = selectFirstWorkingEngine(
+            ladder = ladder,
+            enableVisionBackend = enableVisionBackend,
+            configureFlag = { configureSpeculativeDecodingFlag(it) },
+            tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
+                val backend = if (backendName == "CPU") Backend.CPU() else Backend.GPU()
+                createEngine(
                     modelPath = modelPath,
                     backend = backend,
-                    visionBackend = Backend.CPU(),
+                    visionBackend = if (enableVisionBackend) {
+                        if (visionBackendIsCpu) Backend.CPU() else backend
+                    } else {
+                        null
+                    },
                     maxNumTokens = maxNumTokens
                 )
-                if (visionRetry.isSuccess) {
-                    Log.w("FusionLiteRT", "GPU vision backend failed, retrying CPU vision backend", attempt.exceptionOrNull())
-                    newEngine = visionRetry.getOrThrow()
-                    selectedMtpEnabled = candidate.mtpEnabled && flagApplied
-                    break
-                }
             }
-            failure = attempt.exceptionOrNull()
-            Log.w(
+        )
+        val selectionResult = selection.first
+        if (selectionResult != null) {
+            newEngine = selectionResult.engine
+            selectedMtpEnabled = selectionResult.selectedMtpEnabled
+            mtpFlagAppliedForMtp = selectionResult.mtpFlagAppliedForMtp
+            Log.i(
                 "FusionLiteRT",
-                "Engine init failed for ${candidate.backend}" +
-                    (if (candidate.mtpEnabled) " + MTP" else " without MTP") +
-                    ", trying next candidate",
-                failure
+                "Engine initialized with $preferredBackendName" +
+                    (if (selectedMtpEnabled) " + MTP" else " without MTP")
             )
+        } else {
+            failure = selection.second
         }
 
         val resolvedEngine = newEngine ?: run {
@@ -441,9 +429,7 @@ class LiteRtLlmEngine(
                 cacheDir = context.cacheDir.absolutePath
             )
 
-            Engine(config).also { engine ->
-                engine.initialize()
-            }
+            engineFactory(config)
         }
     }
 
@@ -546,15 +532,14 @@ class LiteRtLlmEngine(
     }
 
     private fun configureSpeculativeDecodingFlag(enabled: Boolean): Boolean {
-        return runCatching {
-            ExperimentalFlags.enableSpeculativeDecoding = enabled
-        }.onFailure { throwable ->
-            Log.w(
-                "FusionLiteRT",
-                "Failed to ${if (enabled) "enable" else "disable"} MTP speculative decoding flag",
-                throwable
-            )
-        }.isSuccess
+        return flagSetter(enabled).also { applied ->
+            if (!applied) {
+                Log.w(
+                    "FusionLiteRT",
+                    "Failed to ${if (enabled) "enable" else "disable"} MTP speculative decoding flag"
+                )
+            }
+        }
     }
 }
 
@@ -598,6 +583,56 @@ internal data class EngineCandidate(
     val backend: String,
     val mtpEnabled: Boolean,
 )
+
+internal data class EngineSelectionResult<T>(
+    val engine: T,
+    val selectedMtpEnabled: Boolean,
+    val mtpFlagAppliedForMtp: Boolean,
+)
+
+internal fun <T> selectFirstWorkingEngine(
+    ladder: List<EngineCandidate>,
+    enableVisionBackend: Boolean,
+    configureFlag: (Boolean) -> Boolean,
+    tryCreate: (backendName: String, mtpEnabled: Boolean, visionBackendIsCpu: Boolean) -> Result<T>
+): Pair<EngineSelectionResult<T>?, Throwable?> {
+    var mtpFlagAppliedForMtp = false
+    var lastFailure: Throwable? = null
+    for (candidate in ladder) {
+        val flagApplied = configureFlag(candidate.mtpEnabled)
+        if (candidate.mtpEnabled && flagApplied) {
+            mtpFlagAppliedForMtp = true
+        }
+        val attempt = tryCreate(candidate.backend, candidate.mtpEnabled, false)
+        if (attempt.isSuccess) {
+            return Pair(
+                EngineSelectionResult(
+                    engine = attempt.getOrThrow(),
+                    selectedMtpEnabled = candidate.mtpEnabled && flagApplied,
+                    mtpFlagAppliedForMtp = mtpFlagAppliedForMtp
+                ),
+                null
+            )
+        }
+        if (enableVisionBackend && candidate.backend == "GPU") {
+            val visionRetry = tryCreate(candidate.backend, candidate.mtpEnabled, true)
+            if (visionRetry.isSuccess) {
+                return Pair(
+                    EngineSelectionResult(
+                        engine = visionRetry.getOrThrow(),
+                        selectedMtpEnabled = candidate.mtpEnabled && flagApplied,
+                        mtpFlagAppliedForMtp = mtpFlagAppliedForMtp
+                    ),
+                    null
+                )
+            }
+            lastFailure = attempt.exceptionOrNull() ?: visionRetry.exceptionOrNull()
+        } else {
+            lastFailure = attempt.exceptionOrNull()
+        }
+    }
+    return Pair(null, lastFailure)
+}
 
 internal fun buildEngineCandidateLadder(
     accelerator: AcceleratorMode,
