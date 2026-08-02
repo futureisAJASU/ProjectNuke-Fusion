@@ -41,10 +41,9 @@ class ModelImportCoordinatorTest {
     }
 
     @Test
-    fun `successful validation adopts one uuid file and cleans abandoned files`() = runTest {
+    fun `successful validation adopts one uuid file`() = runTest {
+        // успешная валидация файла — orphan cleanup is now startup-only and respects a grace period
         val root = Files.createTempDirectory("fusion-model-import").toFile()
-        File(root, "orphan.part").writeText("orphan")
-        File(root, "orphan.bak").writeText("orphan")
         val coordinator = ModelImportCoordinator(
             modelDirectory = root,
             openSource = { ByteArrayInputStream(ByteArray(1024 * 1024) { 9 }) },
@@ -55,8 +54,6 @@ class ModelImportCoordinatorTest {
         val file = (result as ModelImportResult.Success).file
         assertTrue(file.isFile)
         assertTrue(file.name.endsWith("model.litertlm"))
-        assertFalse(File(root, "orphan.part").exists())
-        assertFalse(File(root, "orphan.bak").exists())
         root.deleteRecursively()
     }
 }

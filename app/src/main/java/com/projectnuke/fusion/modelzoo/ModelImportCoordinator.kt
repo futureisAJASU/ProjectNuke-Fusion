@@ -43,21 +43,6 @@ internal fun interface LiteRtLmValidator {
     fun validate(file: File): Boolean
 }
 
-internal object LiteRtLmPackageValidator : LiteRtLmValidator {
-    private val magic = "LITERTLM".toByteArray(Charsets.US_ASCII)
-
-    override fun validate(file: File): Boolean {
-        if (!file.isFile || !file.extension.equals("litertlm", true) || file.length() < magic.size) return false
-        return runCatching {
-            RandomAccessFile(file, "r").use { input ->
-                val header = ByteArray(magic.size)
-                input.readFully(header)
-                header.contentEquals(magic)
-            }
-        }.getOrDefault(false)
-    }
-}
-
 /** Process-owned, single-adoption coordinator for imported local models. */
 internal class ModelImportCoordinator(
     private val modelDirectory: File,
