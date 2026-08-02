@@ -302,17 +302,18 @@ class LiteRtLlmEngine(
     ): Engine {
         val mtpRequested = settings.speculativeDecodingEnabled == true
         val mtpSupported = isSpeculativeDecodingSupportedModel(modelPath)
-        val mtpEnabledForRuntime = mtpRequested && mtpSupported
-        val backendName = when (settings.accelerator) {
-            AcceleratorMode.CPU -> "CPU"
-            AcceleratorMode.GPU,
-            AcceleratorMode.AUTO -> "GPU"
-        }
+        val maxNumTokens = settings.maxTokens.coerceAtLeast(1)
+        val ladder = buildEngineCandidateLadder(
+            accelerator = settings.accelerator,
+            mtpRequested = mtpRequested,
+            mtpSupported = mtpSupported
+        )
+        val preferredBackendName = ladder.first().backend
         val key = buildLiteRtEngineCacheKey(
             modelPath = modelPath,
             accelerator = settings.accelerator,
             maxTokens = settings.maxTokens,
-            mtpEnabled = mtpEnabledForRuntime,
+            mtpEnabled = ladder.first().mtpEnabled,
             enableVisionBackend = enableVisionBackend
         )
 
@@ -324,7 +325,7 @@ class LiteRtLlmEngine(
             )
             Log.i("FusionLiteRT", "MTP requested: $mtpRequested (cached engine reused)")
             Log.i("FusionLiteRT", "MTP status: $lastMtpStatus")
-            Log.i("FusionLiteRT", "Backend: $backendName")
+            Log.i("FusionLiteRT", "Backend: $preferredBackendName")
             Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
             Log.i("FusionLiteRT", "Model path: ${File(modelPath).name}")
             return currentEngine
@@ -333,99 +334,95 @@ class LiteRtLlmEngine(
         unload()
 
         Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-        val backend = when (settings.accelerator) {
-            AcceleratorMode.CPU -> Backend.CPU()
-            AcceleratorMode.GPU -> Backend.GPU()
-            AcceleratorMode.AUTO -> Backend.GPU()
-        }
 
         Log.i("FusionLiteRT", "MTP requested: $mtpRequested")
-        Log.i("FusionLiteRT", "Backend: $backendName")
+        Log.i("FusionLiteRT", "Backend: $preferredBackendName")
         Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
         Log.i("FusionLiteRT", "Model path: ${File(modelPath).name}")
         if (mtpRequested && !mtpSupported) {
             lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
             Log.i("FusionLiteRT", "MTP unsupported model/runtime")
         } else {
-            lastMtpStatus = if (mtpEnabledForRuntime) MtpRuntimeStatus.REQUESTED else MtpRuntimeStatus.OFF
+            lastMtpStatus = if (ladder.first().mtpEnabled) MtpRuntimeStatus.REQUESTED else MtpRuntimeStatus.OFF
         }
-        val mtpFlagApplied = configureSpeculativeDecodingFlag(mtpEnabledForRuntime)
-        if (mtpEnabledForRuntime && !mtpFlagApplied) {
-            lastMtpStatus = MtpRuntimeStatus.FAILED
-        }
-        Log.i(
-            "FusionLiteRT",
-            if (mtpEnabledForRuntime && mtpFlagApplied) {
-                "MTP enabled before engine init"
-            } else {
-                "MTP disabled before engine init"
-            }
-        )
 
-        var mtpFallbackUsed = false
-        val newEngine = createEngine(
-            modelPath = modelPath,
-            backend = backend,
-            visionBackend = if (enableVisionBackend) backend else null,
-            maxNumTokens = settings.maxTokens.coerceAtLeast(1)
-        ).getOrElse { throwable ->
-            if (mtpEnabledForRuntime && mtpFlagApplied) {
-                Log.w("FusionLiteRT", "MTP engine initialization failed, retrying without MTP", throwable)
-                lastMtpStatus = MtpRuntimeStatus.FALLBACK_DISABLED
-                mtpFallbackUsed = true
-                configureSpeculativeDecodingFlag(false)
-                createEngine(
-                    modelPath = modelPath,
-                    backend = backend,
-                    visionBackend = if (enableVisionBackend) backend else null,
-                    maxNumTokens = settings.maxTokens.coerceAtLeast(1)
-                ).getOrElse { retryThrowable ->
-                    if (enableVisionBackend && backendName == "GPU") {
-                        Log.w(
-                            "FusionLiteRT",
-                            "GPU vision backend failed after MTP fallback, retrying CPU vision backend",
-                            retryThrowable
-                        )
-                        createEngine(
-                            modelPath = modelPath,
-                            backend = backend,
-                            visionBackend = Backend.CPU(),
-                            maxNumTokens = settings.maxTokens.coerceAtLeast(1)
-                        ).getOrThrow()
-                    } else {
-                        throw retryThrowable
-                    }
-                }
-            } else if (enableVisionBackend && backendName == "GPU") {
-                Log.w(
+        var newEngine: Engine? = null
+        var selectedMtpEnabled = false
+        var mtpFlagAppliedForMtp = false
+        var failure: Throwable? = null
+        for (candidate in ladder) {
+            val backend = when (candidate.backend) {
+                "CPU" -> Backend.CPU()
+                else -> Backend.GPU()
+            }
+            val flagApplied = configureSpeculativeDecodingFlag(candidate.mtpEnabled)
+            if (candidate.mtpEnabled && flagApplied) {
+                mtpFlagAppliedForMtp = true
+            }
+            val visionBackend = if (enableVisionBackend) backend else null
+            val attempt = createEngine(
+                modelPath = modelPath,
+                backend = backend,
+                visionBackend = visionBackend,
+                maxNumTokens = maxNumTokens
+            )
+            if (attempt.isSuccess) {
+                newEngine = attempt.getOrThrow()
+                selectedMtpEnabled = candidate.mtpEnabled && flagApplied
+                Log.i(
                     "FusionLiteRT",
-                    "GPU vision backend failed, retrying CPU vision backend",
-                    throwable
+                    "Engine initialized with ${candidate.backend}" +
+                        (if (candidate.mtpEnabled && flagApplied) " + MTP" else " without MTP")
                 )
-                createEngine(
+                break
+            }
+            if (enableVisionBackend && candidate.backend == "GPU") {
+                val visionRetry = createEngine(
                     modelPath = modelPath,
                     backend = backend,
                     visionBackend = Backend.CPU(),
-                    maxNumTokens = settings.maxTokens.coerceAtLeast(1)
-                ).getOrThrow()
-            } else {
-                throw throwable
+                    maxNumTokens = maxNumTokens
+                )
+                if (visionRetry.isSuccess) {
+                    Log.w("FusionLiteRT", "GPU vision backend failed, retrying CPU vision backend", attempt.exceptionOrNull())
+                    newEngine = visionRetry.getOrThrow()
+                    selectedMtpEnabled = candidate.mtpEnabled && flagApplied
+                    break
+                }
             }
+            failure = attempt.exceptionOrNull()
+            Log.w(
+                "FusionLiteRT",
+                "Engine init failed for ${candidate.backend}" +
+                    (if (candidate.mtpEnabled) " + MTP" else " without MTP") +
+                    ", trying next candidate",
+                failure
+            )
         }
 
-        if (mtpEnabledForRuntime && mtpFlagApplied && !mtpFallbackUsed) {
-            lastMtpStatus = MtpRuntimeStatus.ACTIVE
+        val resolvedEngine = newEngine ?: run {
+            configureSpeculativeDecodingFlag(false)
+            lastMtpStatus = MtpRuntimeStatus.FAILED
+            throw (failure ?: IllegalStateException("LiteRT engine candidates exhausted"))
         }
-        engine = newEngine
+
+        lastMtpStatus = when {
+            mtpRequested && !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
+            selectedMtpEnabled -> MtpRuntimeStatus.ACTIVE
+            mtpRequested && mtpSupported && !mtpFlagAppliedForMtp -> MtpRuntimeStatus.FAILED
+            mtpRequested && mtpSupported -> MtpRuntimeStatus.FALLBACK_DISABLED
+            else -> MtpRuntimeStatus.OFF
+        }
+        engine = resolvedEngine
         loadedKey = buildLiteRtEngineCacheKey(
             modelPath = modelPath,
             accelerator = settings.accelerator,
             maxTokens = settings.maxTokens,
-            mtpEnabled = mtpEnabledForRuntime && !mtpFallbackUsed,
+            mtpEnabled = selectedMtpEnabled,
             enableVisionBackend = enableVisionBackend
         )
 
-        return newEngine
+        return resolvedEngine
     }
 
     private fun createEngine(
@@ -595,4 +592,33 @@ internal fun resolveMtpCacheHitStatus(
     mtpRequested && !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
     mtpRequested && mtpSupported -> MtpRuntimeStatus.ACTIVE
     else -> MtpRuntimeStatus.OFF
+}
+
+internal data class EngineCandidate(
+    val backend: String,
+    val mtpEnabled: Boolean,
+)
+
+internal fun buildEngineCandidateLadder(
+    accelerator: AcceleratorMode,
+    mtpRequested: Boolean,
+    mtpSupported: Boolean
+): List<EngineCandidate> {
+    val canUseMtp = mtpRequested && mtpSupported
+    return when (accelerator) {
+        AcceleratorMode.CPU -> buildList {
+            if (canUseMtp) add(EngineCandidate("CPU", mtpEnabled = true))
+            add(EngineCandidate("CPU", mtpEnabled = false))
+        }
+        AcceleratorMode.GPU -> buildList {
+            if (canUseMtp) add(EngineCandidate("GPU", mtpEnabled = true))
+            add(EngineCandidate("GPU", mtpEnabled = false))
+        }
+        AcceleratorMode.AUTO -> buildList {
+            if (canUseMtp) add(EngineCandidate("GPU", mtpEnabled = true))
+            add(EngineCandidate("GPU", mtpEnabled = false))
+            if (canUseMtp) add(EngineCandidate("CPU", mtpEnabled = true))
+            add(EngineCandidate("CPU", mtpEnabled = false))
+        }
+    }
 }

@@ -77,4 +77,67 @@ class LiteRtEngineMtpStateTest {
         )
         assertEquals(expected, MtpRuntimeStatus.entries.toSet())
     }
+
+    @Test
+    fun `AUTO ladder prefers GPU+MTP then GPU then CPU+MTP then CPU`() {
+        val ladder = buildEngineCandidateLadder(AcceleratorMode.AUTO, mtpRequested = true, mtpSupported = true)
+        assertEquals(
+            listOf(
+                EngineCandidate("GPU", true),
+                EngineCandidate("GPU", false),
+                EngineCandidate("CPU", true),
+                EngineCandidate("CPU", false)
+            ),
+            ladder
+        )
+    }
+
+    @Test
+    fun `AUTO ladder without MTP capability skips MTP candidates`() {
+        val ladder = buildEngineCandidateLadder(AcceleratorMode.AUTO, mtpRequested = true, mtpSupported = false)
+        assertEquals(
+            listOf(
+                EngineCandidate("GPU", false),
+                EngineCandidate("CPU", false)
+            ),
+            ladder
+        )
+    }
+
+    @Test
+    fun `AUTO ladder without MTP request never enables MTP`() {
+        val ladder = buildEngineCandidateLadder(AcceleratorMode.AUTO, mtpRequested = false, mtpSupported = true)
+        assertEquals(
+            listOf(
+                EngineCandidate("GPU", false),
+                EngineCandidate("CPU", false)
+            ),
+            ladder
+        )
+    }
+
+    @Test
+    fun `GPU ladder retries without MTP when MTP init fails`() {
+        val ladder = buildEngineCandidateLadder(AcceleratorMode.GPU, mtpRequested = true, mtpSupported = true)
+        assertEquals(
+            listOf(
+                EngineCandidate("GPU", true),
+                EngineCandidate("GPU", false)
+            ),
+            ladder
+        )
+    }
+
+    @Test
+    fun `CPU ladder keeps MTP fallback when MTP supported`() {
+        val ladder = buildEngineCandidateLadder(AcceleratorMode.CPU, mtpRequested = true, mtpSupported = true)
+        assertEquals(
+            listOf(
+                EngineCandidate("CPU", true),
+                EngineCandidate("CPU", false)
+            ),
+            ladder
+        )
+        assertEquals("CPU", ladder.first().backend)
+    }
 }
