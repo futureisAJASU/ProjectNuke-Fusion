@@ -65,8 +65,9 @@ fun MtpRuntimeStatus.toKoreanMtpStatus(): String {
     return when (this) {
         MtpRuntimeStatus.OFF -> "꺼짐"
         MtpRuntimeStatus.REQUESTED -> "요청됨"
-        MtpRuntimeStatus.APPLIED -> "적용됨"
+        MtpRuntimeStatus.ACTIVE -> "활성화됨"
         MtpRuntimeStatus.UNSUPPORTED -> "미지원"
+        MtpRuntimeStatus.FALLBACK_DISABLED -> "대체 비활성"
         MtpRuntimeStatus.FAILED -> "적용 실패"
     }
 }

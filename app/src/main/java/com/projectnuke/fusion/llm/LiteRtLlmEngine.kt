@@ -307,25 +307,20 @@ class LiteRtLlmEngine(
             AcceleratorMode.GPU,
             AcceleratorMode.AUTO -> "GPU"
         }
-        val key = buildString {
-            append(modelPath)
-            append("|")
-            append(settings.accelerator.name)
-            append("|")
-            append(settings.maxTokens)
-            append("|")
-            append(mtpEnabledForRuntime)
-            append("|vision=")
-            append(enableVisionBackend)
-        }
+        val key = buildLiteRtEngineCacheKey(
+            modelPath = modelPath,
+            accelerator = settings.accelerator,
+            maxTokens = settings.maxTokens,
+            mtpEnabled = mtpEnabledForRuntime,
+            enableVisionBackend = enableVisionBackend
+        )
 
         val currentEngine = engine
         if (currentEngine != null && loadedKey == key) {
-            if (mtpRequested && !mtpSupported) {
-                lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
-            } else if (!mtpRequested) {
-                lastMtpStatus = MtpRuntimeStatus.OFF
-            }
+            lastMtpStatus = resolveMtpCacheHitStatus(
+                mtpRequested = mtpRequested,
+                mtpSupported = mtpSupported
+            )
             Log.i("FusionLiteRT", "MTP requested: $mtpRequested (cached engine reused)")
             Log.i("FusionLiteRT", "MTP status: $lastMtpStatus")
             Log.i("FusionLiteRT", "Backend: $backendName")
@@ -366,6 +361,7 @@ class LiteRtLlmEngine(
             }
         )
 
+        var mtpFallbackUsed = false
         val newEngine = createEngine(
             modelPath = modelPath,
             backend = backend,
@@ -374,7 +370,8 @@ class LiteRtLlmEngine(
         ).getOrElse { throwable ->
             if (mtpEnabledForRuntime && mtpFlagApplied) {
                 Log.w("FusionLiteRT", "MTP engine initialization failed, retrying without MTP", throwable)
-                lastMtpStatus = MtpRuntimeStatus.FAILED
+                lastMtpStatus = MtpRuntimeStatus.FALLBACK_DISABLED
+                mtpFallbackUsed = true
                 configureSpeculativeDecodingFlag(false)
                 createEngine(
                     modelPath = modelPath,
@@ -415,11 +412,17 @@ class LiteRtLlmEngine(
             }
         }
 
-        if (mtpEnabledForRuntime && mtpFlagApplied) {
-            lastMtpStatus = MtpRuntimeStatus.APPLIED
+        if (mtpEnabledForRuntime && mtpFlagApplied && !mtpFallbackUsed) {
+            lastMtpStatus = MtpRuntimeStatus.ACTIVE
         }
         engine = newEngine
-        loadedKey = key
+        loadedKey = buildLiteRtEngineCacheKey(
+            modelPath = modelPath,
+            accelerator = settings.accelerator,
+            maxTokens = settings.maxTokens,
+            mtpEnabled = mtpEnabledForRuntime && !mtpFallbackUsed,
+            enableVisionBackend = enableVisionBackend
+        )
 
         return newEngine
     }
@@ -561,7 +564,35 @@ class LiteRtLlmEngine(
 enum class MtpRuntimeStatus {
     OFF,
     REQUESTED,
-    APPLIED,
+    ACTIVE,
     UNSUPPORTED,
+    FALLBACK_DISABLED,
     FAILED
+}
+
+internal fun buildLiteRtEngineCacheKey(
+    modelPath: String,
+    accelerator: AcceleratorMode,
+    maxTokens: Int,
+    mtpEnabled: Boolean,
+    enableVisionBackend: Boolean
+): String = buildString {
+    append(modelPath)
+    append("|")
+    append(accelerator.name)
+    append("|")
+    append(maxTokens)
+    append("|")
+    append(mtpEnabled)
+    append("|vision=")
+    append(enableVisionBackend)
+}
+
+internal fun resolveMtpCacheHitStatus(
+    mtpRequested: Boolean,
+    mtpSupported: Boolean
+): MtpRuntimeStatus = when {
+    mtpRequested && !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
+    mtpRequested && mtpSupported -> MtpRuntimeStatus.ACTIVE
+    else -> MtpRuntimeStatus.OFF
 }
