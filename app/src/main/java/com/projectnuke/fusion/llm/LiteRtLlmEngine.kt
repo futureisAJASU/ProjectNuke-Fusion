@@ -16,6 +16,7 @@ import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
+import com.projectnuke.fusion.modelzoo.LiteRtLmPackageValidator
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import kotlinx.coroutines.CancellationException
@@ -544,8 +545,7 @@ class LiteRtLlmEngine(
     }
 
     private fun isSpeculativeDecodingSupportedModel(modelPath: String): Boolean {
-        val lower = modelPath.lowercase()
-        return "gemma-4" in lower || "gemma4" in lower
+        return LiteRtLmPackageValidator.capabilities(File(modelPath)).hasDrafter
     }
 
     private fun configureSpeculativeDecodingFlag(enabled: Boolean): Boolean {
