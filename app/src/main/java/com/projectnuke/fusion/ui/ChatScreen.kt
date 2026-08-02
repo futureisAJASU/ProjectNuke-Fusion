@@ -211,6 +211,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.projectnuke.fusion.util.FusionFileProvider
 import com.projectnuke.fusion.util.normalizeUserVisibleName
+import com.projectnuke.fusion.util.defaultSpeculativeDecodingEnabled
+import com.projectnuke.fusion.util.resolveEffectiveMtpSetting
 private val BlackBg = Color(0xFF000000)
 private val PanelBg = Color(0xFF171717)
 private val MenuBg = Color(0xFF202020)
@@ -1075,7 +1077,7 @@ fun ChatScreen(
 if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
             val requestId = UUID.randomUUID().toString()
             val capturedSettings = generationSettings.copy(
-                speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
                     modelName = selectedModel,
                     settings = generationSettings
                 )
@@ -1314,7 +1316,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         if (isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
             val requestId = UUID.randomUUID().toString()
             val capturedSettings = generationSettings.copy(
-                speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
                     modelName = selectedModel,
                     settings = generationSettings
                 )
@@ -1498,7 +1500,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 selectedModelId = selectedModel,
                 selectedModelPath = null,
                 settings = generationSettings.copy(
-                    speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                    speculativeDecodingEnabled = resolveEffectiveMtpSetting(
                         modelName = selectedModel,
                         settings = generationSettings
                     )
@@ -1650,7 +1652,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 selectedModelId = selectedModel,
                 selectedModelPath = null,
                 settings = generationSettings.copy(
-                    speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                    speculativeDecodingEnabled = resolveEffectiveMtpSetting(
                         modelName = selectedModel,
                         settings = generationSettings
                     )
@@ -1727,7 +1729,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                             // === PROMPT CONSTRUCTION ===
                             val requestSettings = retrySnapshot.settings.copy(
-                                speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
                                     modelName = retrySnapshot.selectedModelId ?: "",
                                     settings = retrySnapshot.settings
                                 )
@@ -1888,7 +1890,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
             return
         }
 
-        val mtpEnabledForRequest = resolveSpeculativeDecodingEnabled(
+        val mtpEnabledForRequest = resolveEffectiveMtpSetting(
             modelName = selectedModel,
             settings = generationSettings
         )
@@ -2809,7 +2811,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                                                     // === PROMPT CONSTRUCTION ===
                                                     val requestSettings = snapshot.settings.copy(
-                                                        speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                                                        speculativeDecodingEnabled = resolveEffectiveMtpSetting(
                                                             modelName = snapshot.selectedModelId ?: "",
                                                             settings = snapshot.settings
                                                         )
@@ -3078,7 +3080,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                                             // === PROMPT CONSTRUCTION ===
                                             val requestSettings = snapshot.settings.copy(
-                                                speculativeDecodingEnabled = resolveSpeculativeDecodingEnabled(
+                                                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
                                                     modelName = snapshot.selectedModelId!!,
                                                     settings = snapshot.settings
                                                 )
@@ -10217,21 +10219,6 @@ private fun saveFusionSettings(
         .apply()
 }
 
-private fun isGemma4Model(modelName: String): Boolean {
-    return modelName.contains("Gemma 4", ignoreCase = true) ||
-        modelName.contains("gemma-4", ignoreCase = true)
-}
-
-private fun isGemma4E4BModel(modelName: String): Boolean {
-    return modelName.contains("E4B", ignoreCase = true) ||
-        modelName.contains("e4b", ignoreCase = true)
-}
-
-private fun isGemma4E2BModel(modelName: String): Boolean {
-    return modelName.contains("E2B", ignoreCase = true) ||
-        modelName.contains("e2b", ignoreCase = true)
-}
-
 private fun isMultimodalCapableModel(
     modelName: String,
     modelPath: String
@@ -10241,33 +10228,6 @@ private fun isMultimodalCapableModel(
         combined.contains("gemma-4") ||
         combined.contains("multimodal") ||
         combined.contains("vision")
-}
-
-private fun defaultSpeculativeDecodingEnabled(
-    modelName: String,
-    accelerator: AcceleratorMode
-): Boolean {
-    if (!isGemma4Model(modelName)) return false
-
-    return when (accelerator) {
-        AcceleratorMode.GPU,
-        AcceleratorMode.AUTO -> true
-
-        AcceleratorMode.CPU -> isGemma4E4BModel(modelName) && !isGemma4E2BModel(modelName)
-    }
-}
-
-private fun resolveSpeculativeDecodingEnabled(
-    modelName: String,
-    settings: GenerationSettings
-): Boolean {
-    if (!isGemma4Model(modelName)) return false
-
-    return settings.speculativeDecodingEnabled
-        ?: defaultSpeculativeDecodingEnabled(
-            modelName = modelName,
-            accelerator = settings.accelerator
-        )
 }
 
 private fun buildAcceleratorLabel(

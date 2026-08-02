@@ -48,6 +48,8 @@ import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
+import com.projectnuke.fusion.util.isMtpCapableModelName
+import com.projectnuke.fusion.util.resolveEffectiveMtpSetting
 import com.projectnuke.fusion.util.toKoreanMtpStatus
 import java.io.File
 import java.util.Locale
@@ -147,7 +149,7 @@ fun FusionBenchmarkScreen(
             Text("모델: $selectedModel", color = Color(0xFFF5F5F5))
             Text("경로: ${resolvedModelPath ?: "없음"}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
             Text("가속기: ${settings.accelerator.name}", color = Color(0xFFF5F5F5))
-            Text("MTP 가속: ${initialBenchmarkMtpStatusLabel(settings, selectedModel, resolvedModelPath)}", color = Color(0xFFF5F5F5))
+            Text("MTP 가속: ${initialBenchmarkMtpStatusLabel(settings, selectedModel)}", color = Color(0xFFF5F5F5))
             Text("maxTokens=${settings.maxTokens} / temp=${settings.temperature} / topK=${settings.topK} / topP=${settings.topP}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
             safeMaxTokensCap?.let {
                 Text("벤치마크 안전 제한: maxTokens=$it", color = Color(0xFF9E9E9E), fontSize = 12.sp)
@@ -486,10 +488,10 @@ private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.Share
     val effectiveSettings = if (recommendedMaxTokens != rawSettings.maxTokens) {
         rawSettings.copy(
             maxTokens = recommendedMaxTokens,
-            speculativeDecodingEnabled = resolveBenchmarkSpeculativeDecoding(rawSettings, modelName)
+            speculativeDecodingEnabled = resolveEffectiveMtpSetting(modelName, rawSettings)
         )
     } else {
-        rawSettings.copy(speculativeDecodingEnabled = resolveBenchmarkSpeculativeDecoding(rawSettings, modelName))
+        rawSettings.copy(speculativeDecodingEnabled = resolveEffectiveMtpSetting(modelName, rawSettings))
     }
     return BenchmarkSnapshot(
         modelName = modelName,
@@ -505,18 +507,6 @@ private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.Share
 private fun benchmarkSafeMaxTokensCap(context: Context): Int? {
     val recommended = FusionMemoryManager.recommendedBenchmarkMaxTokens(context, Int.MAX_VALUE)
     return recommended.takeIf { it < Int.MAX_VALUE }
-}
-
-private fun resolveBenchmarkSpeculativeDecoding(
-    settings: GenerationSettings,
-    modelName: String
-): Boolean? {
-    if (!modelName.contains("Gemma 4", ignoreCase = true) &&
-        !modelName.contains("gemma-4", ignoreCase = true)
-    ) {
-        return false
-    }
-    return settings.speculativeDecodingEnabled
 }
 
 private fun benchmarkUserErrorMessage(
@@ -588,10 +578,10 @@ private fun resolveBenchmarkModelPath(context: Context, modelName: String, selec
     return if (file.exists()) file.absolutePath else null
 }
 
-private fun initialBenchmarkMtpStatusLabel(settings: GenerationSettings, modelName: String, modelPath: String?): String {
-    if (settings.speculativeDecodingEnabled != true) return "꺼짐"
-    val modelKey = "${modelName}\n${modelPath.orEmpty()}".lowercase()
-    val supported = "gemma-4" in modelKey || "gemma4" in modelKey
+private fun initialBenchmarkMtpStatusLabel(settings: GenerationSettings, modelName: String): String {
+    val requested = resolveEffectiveMtpSetting(modelName, settings)
+    if (!requested) return "꺼짐"
+    val supported = isMtpCapableModelName(modelName)
     return if (supported) "요청됨" else "미지원"
 }
 

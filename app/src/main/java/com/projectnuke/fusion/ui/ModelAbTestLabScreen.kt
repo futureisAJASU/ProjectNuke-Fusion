@@ -52,6 +52,7 @@ import com.projectnuke.fusion.modelzoo.FusionModelProfiles
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
 import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.util.FusionMemoryManager
+import com.projectnuke.fusion.util.resolveEffectiveMtpSetting
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -509,7 +510,9 @@ private suspend fun runAbTests(
                         targetLabel = label,
                         modelName = target.model.spec.displayName,
                         modelId = target.model.spec.id,
-                        settings = target.settings,
+                        settings = target.settings.copy(
+                            speculativeDecodingEnabled = resolveEffectiveMtpSetting(target.model.spec.displayName, target.settings)
+                        ),
                         reasoningEnabled = target.reasoningEnabled,
                         memoryEnabled = isSavedMemoryContextEnabled(prefs),
                         answer = null,
@@ -541,6 +544,9 @@ private suspend fun runSingleAbTarget(
     target: AbTarget
 ): AbResult {
     if (!File(target.model.path).exists()) error("model file missing")
+    val resolvedSettings = target.settings.copy(
+        speculativeDecodingEnabled = resolveEffectiveMtpSetting(target.model.spec.displayName, target.settings)
+    )
     val memoryText = buildSavedMemoryContext(
         context = context,
         prefs = prefs,
@@ -555,7 +561,7 @@ private suspend fun runSingleAbTarget(
     val outcome = engine.generateStreaming(
         messages = listOf(ChatMessage("user", input)),
         modelPath = target.model.path,
-        settings = target.settings,
+        settings = resolvedSettings,
         onToken = { token ->
             if (firstTokenLatencyMs == null && token.isNotEmpty()) {
                 firstTokenLatencyMs = SystemClock.elapsedRealtime() - startedAt
@@ -578,7 +584,7 @@ private suspend fun runSingleAbTarget(
         targetLabel = label,
         modelName = target.model.spec.displayName,
         modelId = target.model.spec.id,
-        settings = target.settings,
+        settings = resolvedSettings,
         reasoningEnabled = target.reasoningEnabled,
         memoryEnabled = isSavedMemoryContextEnabled(prefs),
         answer = answer,
