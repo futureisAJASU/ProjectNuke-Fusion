@@ -33,6 +33,11 @@ import java.nio.ByteOrder
  * sooner than the block boundary following section i's end (BLOCK_SIZE
  * semantics from the pinned schema). Data of every section lies inside the
  * header block and is fully readable from the first `headerEnd` bytes.
+ *
+ * Versioning model: the file's own `major/minor/patch` (read from bytes 8-20)
+ * describe the package schema/file version, separate from
+ * `LiteRtLmPackageValidator.VALIDATOR_IMPLEMENTATION_VERSION` which describes
+ * this application's validation logic. They are never conflated.
  */
 internal object LiteRtLmFileParser {
 
@@ -48,7 +53,13 @@ internal object LiteRtLmFileParser {
     private const val VDATA_STRING_VALUE = 9
     private const val VDATA_MAX = 12
 
-    /** Mirrors `AnySectionDataType` from the pinned schema. */
+    /**
+     * Mirrors `AnySectionDataType` from the pinned schema (v0.14.0), which
+     * defines exactly eight members, ids 0..7. Any other id — including 8/9
+     * which exist only in newer upstream schemas — is not defined by the
+     * pinned schema and is rejected as unknown. Do not add members here
+     * without also bumping the pinned schema copy.
+     */
     internal enum class SectionDataType(val id: Int) {
         NONE(0),
         GENERIC_BINARY_DATA(1),
@@ -57,9 +68,7 @@ internal object LiteRtLmFileParser {
         SP_TOKENIZER(4),
         LLM_METADATA_PROTO(5),
         HF_TOKENIZER_ZLIB(6),
-        TFLITE_WEIGHTS(7),
-        EMBEDDING_METADATA_PROTO(8),
-        EXECUTOR_METADATA_PROTO(9);
+        TFLITE_WEIGHTS(7);
 
         companion object {
             fun fromId(id: Int): SectionDataType? = entries.firstOrNull { it.id == id }

@@ -1,3 +1,20 @@
+// ---------------------------------------------------------------------------
+// Provenance (app-maintained; NOT part of the upstream schema):
+//
+// Upstream:  google-ai-edge/LiteRT-LM
+// Tag:       v0.14.0
+// Source:    schema/core/litertlm_header_schema.fbs
+// URL:       https://raw.githubusercontent.com/google-ai-edge/LiteRT-LM/v0.14.0/schema/core/litertlm_header_schema.fbs
+// License:   Apache-2.0
+// Pin:       mirrors the dependency com.google.ai.edge.litertlm:litertlm-android:0.14.0
+//
+// The block below after the BEGIN marker is a byte-exact copy of the upstream
+// file (LF line endings, SHA-256 d36b1e3a3aac59671a70a8a46d84c15e31879e5a90176d01caa8abda666c2e24).
+// Do not edit it: LiteRtLmSchemaFingerprintTest fails on any drift.
+// Re-copy from the pinned tag when bumping the dependency, and update the
+// fingerprint test with the new hash.
+// ---------------------------------------------------------------------------
+// --- BEGIN verbatim upstream v0.14.0 schema/core/litertlm_header_schema.fbs ---
 // Copyright 2025 The Google AI Edge Authors. All Rights Reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,12 +28,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
-// This file is a verbatim copy of
-//   google-ai-edge/LiteRT-LM @ v0.14.0 schema/core/litertlm_header_schema.fbs
-// (Apache-2.0). It pins the LiteRT-LM file header schema to the dependency
-// version used by this app (com.google.ai.edge.litertlm:litertlm-android:0.14.0).
-// Do not edit: re-copy from the pinned tag when bumping the dependency.
 
 // The Header specification for LiteRTLM files.
 // This file defines the schema for the header of a LiteRTLM file.
@@ -109,36 +120,16 @@ table SystemMetadata {
 // additions constitute a minor version bump). Sections cannot be re-ordered and
 // or removed unless the major version is bumped.
 enum AnySectionDataType:ubyte {
-  // Default value if no type is set.
-  NONE,
-
-  // For any user-specified/previously unknown data.
-  GenericBinaryData,
-
-  // For edited files with outdated sections.
-  Deprecated,
-
-  // Corresponds to a tflite.Model.
-  TFLiteModel,
-
-  // A SentencePiece Tokenizer.
-  SP_Tokenizer,
-
-  // A litert.lm.proto.LlmMetadata Protobuf.
-  LlmMetadataProto,
-
-  // A HuggingFace Tokenizer's JSON config (zlib compressed).
-  HF_Tokenizer_Zlib,
-
-  // An external weight file for a tflite.Model. This is used
-  // together with TFLiteModel section to form a complete
-  // tflite.Model with weights.
-  TFLiteWeights,
-
-  EmbeddingMetadataProto,  // A litert.lm.proto.EmbeddingMetadata Protobuf.
-
-  // A litert.lm.proto.ExecutorMetadata Protobuf.
-  ExecutorMetadataProto,
+  NONE,  // Default value if no type is set.
+  GenericBinaryData,  // For any user-specified/previously unknown data.
+  Deprecated,  // For edited files with outdated sections.
+  TFLiteModel,  // Corresponds to a tflite.Model.
+  SP_Tokenizer,  // A SentencePiece Tokenizer.
+  LlmMetadataProto,  // A litert.lm.proto.LlmMetadata Protobuf.
+  HF_Tokenizer_Zlib,  // A HuggingFace Tokenizer's JSON config (zlib compressed).
+  TFLiteWeights,  // A external weight file for a tflite.Model. This is used
+// together with TFLiteModel section to form a complete
+// tflite.Model with weights.
 }
 
 // Section offsets and datatype
@@ -164,3 +155,6 @@ table LiteRTLMMetaData {
 }
 
 root_type LiteRTLMMetaData;
+
+//  //schema/core/litertlm_header.h,
+//)
