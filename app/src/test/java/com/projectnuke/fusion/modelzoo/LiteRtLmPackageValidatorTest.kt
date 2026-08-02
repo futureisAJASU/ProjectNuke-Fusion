@@ -358,6 +358,138 @@ class LiteRtLmPackageValidatorTest {
         delete(file)
     }
 
+    // ---- zero-length sections (official reader: litertlm_read.cc rejects them) ----
+
+    @Test
+    fun `zero-length tflite model section fails validation`() {
+        val sections = listOf(
+            SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 16384L, 17408L),
+            SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
+            SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 49152L),
+        )
+        val file = tempFile(LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        assertFalse(LiteRtLmPackageValidator.validate(file))
+        delete(file)
+    }
+
+    @Test
+    fun `zero-length sp tokenizer section fails validation`() {
+        val sections = listOf(
+            SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 16384L, 17408L),
+            SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 32768L),
+            SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
+        )
+        val file = tempFile(LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        assertFalse(LiteRtLmPackageValidator.validate(file))
+        delete(file)
+    }
+
+    @Test
+    fun `zero-length hf tokenizer section fails validation`() {
+        val sections = listOf(
+            SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 16384L, 17408L),
+            SectionSpec(com.projectnuke.fusion.modelzoo.LiteRtLmPackageBuilder.DATA_TYPE_HF_TOKENIZER_ZLIB, 32768L, 32768L),
+            SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
+        )
+        val file = tempFile(LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        assertFalse(LiteRtLmPackageValidator.validate(file))
+        delete(file)
+    }
+
+    // ---- strict next-block rule ----
+
+    @Test
+    fun `section ending on a block boundary may not be followed by a section at the same offset`() {
+        // Section 0 covers exactly [16384, 32768); the schema's strict rule
+        // requires the next section to begin at 49152, not at 32768.
+        val sections = listOf(
+            SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 16384L, 32768L),
+            SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
+            SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
+        )
+        val file = tempFile(LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        assertFalse(LiteRtLmPackageValidator.validate(file))
+        delete(file)
+    }
+
+    @Test
+    fun `section ending on a block boundary may be followed by a section at the next block`() {
+        val sections = listOf(
+            SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 16384L, 32768L),
+            SectionSpec(DATA_TYPE_SP_TOKENIZER, 49152L, 53248L),
+            SectionSpec(DATA_TYPE_TFLITE_MODEL, 65536L, 73728L),
+        )
+        val file = tempFile(LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        assertTrue(LiteRtLmPackageValidator.validate(file))
+        delete(file)
+    }
+
+    // ---- first-section boundary (official writer/reader behavior) ----
+
+    @Test
+    fun `first section may begin at a block-aligned header end`() {
+        // Official writer keeps an already-aligned header_end as-is (>= semantics).
+        val bytes = LiteRtLmPackageBuilder.buildBytes(
+            sections = listOf(
+                SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 16384L, 17408L),
+                SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
+                SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
+            ),
+        )
+        ByteBuffer.wrap(bytes, 24, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(16384)
+        val file = tempFile(bytes)
+        assertTrue(LiteRtLmPackageValidator.validate(file))
+        delete(file)
+    }
+
+    @Test
+    fun `first section inside the header block fails validation`() {
+        val bytes = LiteRtLmPackageBuilder.buildBytes(
+            sections = listOf(
+                SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 8192L, 17408L),
+                SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
+                SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
+            ),
+        )
+        // headerEnd set to 16384 so the header block covers [32, 16384), which
+        // overlaps the first section.
+        ByteBuffer.wrap(bytes, 24, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(16384)
+        val file = tempFile(bytes)
+        assertFalse(LiteRtLmPackageValidator.validate(file))
+        delete(file)
+    }
+
+    // ---- block arithmetic (overflow-safe) ----
+
+    @Test
+    fun `roundUpBlock follows the official writer semantics`() {
+        assertEquals(16384L, LiteRtLmFileParser.roundUpBlock(16384L))
+        assertEquals(16384L, LiteRtLmFileParser.roundUpBlock(1872L))
+        assertEquals(32768L, LiteRtLmFileParser.roundUpBlock(16385L))
+        assertEquals(98304L, LiteRtLmFileParser.roundUpBlock(81924L))
+    }
+
+    @Test
+    fun `strictNextBlock returns the smallest multiple strictly greater than the end`() {
+        assertEquals(16384L, LiteRtLmFileParser.strictNextBlock(0L))
+        assertEquals(32768L, LiteRtLmFileParser.strictNextBlock(16384L))
+        assertEquals(32768L, LiteRtLmFileParser.strictNextBlock(17408L))
+        assertEquals(98304L, LiteRtLmFileParser.strictNextBlock(98303L))
+    }
+
+    @Test
+    fun `block arithmetic near Long MAX_VALUE does not wrap`() {
+        try {
+            LiteRtLmFileParser.strictNextBlock(Long.MAX_VALUE - 100)
+            throw AssertionError("strictNextBlock must reject an unrepresentable next block")
+        } catch (expected: LiteRtLmFileParser.ParseException) {
+            // expected: next block boundary overflows
+        }
+        // roundUpBlock is only ever called with a validated headerEnd, which is
+        // capped at MAX_HEADER_BYTES; still assert it stays sane near the cap.
+        assertEquals(16384L, LiteRtLmFileParser.roundUpBlock(16384L))
+    }
+
     // ---- the pre-0.14 invented format this validator previously accepted ----
 
     private fun legacyInventedFormatBytes(): ByteArray {

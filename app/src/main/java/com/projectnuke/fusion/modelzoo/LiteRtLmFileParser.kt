@@ -45,7 +45,13 @@ internal object LiteRtLmFileParser {
     internal const val BLOCK_SIZE = 16 * 1024
     internal const val MAJOR_VERSION_REQUIRED = 1
     internal const val HEADER_LENGTH = 32
-    private const val MAX_HEADER_BYTES = 64 * 1024 * 1024
+
+    /**
+     * Official reader cap: `kLitertLmHeaderMaxSize = 16 * 1024` from
+     * `runtime/util/litert_lm_loader.h` (v0.14.0). Both the streaming loader
+     * and the C++ writer reject header blocks that exceed one block.
+     */
+    private const val MAX_HEADER_BYTES = 16 * 1024
 
     internal const val KEY_MODEL_TYPE = "model_type"
     internal const val VALUE_MTP_DRAFTER = "tf_lite_mtp_drafter"
@@ -165,7 +171,10 @@ internal object LiteRtLmFileParser {
 
         val vec = fb.vector(objectsField)
         val sections = ArrayList<Section>(vec.count)
-        var nextAllowedBegin = ceilBlock(headerEnd)
+        // Official writer behavior (python/litert_lm_builder/litertlm_builder.py,
+        // _round_up_to_block_size): the first section begins at header_end
+        // rounded UP to a block; an already-aligned header_end is kept as-is.
+        var nextAllowedBegin = roundUpBlock(headerEnd)
         for (i in 0 until vec.count) {
             val obj = fb.table(fb.uoffset(vec.elemsPos + 4 * i))
             val beginField = fb.field(obj, 1)
@@ -178,15 +187,19 @@ internal object LiteRtLmFileParser {
             val end = fb.u64(endField)
             if (begin < 0L || end < 0L) throw ParseException("section $i range exceeds 2^63")
             if (begin > end) throw ParseException("section $i begins after its end")
+            if (begin == end) throw ParseException("section $i has zero size")
             if (end > fileSize) throw ParseException("section $i extends past end of file")
-            if (begin % BLOCK_SIZE != 0L) throw ParseException("section $i begin not block-aligned")
-            if (begin < nextAllowedBegin) throw ParseException("section $i overlaps or precedes previous section")
+            if (begin % BLOCK_SIZE.toLong() != 0L) throw ParseException("section $i begin not block-aligned")
+            // Strict next-block rule from the pinned schema: section i+1 begins
+            // no sooner than the smallest K * BLOCK_SIZE strictly greater than
+            // section i's end_offset. This also enforces ordering.
+            if (begin < nextAllowedBegin) throw ParseException("section $i begins before the block boundary required after the previous section")
             val dataType = SectionDataType.fromId(fb.u8(typeField))
                 ?: throw ParseException("section $i unknown data type ${fb.u8(typeField)}")
             val itemsField = fb.field(obj, 0)
             val items = if (itemsField == 0) emptyList() else parseKeyValues(fb, itemsField)
             sections += Section(dataType, begin, end, items)
-            nextAllowedBegin = ceilBlock(end)
+            nextAllowedBegin = strictNextBlock(end)
         }
         if (sections.isEmpty()) throw ParseException("no sections")
 
@@ -232,7 +245,28 @@ internal object LiteRtLmFileParser {
         return out
     }
 
-    private fun ceilBlock(value: Long): Long = (value + BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE
+    /**
+     * Official writer rule: rounds [value] up to the next multiple of
+     * BLOCK_SIZE; an already-aligned value is kept as-is (>= semantics, as in
+     * `litertlm_builder.py::_round_up_to_block_size`).
+     */
+    internal fun roundUpBlock(value: Long): Long {
+        val rem = value % BLOCK_SIZE.toLong()
+        return if (rem == 0L) value else value + (BLOCK_SIZE - rem)
+    }
+
+    /**
+     * Strict next-block rule from the pinned schema: the smallest multiple of
+     * BLOCK_SIZE strictly greater than [end]. Overflow-safe: an end_offset so
+     * large that the next boundary is not representable throws instead of
+     * wrapping.
+     */
+    internal fun strictNextBlock(end: Long): Long {
+        val rem = end % BLOCK_SIZE.toLong()
+        val next = if (rem == 0L) end + BLOCK_SIZE else end + (BLOCK_SIZE - rem)
+        if (next <= end) throw ParseException("next block boundary after $end overflows")
+        return next
+    }
 
     /**
      * Bounds-checked reader over a FlatBuffers buffer with the layout produced
