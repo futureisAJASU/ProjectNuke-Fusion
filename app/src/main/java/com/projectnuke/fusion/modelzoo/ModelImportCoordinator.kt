@@ -43,6 +43,10 @@ internal fun interface LiteRtLmValidator {
     fun validate(file: File): Boolean
 }
 
+internal fun defaultValidator(): LiteRtLmValidator = LiteRtLmValidator { file ->
+    file.length() >= 1024L * 1024L && LiteRtLmPackageValidator.validate(file).isValid
+}
+
 /** Process-owned, single-adoption coordinator for imported local models. */
 internal class ModelImportCoordinator(
     private val modelDirectory: File,
@@ -51,9 +55,7 @@ internal class ModelImportCoordinator(
     private val usableSpace: (File) -> Long = { it.usableSpace },
     private val maximumBytes: Long = 12L * 1024L * 1024L * 1024L,
     private val reserveBytes: Long = 512L * 1024L * 1024L,
-    private val validator: LiteRtLmValidator = LiteRtLmValidator { file ->
-        file.length() >= 1024L * 1024L && LiteRtLmPackageValidator.validate(file)
-    },
+    private val validator: LiteRtLmValidator = defaultValidator(),
 ) {
     private val activeBySource = ConcurrentHashMap<String, String>()
     private val cancelledTokens = ConcurrentHashMap.newKeySet<String>()

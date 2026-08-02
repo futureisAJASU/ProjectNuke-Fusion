@@ -38,6 +38,7 @@ class LiteRtLlmEngine(
 
     private var engine: Engine? = null
     private var loadedKey: String? = null
+    private var actualBackend: String? = null
     @Volatile
     var lastMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
         private set
@@ -144,7 +145,7 @@ class LiteRtLlmEngine(
             if (sanitized.isBlank()) {
                 GenerationOutcome.Empty
             } else {
-                GenerationOutcome.Success(text = sanitized, actualBackend = null)
+                GenerationOutcome.Success(text = sanitized, actualBackend = actualBackend)
             }
         }
     }
@@ -262,7 +263,7 @@ class LiteRtLlmEngine(
             if (sanitized.isBlank()) {
                 GenerationOutcome.Empty
             } else {
-                GenerationOutcome.Success(text = sanitized, actualBackend = null)
+                GenerationOutcome.Success(text = sanitized, actualBackend = actualBackend)
             }
         }
     }
@@ -348,8 +349,11 @@ class LiteRtLlmEngine(
         if (mtpRequested && !mtpSupported) {
             lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
             Log.i("FusionLiteRT", "MTP unsupported model/runtime")
+        } else if (mtpRequested && mtpSupported) {
+            lastMtpStatus = MtpRuntimeStatus.REQUESTED
+            Log.i("FusionLiteRT", "MTP requested, model supports it")
         } else {
-            lastMtpStatus = if (ladder.first().mtpEnabled) MtpRuntimeStatus.REQUESTED else MtpRuntimeStatus.OFF
+            lastMtpStatus = MtpRuntimeStatus.OFF
         }
 
         var newEngine: Engine? = null
@@ -379,9 +383,10 @@ class LiteRtLlmEngine(
             newEngine = selectionResult.engine
             selectedMtpEnabled = selectionResult.selectedMtpEnabled
             mtpFlagAppliedForMtp = selectionResult.mtpFlagAppliedForMtp
+            actualBackend = selectionResult.backendName
             Log.i(
                 "FusionLiteRT",
-                "Engine initialized with $preferredBackendName" +
+                "Engine initialized with ${selectionResult.backendName}" +
                     (if (selectedMtpEnabled) " + MTP" else " without MTP")
             )
         } else {
@@ -396,7 +401,7 @@ class LiteRtLlmEngine(
 
         lastMtpStatus = when {
             mtpRequested && !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
-            selectedMtpEnabled -> MtpRuntimeStatus.ACTIVE
+            selectedMtpEnabled && mtpRequested -> MtpRuntimeStatus.RUNTIME_CONFIRMED_ACTIVE
             mtpRequested && mtpSupported && !mtpFlagAppliedForMtp -> MtpRuntimeStatus.FAILED
             mtpRequested && mtpSupported -> MtpRuntimeStatus.FALLBACK_DISABLED
             else -> MtpRuntimeStatus.OFF
@@ -528,7 +533,7 @@ class LiteRtLlmEngine(
     }
 
     private fun isSpeculativeDecodingSupportedModel(modelPath: String): Boolean {
-        return LiteRtLmPackageValidator.capabilities(File(modelPath)).hasDrafter
+        return LiteRtLmPackageValidator.validate(File(modelPath)).getOrNull()?.hasDrafter == true
     }
 
     private fun configureSpeculativeDecodingFlag(enabled: Boolean): Boolean {
@@ -545,9 +550,10 @@ class LiteRtLlmEngine(
 
 enum class MtpRuntimeStatus {
     OFF,
-    REQUESTED,
-    ACTIVE,
     UNSUPPORTED,
+    REQUESTED,
+    INITIALIZED_WITH_MTP_REQUEST,
+    RUNTIME_CONFIRMED_ACTIVE,
     FALLBACK_DISABLED,
     FAILED
 }
@@ -575,7 +581,7 @@ internal fun resolveMtpCacheHitStatus(
     mtpSupported: Boolean
 ): MtpRuntimeStatus = when {
     mtpRequested && !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
-    mtpRequested && mtpSupported -> MtpRuntimeStatus.ACTIVE
+    mtpRequested && mtpSupported -> MtpRuntimeStatus.RUNTIME_CONFIRMED_ACTIVE
     else -> MtpRuntimeStatus.OFF
 }
 
@@ -588,6 +594,7 @@ internal data class EngineSelectionResult<T>(
     val engine: T,
     val selectedMtpEnabled: Boolean,
     val mtpFlagAppliedForMtp: Boolean,
+    val backendName: String,
 )
 
 internal fun <T> selectFirstWorkingEngine(
@@ -609,7 +616,8 @@ internal fun <T> selectFirstWorkingEngine(
                 EngineSelectionResult(
                     engine = attempt.getOrThrow(),
                     selectedMtpEnabled = candidate.mtpEnabled && flagApplied,
-                    mtpFlagAppliedForMtp = mtpFlagAppliedForMtp
+                    mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
+                    backendName = candidate.backend
                 ),
                 null
             )
@@ -621,7 +629,8 @@ internal fun <T> selectFirstWorkingEngine(
                     EngineSelectionResult(
                         engine = visionRetry.getOrThrow(),
                         selectedMtpEnabled = candidate.mtpEnabled && flagApplied,
-                        mtpFlagAppliedForMtp = mtpFlagAppliedForMtp
+                        mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
+                        backendName = candidate.backend
                     ),
                     null
                 )

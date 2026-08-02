@@ -39,7 +39,7 @@ import java.nio.ByteOrder
  * `LiteRtLmPackageValidator.VALIDATOR_IMPLEMENTATION_VERSION` which describes
  * this application's validation logic. They are never conflated.
  */
-internal object LiteRtLmFileParser {
+public object LiteRtLmFileParser {
 
     internal const val MAGIC = "LITERTLM"
     internal const val BLOCK_SIZE = 16 * 1024
@@ -90,7 +90,7 @@ internal object LiteRtLmFileParser {
      * pinned schema and is rejected as unknown. Do not add members here
      * without also bumping the pinned schema copy.
      */
-    internal enum class SectionDataType(val id: Int) {
+    public enum class SectionDataType(val id: Int) {
         NONE(0),
         GENERIC_BINARY_DATA(1),
         DEPRECATED(2),
@@ -105,26 +105,26 @@ internal object LiteRtLmFileParser {
         }
     }
 
-    internal data class KeyValue(
-        val key: String,
-        val valueType: Int,
-        val stringValue: String?,
+    public data class KeyValue(
+        public val key: String,
+        public val valueType: Int,
+        public val stringValue: String?,
     )
 
-    internal data class Section(
-        val dataType: SectionDataType,
-        val beginOffset: Long,
-        val endOffset: Long,
-        val items: List<KeyValue>,
+    public data class Section(
+        public val dataType: SectionDataType,
+        public val beginOffset: Long,
+        public val endOffset: Long,
+        public val items: List<KeyValue>,
     )
 
-    internal data class ParsedHeader(
-        val majorVersion: Int,
-        val minorVersion: Int,
-        val patchVersion: Int,
-        val headerEnd: Long,
-        val systemEntries: List<KeyValue>,
-        val sections: List<Section>,
+    public data class ParsedHeader(
+        public val majorVersion: Int,
+        public val minorVersion: Int,
+        public val patchVersion: Int,
+        public val headerEnd: Long,
+        public val systemEntries: List<KeyValue>,
+        public val sections: List<Section>,
     )
 
     internal class ParseException(message: String) : Exception(message)

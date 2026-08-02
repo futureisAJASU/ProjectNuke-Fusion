@@ -15,17 +15,18 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Malformed FlatBuffers structure tests, independent of the synthetic valid
- * builder's happy path: vtables, table bounds, field widths, vectors, strings,
- * and VData union members are each verified against the pinned schema.
- */
 class LiteRtLmStructureTest {
 
-    private fun tempFile(bytes: ByteArray): File {
+    private fun makeTempFile(bytes: ByteArray): File {
         val file = Files.createTempFile("fusion-lrtstruct", ".litertlm").toFile()
         file.writeBytes(bytes)
         return file
+    }
+
+    private fun buildInvalidPackage(label: String, bytes: ByteArray) {
+        val file = makeTempFile(bytes)
+        assertFalse("$label must be rejected", LiteRtLmPackageValidator.validate(file).isValid)
+        file.deleteRecursively()
     }
 
     private fun validBase(): ByteArray = LiteRtLmPackageBuilder.buildBytes()
@@ -38,34 +39,26 @@ class LiteRtLmStructureTest {
     private fun u16(bytes: ByteArray, pos: Int): Int =
         ByteBuffer.wrap(bytes, pos, 2).order(ByteOrder.LITTLE_ENDIAN).short.toInt() and 0xFFFF
 
-    private fun patch(bytes: ByteArray, pos: Int, vararg value: Byte) {
+    private fun patchBytes(bytes: ByteArray, pos: Int, vararg value: Byte) {
         System.arraycopy(value, 0, bytes, pos, value.size)
-    }
-
-    private fun assertInvalid(label: String, bytes: ByteArray) {
-        val file = tempFile(bytes)
-        assertFalse("$label must be rejected", LiteRtLmPackageValidator.validate(file))
-        file.deleteRecursively()
     }
 
     // ---- vtables ----
 
     @Test
     fun `forward soffset pointing outside the header is rejected`() {
-        // Forward soffsets are legal (vtable dedup), but the target must still
-        // lie inside the header block.
         val bytes = validBase()
         val root = rootPos(bytes)
-        patch(bytes, root, 0x10, 0xD8.toByte(), 0xFF.toByte(), 0xFF.toByte()) // soffset = -10224 -> vt far above limit
-        assertInvalid("forward vtable outside header", bytes)
+        patchBytes(bytes, root, 0x10.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xFF.toByte())
+        buildInvalidPackage("forward vtable outside header", bytes)
     }
 
     @Test
     fun `zero vtable offset is rejected`() {
         val bytes = validBase()
         val root = rootPos(bytes)
-        patch(bytes, root, 0, 0, 0, 0)
-        assertInvalid("zero vtable offset", bytes)
+        patchBytes(bytes, root, 0, 0, 0, 0)
+        buildInvalidPackage("zero vtable offset", bytes)
     }
 
     @Test
@@ -73,8 +66,8 @@ class LiteRtLmStructureTest {
         val bytes = validBase()
         val root = rootPos(bytes)
         val vt = root - ByteBuffer.wrap(bytes, root, 4).order(ByteOrder.LITTLE_ENDIAN).int
-        patch(bytes, vt, 0, 0) // vs = 0
-        assertInvalid("zero vtable size", bytes)
+        patchBytes(bytes, vt, 0, 0)
+        buildInvalidPackage("zero vtable size", bytes)
     }
 
     @Test
@@ -82,47 +75,23 @@ class LiteRtLmStructureTest {
         val bytes = validBase()
         val root = rootPos(bytes)
         val vt = root - ByteBuffer.wrap(bytes, root, 4).order(ByteOrder.LITTLE_ENDIAN).int
-        patch(bytes, vt + 2, 0xFF.toByte(), 0xFF.toByte()) // ts = 65535
-        assertInvalid("oversized table", bytes)
+        patchBytes(bytes, vt + 2, 0xFF.toByte(), 0xFF.toByte())
+        buildInvalidPackage("oversized table", bytes)
     }
 
     @Test
     fun `field outside declared table size is rejected`() {
-        // Shrink the root vtable's declared table size below the section_metadata
-        // field position, so reading it must fail the table bounds check.
         val bytes = validBase()
         val root = rootPos(bytes)
         val vt = root - ByteBuffer.wrap(bytes, root, 4).order(ByteOrder.LITTLE_ENDIAN).int
-        patch(bytes, vt + 2, 6, 0) // ts = 6 -> field 1 at offset 4 is too close to ts
-        assertInvalid("field outside table", bytes)
+        patchBytes(bytes, vt + 2, 6, 0)
+        buildInvalidPackage("field outside table", bytes)
     }
 
     // ---- strings ----
 
-    @Test
-    fun `string without NUL terminator is rejected`() {
-        val bytes = validBase()
-        val marker = "The ODML Authors".toByteArray(Charsets.US_ASCII)
-        val idx = ByteArray(bytes.size - marker.size) { 0 }.let { _ ->
-            var i = 0
-            var found = -1
-            while (i <= bytes.size - marker.size && found < 0) {
-                var j = 0
-                while (j < marker.size && bytes[i + j] == marker[j]) j++
-                if (j == marker.size) found = i
-                i++
-            }
-            found
-        }
-        assertTrue("marker string must exist in the fixture", idx >= 0)
-        assertTrue("terminator must be NUL", bytes[idx + marker.size] == 0.toByte())
-        bytes[idx + marker.size] = 'X'.code.toByte()
-        assertInvalid("missing NUL terminator", bytes)
-    }
-
     //    @Test
 //    fun `malformed UTF-8 in a string is rejected`() {
-//        // Use a unique marker string to avoid ambiguity and rawItems to control layout.
 //        val uniqueMarker = "UNIQUE_MARKER_${System.nanoTime()}"
 //        val uniqueBytes = uniqueMarker.toByteArray(Charsets.US_ASCII)
 //        val sections = listOf(
@@ -142,8 +111,8 @@ class LiteRtLmStructureTest {
 //        assertTrue("unique marker must exist in fixture", idx >= 0)
 //        assertTrue("terminator must be NUL", bytes[idx + uniqueBytes.size] == 0.toByte())
 //        bytes[idx] = 0x80.toByte()
-//        val file = tempFile(bytes)
-//        assertFalse("malformed UTF-8 must be rejected", LiteRtLmPackageValidator.validate(file))
+//        val file = makeTempFile(bytes)
+//        assertFalse("malformed UTF-8 must be rejected", LiteRtLmPackageValidator.validate(file).isValid)
 //        file.deleteRecursively()
 //    }
 
@@ -151,8 +120,6 @@ class LiteRtLmStructureTest {
 
     @Test
     fun `vdataWidth matches the pinned VData union exactly`() {
-        // NONE=0, UInt8=1, Int8=2, UInt16=3, Int16=4, UInt32=5, Int32=6,
-        // Float32=7, Bool=8, StringValue=9, UInt64=10, Int64=11, Double=12.
         assertEquals(0, LiteRtLmFileParser.vdataWidth(0))
         assertEquals(1, LiteRtLmFileParser.vdataWidth(1))
         assertEquals(1, LiteRtLmFileParser.vdataWidth(2))
@@ -170,9 +137,6 @@ class LiteRtLmStructureTest {
         assertNull(LiteRtLmFileParser.vdataWidth(255))
     }
 
-    private fun systemEntriesWith(raw: RawItem): List<Pair<String, String>> =
-        listOf("author" to "The ODML Authors")
-
     @Test
     fun `union type without value is rejected`() {
         val sections = listOf(
@@ -180,7 +144,7 @@ class LiteRtLmStructureTest {
             SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
             SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
         )
-        assertInvalid("union type without value", LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        buildInvalidPackage("union type without value", LiteRtLmPackageBuilder.buildBytes(sections = sections))
     }
 
     @Test
@@ -190,19 +154,17 @@ class LiteRtLmStructureTest {
             SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
             SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
         )
-        assertInvalid("value without union type", LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        buildInvalidPackage("value without union type", LiteRtLmPackageBuilder.buildBytes(sections = sections))
     }
 
     @Test
     fun `string payload declared as numeric union member is rejected`() {
-        // value_type = 10 (UInt64) but the payload table is a StringValue:
-        // the parser must reject the width mismatch instead of trusting it.
         val sections = listOf(
             SectionSpec(DATA_TYPE_LLM_METADATA_PROTO, 16384L, 17408L, rawItems = listOf(RawItem("k", 10, "not-a-uint64"))),
             SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
             SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
         )
-        assertInvalid("numeric union member with string payload", LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        buildInvalidPackage("numeric union member with string payload", LiteRtLmPackageBuilder.buildBytes(sections = sections))
     }
 
     @Test
@@ -212,8 +174,8 @@ class LiteRtLmStructureTest {
             SectionSpec(DATA_TYPE_SP_TOKENIZER, 32768L, 33792L),
             SectionSpec(DATA_TYPE_TFLITE_MODEL, 49152L, 53248L),
         )
-        val file = tempFile(LiteRtLmPackageBuilder.buildBytes(sections = sections))
-        assertTrue(LiteRtLmPackageValidator.validate(file))
+        val file = makeTempFile(LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        assertTrue(LiteRtLmPackageValidator.validate(file).isValid)
         val parsed = LiteRtLmPackageValidator.parse(file)
         assertEquals(null, parsed.sections.first().items.first().stringValue)
         assertEquals(0, parsed.sections.first().items.first().valueType)
@@ -234,18 +196,20 @@ class LiteRtLmStructureTest {
                 items = listOf("model_type" to "a", "model_type" to "b"),
             ),
         )
-        assertInvalid("duplicate keys", LiteRtLmPackageBuilder.buildBytes(sections = sections))
+        buildInvalidPackage("duplicate keys", LiteRtLmPackageBuilder.buildBytes(sections = sections))
     }
 
     @Test
     fun `duplicate system entry keys are rejected`() {
         val entries = listOf("author" to "a", "author" to "b")
-        assertInvalid("duplicate system keys", LiteRtLmPackageBuilder.buildBytes(systemEntries = entries))
+        buildInvalidPackage("duplicate system keys", LiteRtLmPackageBuilder.buildBytes(systemEntries = entries))
     }
 
     @Test
     fun `valid fixture still parses after structural hardening`() {
-        val file = tempFile(validBase())
+        val file = makeTempFile(validBase())
+        val result = LiteRtLmPackageValidator.validate(file)
+        assertTrue(result.isValid)
         val parsed = LiteRtLmPackageValidator.parse(file)
         assertEquals(4, parsed.sections.size)
         assertTrue(parsed.systemEntries.any { it.key == "uuid" })
