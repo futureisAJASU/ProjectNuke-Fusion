@@ -59,6 +59,31 @@ internal object LiteRtLmFileParser {
     private const val VDATA_STRING_VALUE = 9
     private const val VDATA_MAX = 12
 
+    // ---- metadata bounds ----
+    //
+    // Measured against the real Gemma 4 E2B golden package (see
+    // LiteRtLmGoldenFileTest): 12 sections, 3 system entries, 2 items per
+    // section, 22-byte keys, 36-byte values, 428 total decoded metadata
+    // bytes. Every limit below has generous (>=16x) headroom and is enforced
+    // before any ArrayList/ByteArray allocation so adversarial headers fail
+    // without unbounded allocation.
+    internal const val MAX_SECTION_COUNT = 256
+    internal const val MAX_SYSTEM_ENTRIES = 64
+    internal const val MAX_ITEMS_PER_SECTION = 64
+    internal const val MAX_KEY_BYTES = 256
+    internal const val MAX_STRING_VALUE_BYTES = 1024
+
+    /**
+     * Total decoded metadata budget (keys + string values, in UTF-16 chars).
+     * Defensive: while the header block is capped at one 16 KiB block, decoded
+     * metadata cannot exceed ~16 KiB; this bound stays in force if the header
+     * cap is ever raised.
+     */
+    internal const val MAX_TOTAL_METADATA_CHARS = 64 * 1024
+
+    /** Explicit vector element bound; also implied by the 16 KiB header cap. */
+    internal const val MAX_VECTOR_ELEMENTS = 4096
+
     /**
      * Mirrors `AnySectionDataType` from the pinned schema (v0.14.0), which
      * defines exactly eight members, ids 0..7. Any other id — including 8/9
@@ -153,6 +178,7 @@ internal object LiteRtLmFileParser {
         val rootPos = HEADER_LENGTH.toLong() + rootU
         if (rootPos < 0L || rootPos + 4 > fb.limit) throw ParseException("root offset out of bounds")
         val root = fb.table(rootPos.toInt())
+        val budget = MetadataBudget()
 
         val systemField = fb.field(root, 0)
         val systemEntries = if (systemField == 0) {
@@ -160,7 +186,11 @@ internal object LiteRtLmFileParser {
         } else {
             val systemTable = fb.table(fb.uoffset(systemField))
             val entriesField = fb.field(systemTable, 0)
-            if (entriesField == 0) emptyList() else parseKeyValues(fb, entriesField)
+            if (entriesField == 0) {
+                emptyList()
+            } else {
+                parseKeyValues(fb, entriesField, MAX_SYSTEM_ENTRIES, "system metadata", budget)
+            }
         }
 
         val sectionField = fb.field(root, 1)
@@ -170,6 +200,8 @@ internal object LiteRtLmFileParser {
         if (objectsField == 0) throw ParseException("missing section objects")
 
         val vec = fb.vector(objectsField)
+        if (vec.count == 0) throw ParseException("no sections")
+        if (vec.count > MAX_SECTION_COUNT) throw ParseException("too many sections ${vec.count} (max $MAX_SECTION_COUNT)")
         val sections = ArrayList<Section>(vec.count)
         // Official writer behavior (python/litert_lm_builder/litertlm_builder.py,
         // _round_up_to_block_size): the first section begins at header_end
@@ -197,7 +229,11 @@ internal object LiteRtLmFileParser {
             val dataType = SectionDataType.fromId(fb.u8(typeField))
                 ?: throw ParseException("section $i unknown data type ${fb.u8(typeField)}")
             val itemsField = fb.field(obj, 0)
-            val items = if (itemsField == 0) emptyList() else parseKeyValues(fb, itemsField)
+            val items = if (itemsField == 0) {
+                emptyList()
+            } else {
+                parseKeyValues(fb, itemsField, MAX_ITEMS_PER_SECTION, "section $i items", budget)
+            }
             sections += Section(dataType, begin, end, items)
             nextAllowedBegin = strictNextBlock(end)
         }
@@ -213,29 +249,40 @@ internal object LiteRtLmFileParser {
         )
     }
 
-    private fun parseKeyValues(fb: Fb, fieldPos: Int): List<KeyValue> {
+    private fun parseKeyValues(
+        fb: Fb,
+        fieldPos: Int,
+        maxEntries: Int,
+        what: String,
+        budget: MetadataBudget,
+    ): List<KeyValue> {
         val vec = fb.vector(fieldPos)
+        // Reject over-limit input before allocating the result list.
+        if (vec.count > maxEntries) throw ParseException("$what has ${vec.count} entries (max $maxEntries)")
         val out = ArrayList<KeyValue>(vec.count)
         for (i in 0 until vec.count) {
             val kv = fb.table(fb.uoffset(vec.elemsPos + 4 * i))
             val keyField = fb.field(kv, 0)
-            if (keyField == 0) throw ParseException("key missing")
-            val key = fb.string(fb.uoffset(keyField))
+            if (keyField == 0) throw ParseException("$what entry $i key missing")
+            val key = fb.string(fb.uoffset(keyField), MAX_KEY_BYTES, "$what entry $i key")
+            budget.add(key.length, what)
             val valueTypeField = fb.field(kv, 1)
             val valueField = fb.field(kv, 2)
             val valueType = if (valueTypeField == 0) 0 else fb.u8(valueTypeField)
-            if (valueType !in 0..VDATA_MAX) throw ParseException("unknown value type $valueType")
+            if (valueType !in 0..VDATA_MAX) throw ParseException("$what entry $i unknown value type $valueType")
             if ((valueType == 0) != (valueField == 0)) {
-                throw ParseException("union type/value mismatch for key $key")
+                throw ParseException("$what entry $i union type/value mismatch")
             }
             val stringValue = if (valueField == 0) {
                 null
             } else {
                 val valueTable = fb.table(fb.uoffset(valueField))
                 val innerField = fb.field(valueTable, 0)
-                if (innerField == 0) throw ParseException("union value missing for key $key")
+                if (innerField == 0) throw ParseException("$what entry $i union value missing")
                 if (valueType == VDATA_STRING_VALUE) {
-                    fb.string(fb.uoffset(innerField))
+                    val s = fb.string(fb.uoffset(innerField), MAX_STRING_VALUE_BYTES, "$what entry $i value")
+                    budget.add(s.length, what)
+                    s
                 } else {
                     null
                 }
@@ -243,6 +290,19 @@ internal object LiteRtLmFileParser {
             out += KeyValue(key, valueType, stringValue)
         }
         return out
+    }
+
+    /** Accumulates decoded key/value characters; throws when the budget is exceeded. */
+    internal class MetadataBudget {
+        internal var totalChars = 0L
+            private set
+
+        fun add(chars: Int, what: String) {
+            totalChars += chars
+            if (totalChars > MAX_TOTAL_METADATA_CHARS) {
+                throw ParseException("decoded metadata for $what exceeds $MAX_TOTAL_METADATA_CHARS chars")
+            }
+        }
     }
 
     /**
@@ -347,14 +407,19 @@ internal object LiteRtLmFileParser {
         fun vector(fieldPos: Int): Vec {
             val vp = uoffset(fieldPos)
             val count = u32(vp)
+            if (count > MAX_VECTOR_ELEMENTS) throw ParseException("vector too large at $fieldPos")
             val elems = vp + 4
             if (count * 4 + elems > limit) throw ParseException("vector out of bounds at $fieldPos")
             return Vec(elems.toInt(), count.toInt())
         }
 
-        /** Reads a FlatBuffers string: u32 length (excluding NUL) + bytes + NUL. */
-        fun string(pos: Int): String {
+        /**
+         * Reads a FlatBuffers string: u32 length (excluding NUL) + bytes + NUL.
+         * Rejects lengths above [maxBytes] before allocating the byte array.
+         */
+        fun string(pos: Int, maxBytes: Int, what: String): String {
             val len = u32(pos)
+            if (len > maxBytes) throw ParseException("$what too long ($len bytes, max $maxBytes)")
             check(pos + 4, len.toInt())
             val bytes = ByteArray(len.toInt())
             val saved = buf.position()
