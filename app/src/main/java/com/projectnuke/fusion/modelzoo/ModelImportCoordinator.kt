@@ -26,6 +26,7 @@ internal enum class ModelImportFailure {
     CANCELLED,
     INVALID_MODEL,
     ADOPTION_FAILED,
+    URI_PERMISSION_LOST,
 }
 
 internal sealed interface ModelImportResult {
@@ -47,7 +48,16 @@ internal fun defaultValidator(): LiteRtLmValidator = LiteRtLmValidator { file ->
     file.length() >= 1024L * 1024L && LiteRtLmPackageValidator.validate(file).isValid
 }
 
-/** Process-owned, single-adoption coordinator for imported local models. */
+/**
+ * Process-owned, single-adoption coordinator for imported local models.
+ *
+ * Ownership model:
+ * - Each [sourceIdentity] can have at most one active import at a time.
+ * - A second import for the same [sourceIdentity] is rejected (even with the same token).
+ * - The coordinator is process-scoped (survives config changes) and tied to the app's filesDir.
+ * - Stale completions are ignored by checking the current token against [activeBySource].
+ * - Abandoned staging files are cleaned up on startup/foreground via [cleanupAbandoned].
+ */
 internal class ModelImportCoordinator(
     private val modelDirectory: File,
     private val openSource: (String) -> InputStream?,
@@ -57,8 +67,14 @@ internal class ModelImportCoordinator(
     private val reserveBytes: Long = 512L * 1024L * 1024L,
     private val validator: LiteRtLmValidator = defaultValidator(),
 ) {
+    /** Maps sourceIdentity -> active token. Only one import per sourceIdentity at a time. */
     private val activeBySource = ConcurrentHashMap<String, String>()
+
+    /** Tokens that have been explicitly cancelled. */
     private val cancelledTokens = ConcurrentHashMap.newKeySet<String>()
+
+    /** Generation counter to detect stale completions. Incremented on each new import for a source. */
+    private val generationBySource = ConcurrentHashMap<String, Long>()
 
     companion object {
         private const val ORPHAN_GRACE_MS = 300_000L
@@ -68,10 +84,21 @@ internal class ModelImportCoordinator(
         request: ModelImportRequest,
         onProgress: suspend (Int) -> Unit = {},
     ): ModelImportResult = withContext(Dispatchers.IO) {
-        val existing = activeBySource.putIfAbsent(request.sourceIdentity, request.token)
-        if (existing != null && existing != request.token) {
+        // Claim ownership for this sourceIdentity. Reject if already active (even with same token).
+        val currentGen = generationBySource.getOrDefault(request.sourceIdentity, 0L)
+        val nextGen = currentGen + 1
+        val claimed = generationBySource.compute(request.sourceIdentity) { _, old ->
+            if (old != null && activeBySource[request.sourceIdentity] != null) {
+                // Another import is already active for this source - reject new one
+                return@compute old
+            }
+            activeBySource[request.sourceIdentity] = request.token
+            nextGen
+        }
+        if (claimed != nextGen) {
             return@withContext ModelImportResult.Failure(ModelImportFailure.ADOPTION_FAILED, request.token)
         }
+
         val root = modelDirectory.canonicalFile
         var part: File? = null
         var adopted: File? = null
@@ -104,6 +131,10 @@ internal class ModelImportCoordinator(
                     while (true) {
                         currentCoroutineContext().ensureActive()
                         if (request.token in cancelledTokens) throw CancellationException("model import cancelled")
+                        // Verify this import is still the current generation for its source
+                        if (generationBySource[request.sourceIdentity] != nextGen) {
+                            throw CancellationException("superseded by newer import for same source")
+                        }
                         val read = source.read(buffer)
                         if (read < 0) break
                         if (read == 0) continue
@@ -111,12 +142,14 @@ internal class ModelImportCoordinator(
                         if (copied > maximumBytes) {
                             return@withContext ModelImportResult.Failure(ModelImportFailure.TOO_LARGE, request.token)
                         }
-                        if (!hasSpace(root, read + reserveBytes)) {
+                        // Reserve is added exactly once per hasSpace call; read is the incremental write
+                        if (!hasSpace(root, read.toLong())) {
                             return@withContext ModelImportResult.Failure(ModelImportFailure.STORAGE_FULL, request.token)
                         }
                         output.write(buffer, 0, read)
-                        val progress = if (declared != null && declared > 0) {
-                            (copied * 100L / declared).toInt().coerceIn(0, 99)
+                        val progress = if (sourceLength(request.sourceIdentity) != null) {
+                            val total = sourceLength(request.sourceIdentity)!!
+                            (copied * 100L / total).toInt().coerceIn(0, 99)
                         } else -1
                         if (progress >= 0 && progress != lastProgress) {
                             lastProgress = progress
@@ -151,17 +184,30 @@ internal class ModelImportCoordinator(
                 onProgress(100)
             }
             ModelImportResult.Success(adopted!!, copied, request.token)
-        } catch (_: CancellationException) {
+        } catch (e: CancellationException) {
             if (adopted != null) {
                 @Suppress("UNCHECKED_CAST")
                 ModelImportResult.Success(adopted!!, copied, request.token)
             } else {
                 ModelImportResult.Failure(ModelImportFailure.CANCELLED, request.token)
             }
+        } catch (e: java.io.IOException) {
+            // Distinguish URI permission loss from other I/O errors
+            if (e.message?.contains("permission", true) == true ||
+                e.message?.contains("Permission denied", true) == true) {
+                ModelImportResult.Failure(ModelImportFailure.URI_PERMISSION_LOST, request.token)
+            } else {
+                ModelImportResult.Failure(ModelImportFailure.ADOPTION_FAILED, request.token)
+            }
         } catch (_: Exception) {
             ModelImportResult.Failure(ModelImportFailure.ADOPTION_FAILED, request.token)
         } finally {
-            activeBySource.remove(request.sourceIdentity, request.token)
+            // Only clear ownership if this is still the current generation
+            val currentGen = generationBySource[request.sourceIdentity] ?: 0
+            if (currentGen == nextGen) {
+                activeBySource.remove(request.sourceIdentity, request.token)
+                generationBySource.remove(request.sourceIdentity)
+            }
             cancelledTokens.remove(request.token)
             withContext(NonCancellable) {
                 if (adopted == null) part?.takeIf { it.exists() }?.delete()
@@ -173,6 +219,10 @@ internal class ModelImportCoordinator(
         cancelledTokens += token
     }
 
+    /**
+     * Cleans up abandoned staging files (.part/.bak) that are older than the grace period
+     * and not owned by an active import token. Call from app startup/foreground.
+     */
     fun cleanupAbandoned() {
         val activeTokens = activeBySource.values.toSet() + cancelledTokens.toSet()
         cleanupAbandoned(modelDirectory, activeTokens)
@@ -183,6 +233,7 @@ internal class ModelImportCoordinator(
         root.listFiles()?.forEach { file ->
             val name = file.name
             if (name.startsWith(".") && (name.endsWith(".part") || name.endsWith(".bak"))) {
+                // Ownership: token is embedded in filename as .<uuid>.part
                 val ownedByActive = activeTokens.any { it in name }
                 if (!ownedByActive && file.lastModified() < cutoff) {
                     file.delete()
@@ -191,6 +242,10 @@ internal class ModelImportCoordinator(
         }
     }
 
+    /**
+     * Checks if there is enough space for [incoming] bytes.
+     * Reserve is added exactly once per check.
+     */
     private fun hasSpace(root: File, incoming: Long): Boolean =
         usableSpace(root) > incoming + reserveBytes
 
