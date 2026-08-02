@@ -1,5 +1,29 @@
 # Fusion 1.0.0 Beta Stable 적용 및 확인 방법
 
+## R3 (versionCode 10005) 적용 방법
+
+R3는 Git 저장소의 `main` 브랜치에 커밋되어 있다. 기존 R2 프로젝트가 있다면:
+
+```powershell
+git status
+git log --oneline -1 f71de43   # R2 헤드 확인
+git fetch origin main
+git rebase origin/main         # R2 → R3 커밋 적용
+```
+
+Gradle Sync 후 프로젝트 루트 Terminal에서 전체 gate를 실행한다.
+
+```powershell
+.\gradlew.bat compileDebugKotlin
+.\gradlew.bat compileDebugUnitTestKotlin
+.\gradlew.bat testDebugUnitTest
+.\gradlew.bat assembleDebug
+.\gradlew.bat lintDebug
+git diff --check
+```
+
+디버그 APK는 `app\build\outputs\apk\debug\app-debug.apk`에 생성된다.
+
 ## 가장 안전한 방법: 새 폴더에서 열기
 
 1. 기존 Fusion 프로젝트 폴더를 그대로 백업하거나 Git commit을 만든다.

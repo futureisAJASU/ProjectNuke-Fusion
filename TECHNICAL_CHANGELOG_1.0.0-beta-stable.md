@@ -85,3 +85,50 @@
 - Reconciliation commands are serialized with draft hydration and debounced writes.
 - Cleanup debt retries use bounded exponential backoff and preserve failed debt records.
 - Imported model files are staged as unique `.part` files, fsynced, validated, then atomically adopted.
+## R3 hardening (2026-08-02, versionCode 10005)
+
+### Durable provider secret ownership
+
+- `SecretStore.putSecret`/`deleteSecret` now return `Boolean`; `AndroidKeystoreSecretStore` commits durably and returns the settled result.
+- `saveProvider` writes a fresh UUID secret, verifies durable settlement, commits metadata, then deletes the replaced secret; metadata-commit failure deletes only the new secret.
+- `deleteProvider` dereferences metadata first, then deletes the secret; secret-deletion failure is surfaced without rolling back the metadata commit.
+- `AiProviderSettingsScreen` wraps every save/test/delete/export action in `try`/`finally` so the busy state is always released and boolean failures are checked before success feedback.
+- `AiProviderAuthMode.NONE` is exempt from secret requirements in row status, editor status, and validation; custom-header names are format-validated.
+- Private-network detection covers the full `172.16.0.0/12` range.
+
+### Process-owned model import
+
+- Removed per-import orphan cleanup; orphan recovery now requires an active-token check and a 5-minute grace period.
+- Fixed a dead branch where a null adoption result was never deleted; staged `.part` cleanup happens only when no adoption occurred.
+- Size accounting queries `OpenableColumns.SIZE` on IO and separates `TOO_LARGE` (declared overflow) from `STORAGE_FULL` (streaming space shortfall), reserving bytes before copy.
+- Post-adoption progress and cancellation handling keep adopted files: cancellation after adoption returns success, and only `.part` staging files are removed.
+
+### Bounded LiteRT-LM package validation
+
+- `LiteRtLmPackageValidator` parses magic, header, version, and the section table with overflow-safe offsets, no-overlap enforcement, and a required tokenizer section; `LiteRtLmCapabilities(hasDrafter, ...)` detects the MTP drafter section.
+- MTP runtime support is derived from `hasDrafter` instead of filename matching.
+
+### Draft and deletion truthfulness
+
+- Draft hydration publishes the rollback snapshot before completing deferred durability replies.
+- `CommittedDraftReconciliationDebtStore.retry` rethrows `CancellationException` instead of swallowing it.
+- Conversation cleanup runs each derived-data component independently; partial failure raises `IllegalStateException("cleanup incomplete")` instead of aborting the remaining components.
+
+### Typed final prompt assembly
+
+- `FinalPromptAssembler.assemble` returns `PromptAssemblyResult.Ready`/`TooLarge`; `readyOrThrow` converts successful assembly to messages and stops before any engine/provider call on `TooLarge`.
+- `FinalPromptBudgeter.fit` returns `FittedMessages(messages, isTooLarge)` and computes the limit via `computeLimit`; the `FUSION_TOO_LARGE` sentinel string is removed.
+
+### Exact MTP runtime state and fallback
+
+- `MtpRuntimeStatus` is now `OFF`/`REQUESTED`/`ACTIVE`/`UNSUPPORTED`/`FALLBACK_DISABLED`/`FAILED`.
+- `ExperimentalFlags.enableSpeculativeDecoding` is applied before `Engine(config).initialize()`; cache-hit state is resolved exactly; a fallback engine is cached under an effective MTP=false key so it is never reused for an MTP request.
+- `AUTO` uses a `GPU+MTP → GPU → CPU+MTP → CPU` ladder via `buildEngineCandidateLadder`; GPU vision failures retry with a CPU vision backend.
+- Chat, benchmark, and A/B screens share `resolveEffectiveMtpSetting`/`defaultSpeculativeDecodingEnabled` from `MtpPolicy`.
+- `LiteRtLlmEngine` accepts an injectable engine factory and flag adapter; `selectFirstWorkingEngine` drives the ladder and is covered by production unit tests.
+
+### Validation performed
+
+- `compileDebugKotlin`, `compileDebugUnitTestKotlin`, `testDebugUnitTest` (349 tests), `assembleDebug`, and `lintDebug`: passed.
+- `git diff --check`: passed.
+- `versionCode` bumped `10004` → `10005` with `versionName` unchanged at `1.0.0-beta-stable`.

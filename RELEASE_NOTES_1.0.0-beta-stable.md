@@ -40,3 +40,15 @@ Fusion의 핵심 채팅 기능을 실제 일상 사용에 가까운 조건에서
 - Post-commit attachment release waits for durable reconciliation or durable recovery debt.
 - Custom provider metadata uses UUID-backed providers, validated endpoints, Keystore-only secrets, and durable metadata commits.
 - Model imports use a process-owned coordinator with bounded staged copies and validation before adoption.
+
+## 1.0.0-beta-stable R3 (versionCode 10005)
+
+- Provider secrets are written and deleted durably: mutations return Boolean results and only committed Keystore/preferences writes are treated as success. Failed metadata commits roll back secret creation instead of leaking orphan secrets.
+- Provider screens use try/finally so save/test/delete never leave the editor busy when an exception occurs; `NONE` auth mode skips secret requirements consistently, and private-network detection covers the full `172.16.0.0/12` range.
+- Model import no longer scans for orphans on every import. Orphan recovery is token-based and only removes files abandoned for a grace period; adopted files are never deleted after adoption, cancellation after adoption returns success, and declared vs. streamed sizes are accounted separately (`TOO_LARGE` vs `STORAGE_FULL`).
+- LiteRT-LM packages are validated structurally (magic, header, bounded section table, overflow-safe offsets, no overlaps, required tokenizer section) and expose drafter-section capability for MTP support instead of filename matching.
+- Draft hydration publishes the rollback snapshot before completing deferred durability replies, `CancellationException` is rethrown instead of being swallowed by debt retry, and conversation cleanup executes each derived-data component independently so one failure does not abort the rest.
+- Final prompt assembly returns a typed `Ready`/`TooLarge` result; `TooLarge` stops before any engine/provider invocation, and prompt budgets compute their limit from the effective model context.
+- MTP runtime state is exact: `OFF`, `REQUESTED`, `ACTIVE`, `UNSUPPORTED`, `FALLBACK_DISABLED`, `FAILED`. The speculative-decoding flag is applied before engine initialization, a fallback engine is never cached under an MTP key, and `AUTO` uses a GPU+MTP → GPU → CPU+MTP → CPU fallback ladder.
+- MTP support is derived from validated package capabilities (`hasDrafter`), and chat, benchmark, and A/B test screens share one `resolveEffectiveMtpSetting` policy.
+- MTP behavior is covered by production tests using an injectable engine factory and flag adapter.
