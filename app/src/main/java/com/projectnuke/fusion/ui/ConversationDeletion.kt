@@ -47,15 +47,19 @@ internal suspend fun deleteConversationProduction(
         },
         cleanupDerivedData = {
             withContext(Dispatchers.IO) {
-                check(deleteResponseVersionState(appContext, conversationId))
-                check(deleteConversationSummary(appContext, conversationId))
-                check(deleteConversationOnlyMemoryCandidates(appContext, conversationId))
-                check(FusionResponseRatings.deleteForMessages(appContext, deletedMessageIds))
+                val responseOk = deleteResponseVersionState(appContext, conversationId)
+                val summaryOk = deleteConversationSummary(appContext, conversationId)
+                val memoryOk = deleteConversationOnlyMemoryCandidates(appContext, conversationId)
+                val ratingsOk = FusionResponseRatings.deleteForMessages(appContext, deletedMessageIds)
+                var attachmentsOk = true
                 targetPendingPaths.forEach { path ->
-                    check(AttachmentStorageManager.deletePendingAttachmentFile(appContext, path))
+                    if (!AttachmentStorageManager.deletePendingAttachmentFile(appContext, path)) attachmentsOk = false
                 }
                 AttachmentStorageManager.cleanupUnreferencedAttachments(appContext, dao)
-                check(removeConversationCleanupDebt(appContext, conversationId))
+                val debtOk = removeConversationCleanupDebt(appContext, conversationId)
+                if (!responseOk || !summaryOk || !memoryOk || !ratingsOk || !attachmentsOk || !debtOk) {
+                    throw IllegalStateException("cleanup incomplete")
+                }
             }
         },
         recordCleanupDebt = {

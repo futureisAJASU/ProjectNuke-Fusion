@@ -3,6 +3,7 @@ package com.projectnuke.fusion.ui
 import android.content.Context
 import com.projectnuke.fusion.util.writeTextAtomically
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -81,6 +82,8 @@ internal object CommittedDraftReconciliationDebtStore {
         pending.forEach { entry ->
             val result = try {
                 owner.reconcile(entry)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (_: Throwable) {
                 DraftReconciliationResult(success = false, releasePaths = false)
             }

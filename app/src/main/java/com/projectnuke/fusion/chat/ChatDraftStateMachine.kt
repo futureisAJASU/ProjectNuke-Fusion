@@ -156,9 +156,8 @@ internal class ChatDraftStateMachine(
         tombstoned.clear()
         _drafts.value = merged
         hydrationApplied = true
-        if (deferredDurable.isNotEmpty()) {
+if (deferredDurable.isNotEmpty()) {
             val ok = durableWrite()
-            deferredDurable.forEach { (reply, _) -> reply.complete(ok) }
             if (!ok) {
                 val rollback = LinkedHashMap(deferredDurable.first().second)
                 command.restored.forEach { (id, restored) ->
@@ -176,6 +175,7 @@ internal class ChatDraftStateMachine(
                 }
                 _drafts.value = rollback
             }
+            deferredDurable.forEach { (reply, _) -> reply.complete(ok) }
             deferredDurable.clear()
         }
         preHydrationBaseline.clear()
