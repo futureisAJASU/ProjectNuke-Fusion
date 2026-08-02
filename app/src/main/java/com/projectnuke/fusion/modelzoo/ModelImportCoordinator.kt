@@ -88,6 +88,7 @@ internal class ModelImportCoordinator(
         val root = modelDirectory.canonicalFile
         var part: File? = null
         var adopted: File? = null
+        var copied = 0L
         try {
             if (!(root.exists() || root.mkdirs()) || !root.isDirectory) {
                 return@withContext ModelImportResult.Failure(ModelImportFailure.STORAGE_FULL, request.token)
@@ -108,7 +109,7 @@ internal class ModelImportCoordinator(
             part = staging
             val input = openSource(request.sourceIdentity)
                 ?: return@withContext ModelImportResult.Failure(ModelImportFailure.SOURCE_UNAVAILABLE, request.token)
-            var copied = 0L
+            copied = 0L
             input.use { source ->
                 FileOutputStream(staging).use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -159,18 +160,24 @@ internal class ModelImportCoordinator(
                 }
                 adopted = target
             }
-            onProgress(100)
+            withContext(NonCancellable) {
+                onProgress(100)
+            }
             ModelImportResult.Success(adopted!!, copied, request.token)
         } catch (_: CancellationException) {
-            ModelImportResult.Failure(ModelImportFailure.CANCELLED, request.token)
+            if (adopted != null) {
+                @Suppress("UNCHECKED_CAST")
+                ModelImportResult.Success(adopted!!, copied, request.token)
+            } else {
+                ModelImportResult.Failure(ModelImportFailure.CANCELLED, request.token)
+            }
         } catch (_: Exception) {
             ModelImportResult.Failure(ModelImportFailure.ADOPTION_FAILED, request.token)
         } finally {
             activeBySource.remove(request.sourceIdentity, request.token)
             cancelledTokens.remove(request.token)
             withContext(NonCancellable) {
-                part?.takeIf { it.exists() }?.delete()
-                if (adopted != null) adopted?.delete()
+                if (adopted == null) part?.takeIf { it.exists() }?.delete()
             }
         }
     }
