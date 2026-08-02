@@ -38,6 +38,14 @@ android {
     buildFeatures {
         compose = true
     }
+    testOptions {
+        unitTests.all { test ->
+            test.systemProperty(
+                "litertlm.golden.path",
+                (project.findProperty("litertlm.golden.path") ?: "").toString()
+            )
+        }
+    }
 }
 
 dependencies {
@@ -54,6 +62,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.savedstate)
     testImplementation(libs.junit)
     testImplementation(libs.org.json)
+    testImplementation(libs.flatbuffers.java)
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
