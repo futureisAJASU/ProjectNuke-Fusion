@@ -33,11 +33,25 @@ internal object LiteRtLmPackageBuilder {
     internal const val DATA_TYPE_LLM_METADATA_PROTO = 5
     internal const val DATA_TYPE_HF_TOKENIZER_ZLIB = 6
 
+    /**
+     * Raw key/value pair for structural-malformation fixtures. The value is
+     * emitted as a StringValue table when [value] is non-null, and the value
+     * field is omitted entirely when it is null; [valueType] is written
+     * verbatim. This lets tests build union type/value mismatches and
+     * wrong-typed union payloads that the parser must reject.
+     */
+    internal data class RawItem(
+        val key: String,
+        val valueType: Int,
+        val value: String?,
+    )
+
     internal data class SectionSpec(
         val dataType: Int,
         val beginOffset: Long,
         val endOffset: Long,
         val items: List<Pair<String, String>> = emptyList(),
+        val rawItems: List<RawItem> = emptyList(),
     )
 
     fun defaultSystemEntries(): List<Pair<String, String>> = listOf(
@@ -122,16 +136,20 @@ internal object LiteRtLmPackageBuilder {
         val b = FlatBufferBuilder(1024)
 
         val sectionOffsets = sections.map { spec ->
-            val itemsOffset = if (spec.items.isEmpty()) 0 else {
-                val kvOffsets = spec.items.map { (key, value) ->
-                    val valueOffset = StringValue_create(b, value)
-                    val keyOffset = b.createString(key)
-                    KeyValuePair_start(b)
-                    KeyValuePair_addKey(b, keyOffset)
-                    KeyValuePair_addValueType(b, VDATA_STRING_VALUE)
-                    KeyValuePair_addValue(b, valueOffset)
-                    KeyValuePair_end(b)
-                }.toIntArray()
+            val itemsOffset = if (spec.items.isEmpty() && spec.rawItems.isEmpty()) 0 else {
+                val kvOffsets = if (spec.rawItems.isEmpty()) {
+                    spec.items.map { (key, value) -> stringKeyValue(b, key, value) }.toIntArray()
+                } else {
+                    spec.rawItems.map { raw ->
+                        val valueOffset = if (raw.value != null) StringValue_create(b, raw.value!!) else 0
+                        val keyOffset = b.createString(raw.key)
+                        KeyValuePair_start(b)
+                        KeyValuePair_addKey(b, keyOffset)
+                        KeyValuePair_addValueType(b, raw.valueType)
+                        if (valueOffset != 0) KeyValuePair_addValue(b, valueOffset)
+                        KeyValuePair_end(b)
+                    }.toIntArray()
+                }
                 vectorOfOffsets(b, kvOffsets)
             }
             SectionObject_start(b)
@@ -147,15 +165,7 @@ internal object LiteRtLmPackageBuilder {
         val sectionMetadataOffset = SectionMetadata_end(b)
 
         val systemMetadataOffset = if (systemEntries.isEmpty()) 0 else {
-            val kvOffsets = systemEntries.map { (key, value) ->
-                val valueOffset = StringValue_create(b, value)
-                val keyOffset = b.createString(key)
-                KeyValuePair_start(b)
-                KeyValuePair_addKey(b, keyOffset)
-                KeyValuePair_addValueType(b, VDATA_STRING_VALUE)
-                KeyValuePair_addValue(b, valueOffset)
-                KeyValuePair_end(b)
-            }.toIntArray()
+            val kvOffsets = systemEntries.map { (key, value) -> stringKeyValue(b, key, value) }.toIntArray()
             val entriesOffset = vectorOfOffsets(b, kvOffsets)
             SystemMetadata_start(b)
             SystemMetadata_addEntries(b, entriesOffset)
@@ -179,6 +189,16 @@ internal object LiteRtLmPackageBuilder {
         out.putLong(headerEnd.toLong())
         out.put(flat)
         return out.array()
+    }
+
+    private fun stringKeyValue(b: FlatBufferBuilder, key: String, value: String): Int {
+        val valueOffset = StringValue_create(b, value)
+        val keyOffset = b.createString(key)
+        KeyValuePair_start(b)
+        KeyValuePair_addKey(b, keyOffset)
+        KeyValuePair_addValueType(b, VDATA_STRING_VALUE)
+        KeyValuePair_addValue(b, valueOffset)
+        return KeyValuePair_end(b)
     }
 
     private fun vectorOfOffsets(b: FlatBufferBuilder, offsets: IntArray): Int {

@@ -57,7 +57,6 @@ internal object LiteRtLmFileParser {
     internal const val VALUE_MTP_DRAFTER = "tf_lite_mtp_drafter"
 
     private const val VDATA_STRING_VALUE = 9
-    private const val VDATA_MAX = 12
 
     // ---- metadata bounds ----
     //
@@ -180,12 +179,12 @@ internal object LiteRtLmFileParser {
         val root = fb.table(rootPos.toInt())
         val budget = MetadataBudget()
 
-        val systemField = fb.field(root, 0)
+        val systemField = fb.field(root, 0, 4)
         val systemEntries = if (systemField == 0) {
             emptyList()
         } else {
             val systemTable = fb.table(fb.uoffset(systemField))
-            val entriesField = fb.field(systemTable, 0)
+            val entriesField = fb.field(systemTable, 0, 4)
             if (entriesField == 0) {
                 emptyList()
             } else {
@@ -193,10 +192,10 @@ internal object LiteRtLmFileParser {
             }
         }
 
-        val sectionField = fb.field(root, 1)
+        val sectionField = fb.field(root, 1, 4)
         if (sectionField == 0) throw ParseException("missing section metadata")
         val sectionMeta = fb.table(fb.uoffset(sectionField))
-        val objectsField = fb.field(sectionMeta, 0)
+        val objectsField = fb.field(sectionMeta, 0, 4)
         if (objectsField == 0) throw ParseException("missing section objects")
 
         val vec = fb.vector(objectsField)
@@ -209,9 +208,9 @@ internal object LiteRtLmFileParser {
         var nextAllowedBegin = roundUpBlock(headerEnd)
         for (i in 0 until vec.count) {
             val obj = fb.table(fb.uoffset(vec.elemsPos + 4 * i))
-            val beginField = fb.field(obj, 1)
-            val endField = fb.field(obj, 2)
-            val typeField = fb.field(obj, 3)
+            val beginField = fb.field(obj, 1, 8)
+            val endField = fb.field(obj, 2, 8)
+            val typeField = fb.field(obj, 3, 1)
             if (beginField == 0 || endField == 0 || typeField == 0) {
                 throw ParseException("section $i missing begin/end/type")
             }
@@ -228,7 +227,7 @@ internal object LiteRtLmFileParser {
             if (begin < nextAllowedBegin) throw ParseException("section $i begins before the block boundary required after the previous section")
             val dataType = SectionDataType.fromId(fb.u8(typeField))
                 ?: throw ParseException("section $i unknown data type ${fb.u8(typeField)}")
-            val itemsField = fb.field(obj, 0)
+            val itemsField = fb.field(obj, 0, 4)
             val items = if (itemsField == 0) {
                 emptyList()
             } else {
@@ -249,6 +248,23 @@ internal object LiteRtLmFileParser {
         )
     }
 
+    /**
+     * Scalar width (in bytes) of the inner `value` field for each VData union
+     * member per the pinned schema. Member ids: NONE=0, UInt8=1, Int8=2,
+     * UInt16=3, Int16=4, UInt32=5, Int32=6, Float32=7, Bool=8, StringValue=9,
+     * UInt64=10, Int64=11, Double=12. Returns 0 for NONE and null for ids not
+     * in the pinned schema.
+     */
+    internal fun vdataWidth(type: Int): Int? = when (type) {
+        0 -> 0
+        1, 2, 8 -> 1
+        3, 4 -> 2
+        5, 6, 7 -> 4
+        9 -> 4 // StringValue: offset to the string
+        10, 11, 12 -> 8
+        else -> null
+    }
+
     private fun parseKeyValues(
         fb: Fb,
         fieldPos: Int,
@@ -260,16 +276,19 @@ internal object LiteRtLmFileParser {
         // Reject over-limit input before allocating the result list.
         if (vec.count > maxEntries) throw ParseException("$what has ${vec.count} entries (max $maxEntries)")
         val out = ArrayList<KeyValue>(vec.count)
+        val seenKeys = HashSet<String>(vec.count)
         for (i in 0 until vec.count) {
             val kv = fb.table(fb.uoffset(vec.elemsPos + 4 * i))
-            val keyField = fb.field(kv, 0)
+            val keyField = fb.field(kv, 0, 4)
             if (keyField == 0) throw ParseException("$what entry $i key missing")
             val key = fb.string(fb.uoffset(keyField), MAX_KEY_BYTES, "$what entry $i key")
+            if (!seenKeys.add(key)) throw ParseException("$what entry $i duplicates key '$key'")
             budget.add(key.length, what)
-            val valueTypeField = fb.field(kv, 1)
-            val valueField = fb.field(kv, 2)
+            val valueTypeField = fb.field(kv, 1, 1)
+            val valueField = fb.field(kv, 2, 4)
             val valueType = if (valueTypeField == 0) 0 else fb.u8(valueTypeField)
-            if (valueType !in 0..VDATA_MAX) throw ParseException("$what entry $i unknown value type $valueType")
+            val width = vdataWidth(valueType)
+            if (width == null) throw ParseException("$what entry $i unknown value type $valueType")
             if ((valueType == 0) != (valueField == 0)) {
                 throw ParseException("$what entry $i union type/value mismatch")
             }
@@ -277,13 +296,18 @@ internal object LiteRtLmFileParser {
                 null
             } else {
                 val valueTable = fb.table(fb.uoffset(valueField))
-                val innerField = fb.field(valueTable, 0)
+                // Validate the union member according to its declared type:
+                // the value table must expose field 0 with the scalar width the
+                // declared member requires, so a StringValue table labeled as a
+                // numeric member (or vice versa) is rejected.
+                val innerField = fb.field(valueTable, 0, width)
                 if (innerField == 0) throw ParseException("$what entry $i union value missing")
                 if (valueType == VDATA_STRING_VALUE) {
                     val s = fb.string(fb.uoffset(innerField), MAX_STRING_VALUE_BYTES, "$what entry $i value")
                     budget.add(s.length, what)
                     s
                 } else {
+                    fb.verify(innerField, width)
                     null
                 }
             }
@@ -331,6 +355,15 @@ internal object LiteRtLmFileParser {
     /**
      * Bounds-checked reader over a FlatBuffers buffer with the layout produced
      * by the flatc-compatible builder used by the LiteRT-LM exporter.
+     *
+     * Structural invariants enforced on every read:
+     *  - vtables must be reachable through a strictly positive backward soffset
+     *  - the vtable region and the declared table region must both lie inside
+     *    the header, and every field (including its declared scalar width)
+     *    must fit inside the declared table size
+     *  - vectors are bounded by MAX_VECTOR_ELEMENTS and the buffer
+     *  - strings are length- and bounds-checked, NUL-terminated, and decoded
+     *    with a strict UTF-8 decoder
      */
     private class Fb(private val buf: ByteBuffer) {
         internal val limit: Int get() = buf.limit()
@@ -366,11 +399,22 @@ internal object LiteRtLmFileParser {
             return buf.getInt(pos)
         }
 
+        /** Verifies [width] readable bytes exist at [pos] (union member reads). */
+        fun verify(pos: Int, width: Int) {
+            check(pos, width)
+        }
+
         class Table(val pos: Int, val vt: Int, val vs: Int, val ts: Int)
 
         fun table(pos: Int): Table {
             check(pos, 4)
             val soff = i32(pos)
+            // The soffset points at the vtable; both backward (positive) and
+            // forward (negative) soffsets occur in official exporter output
+            // (vtable deduplication), so only the degenerate self-referential
+            // zero soffset is rejected. vtable content and bounds are validated
+            // below regardless of direction.
+            if (soff == 0) throw ParseException("self-referential vtable offset at $pos")
             val vt = pos - soff
             check(vt, 4)
             val vs = u16(vt)
@@ -379,18 +423,26 @@ internal object LiteRtLmFileParser {
             // vtable size 8 / table size 12 (e.g. for LiteRTLMMetaData).
             if (vs < 4 || ts < 4) throw ParseException("invalid vtable at $vt")
             check(vt, vs)
+            // The declared table region must lie fully inside the header, so a
+            // table claiming more bytes than the header holds is rejected.
+            check(pos, ts)
             return Table(pos, vt, vs, ts)
         }
 
-        /** Absolute position of field [index], or 0 when absent. */
-        fun field(t: Table, index: Int): Int {
+        /**
+         * Absolute position of field [index], or 0 when absent. [width] is the
+         * scalar width the caller will read; the field plus its width must fit
+         * inside the declared table region.
+         */
+        fun field(t: Table, index: Int, width: Int = 1): Int {
             val entryPos = t.vt + 4 + 2 * index
             if (entryPos + 2 > t.vt + t.vs) return 0
             val off = u16(entryPos)
             if (off == 0) return 0
             if (off >= t.ts) throw ParseException("field $index outside table")
             val fp = t.pos + off
-            check(fp, 1)
+            if (fp + width > t.pos + t.ts) throw ParseException("field $index wider than declared table")
+            check(fp, width)
             return fp
         }
 
@@ -415,22 +467,40 @@ internal object LiteRtLmFileParser {
 
         /**
          * Reads a FlatBuffers string: u32 length (excluding NUL) + bytes + NUL.
-         * Rejects lengths above [maxBytes] before allocating the byte array.
+         * Rejects lengths above [maxBytes] before allocating the byte array,
+         * requires the NUL terminator that flatc-compatible writers always
+         * emit, and decodes with a strict UTF-8 decoder so malformed strings
+         * are rejected instead of silently replaced.
          */
         fun string(pos: Int, maxBytes: Int, what: String): String {
             val len = u32(pos)
             if (len > maxBytes) throw ParseException("$what too long ($len bytes, max $maxBytes)")
             check(pos + 4, len.toInt())
+            check(pos + 4 + len.toInt(), 1)
+            if (buf.get(pos + 4 + len.toInt()) != 0.toByte()) {
+                throw ParseException("$what missing NUL terminator")
+            }
             val bytes = ByteArray(len.toInt())
             val saved = buf.position()
             buf.position(pos + 4)
             buf.get(bytes)
             buf.position(saved)
-            // flatc-compatible writers store the length without the NUL terminator;
-            // tolerate writers that include it.
-            var end = bytes.size
-            if (end > 0 && bytes[end - 1] == 0.toByte()) end--
-            return String(bytes, 0, end, Charsets.UTF_8)
+            return decodeStrictUtf8(bytes, what)
         }
+    }
+
+    private fun decodeStrictUtf8(bytes: ByteArray, what: String): String {
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        val out = java.nio.CharBuffer.allocate(bytes.size)
+        try {
+            decoder.decode(java.nio.ByteBuffer.wrap(bytes), out, true)
+            decoder.flush(out)
+        } catch (e: java.nio.charset.CharacterCodingException) {
+            throw ParseException("$what is not valid UTF-8")
+        }
+        out.flip()
+        return out.toString()
     }
 }
