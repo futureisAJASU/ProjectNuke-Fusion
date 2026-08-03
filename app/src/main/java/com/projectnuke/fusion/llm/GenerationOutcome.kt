@@ -10,11 +10,14 @@ sealed interface GenerationOutcome {
      * by the prompt adapter). [actualBackend] reports the backend that the
      * runtime actually used, when reported by the engine. [truncated] is true
      * when the app-level streaming output limit cut the reply short.
+     * [stats] carries the native runtime benchmark snapshot of the last
+     * generation when the runtime reports one.
      */
     data class Success(
         val text: String,
         val actualBackend: String? = null,
-        val truncated: Boolean = false
+        val truncated: Boolean = false,
+        val stats: GenerationBenchmarkStats? = null
     ) : GenerationOutcome
 
     /**
@@ -56,3 +59,17 @@ enum class FailureKind {
     GENERATION_INTERRUPTED,
     UNKNOWN
 }
+
+/**
+ * Native runtime benchmark snapshot of the last generation, when the runtime
+ * reports one. Distilled from the vendor BenchmarkInfo so callers never touch
+ * vendor types; zeros mean the runtime did not measure that metric.
+ */
+data class GenerationBenchmarkStats(
+    val initTimeSeconds: Double,
+    val timeToFirstTokenSeconds: Double,
+    val prefillTokenCount: Int,
+    val decodeTokenCount: Int,
+    val prefillTokensPerSecond: Double,
+    val decodeTokensPerSecond: Double
+)

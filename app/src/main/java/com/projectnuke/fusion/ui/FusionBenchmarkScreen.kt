@@ -325,6 +325,7 @@ private suspend fun runBenchmark(
             val decodeTps = decodeMs?.let { estimatedTokens * 1000.0 / it }
             val mtpStatus = engine.lastMtpStatus
             val runtimeSelection = engine.lastRuntimeSelection
+            val nativeStats = success.stats
             val effective = buildEffectiveRuntimeSettings(
                 modelName = snapshot.modelName,
                 modelPath = snapshot.modelPath,
@@ -350,6 +351,12 @@ private suspend fun runBenchmark(
                 appendLine("추정 출력 토큰 수: $estimatedTokens")
                 appendLine("전체 기준 토큰 속도: ${"%.1f".format(Locale.US, totalTps)} tok/s")
                 appendLine("디코딩 기준 토큰 속도: ${decodeTps?.let { "${"%.1f".format(Locale.US, it)} tok/s" } ?: "측정 불가"}")
+                if (nativeStats != null) {
+                    appendLine("네이티브 첫 토큰 시간: ${"%.2f".format(Locale.US, nativeStats.timeToFirstTokenSeconds)}s")
+                    appendLine("네이티브 프리필: ${"%.1f".format(Locale.US, nativeStats.prefillTokensPerSecond)} tok/s · ${nativeStats.prefillTokenCount} tokens")
+                    appendLine("네이티브 디코딩: ${"%.1f".format(Locale.US, nativeStats.decodeTokensPerSecond)} tok/s · ${nativeStats.decodeTokenCount} tokens")
+                    appendLine("네이티브 초기화 시간: ${"%.2f".format(Locale.US, nativeStats.initTimeSeconds)}s")
+                }
                 appendLine("가속기: ${effective.actualBackend}")
                 appendLine("MTP 가속: ${mtpStatus.toKoreanMtpStatus()}")
                 appendLine()
@@ -374,7 +381,7 @@ onResult(resultText)
                 actualBackend = runtimeSelection?.actualTextBackend
             )
             Toast.makeText(context, "벤치마크 기록을 저장했습니다.", Toast.LENGTH_SHORT).show()
-            Log.i("FusionBenchmark", "Benchmark success totalMs=$totalMs tokens=$estimatedTokens totalTps=$totalTps decodeTps=$decodeTps mtp=${mtpStatus.name}")
+            Log.i("FusionBenchmark", "Benchmark success totalMs=$totalMs tokens=$estimatedTokens totalTps=$totalTps decodeTps=$decodeTps mtp=${mtpStatus.name} nativeTtft=${nativeStats?.timeToFirstTokenSeconds} nativeDecodeTps=${nativeStats?.decodeTokensPerSecond} nativePrefillTps=${nativeStats?.prefillTokensPerSecond}")
             DeveloperLogStore.record(context, "benchmark", "벤치마크 성공", "model=${snapshot.modelName}, decodeTps=${decodeTps?.toFloat()}")
                 onStatus("벤치마크가 완료되었습니다.")
             } finally {

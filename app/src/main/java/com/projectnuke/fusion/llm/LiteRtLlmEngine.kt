@@ -6,6 +6,7 @@ import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Capabilities
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
@@ -127,6 +128,7 @@ class LiteRtLlmEngine(
 
             val output = StringBuilder()
             var outputTruncated = false
+            var nativeStats: GenerationBenchmarkStats? = null
             try {
                 engine.createConversation(conversationConfig).use { conversation ->
                     try {
@@ -145,6 +147,7 @@ class LiteRtLlmEngine(
                     } catch (e: AppOutputLimitReachedException) {
                         Log.i("FusionLiteRT", "App-level output limit reached: ${options.maxOutputToken} estimated tokens")
                     }
+                    nativeStats = conversationBenchmarkStats(conversation)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -160,7 +163,8 @@ class LiteRtLlmEngine(
                 GenerationOutcome.Success(
                     text = sanitized,
                     actualBackend = loadedState?.actualTextBackend,
-                    truncated = outputTruncated
+                    truncated = outputTruncated,
+                    stats = nativeStats
                 )
             }
         }
@@ -251,6 +255,7 @@ class LiteRtLlmEngine(
 
             val output = StringBuilder()
             var outputTruncated = false
+            var nativeStats: GenerationBenchmarkStats? = null
             try {
                 engine.createConversation(conversationConfig).use { conversation ->
                     try {
@@ -269,6 +274,7 @@ class LiteRtLlmEngine(
                     } catch (e: AppOutputLimitReachedException) {
                         Log.i("FusionLiteRT", "App-level output limit reached: ${options.maxOutputToken} estimated tokens")
                     }
+                    nativeStats = conversationBenchmarkStats(conversation)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -284,7 +290,8 @@ class LiteRtLlmEngine(
                 GenerationOutcome.Success(
                     text = sanitized,
                     actualBackend = loadedState?.actualTextBackend,
-                    truncated = outputTruncated
+                    truncated = outputTruncated,
+                    stats = nativeStats
                 )
             }
         }
@@ -542,8 +549,25 @@ class LiteRtLlmEngine(
         }
     }
 
-    private fun buildSamplerConfig(options: ConversationOptions): SamplerConfig {
-        val topK = options.topK.coerceAtLeast(1)
+    /**
+     * Distills the vendor BenchmarkInfo of the last conversation run. Returns
+     * null when the runtime reports none (e.g., no message was sent yet).
+     */
+    private fun conversationBenchmarkStats(conversation: Conversation): GenerationBenchmarkStats? {
+        return runCatching {
+            val info = conversation.getBenchmarkInfo()
+            GenerationBenchmarkStats(
+                initTimeSeconds = info.initTimeInSecond,
+                timeToFirstTokenSeconds = info.timeToFirstTokenInSecond,
+                prefillTokenCount = info.lastPrefillTokenCount,
+                decodeTokenCount = info.lastDecodeTokenCount,
+                prefillTokensPerSecond = info.lastPrefillTokensPerSecond,
+                decodeTokensPerSecond = info.lastDecodeTokensPerSecond
+            )
+        }.getOrNull()
+    }
+
+    private fun buildSamplerConfig(options: ConversationOptions): SamplerConfig {        val topK = options.topK.coerceAtLeast(1)
         val topP = options.topP.coerceIn(0f, 1f).toDouble()
         val temperature = options.temperature.coerceAtLeast(0f).toDouble()
         return if (options.seed != null) {
