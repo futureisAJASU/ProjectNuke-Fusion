@@ -14,7 +14,7 @@ class LiteRtEngineMtpStateTest {
         modelPath: String = "m.part",
         accelerator: AcceleratorMode = AcceleratorMode.GPU,
         mtpRequested: Boolean = false,
-        kvCacheCapacityTokens: Int = 1024,
+        kvCacheCapacityTokens: Int = 4096,
         enableVisionBackend: Boolean = false
     ) = RequestedEngineProfile(
         modelPath = modelPath,
@@ -24,82 +24,104 @@ class LiteRtEngineMtpStateTest {
         enableVisionBackend = enableVisionBackend
     )
 
+    private fun fingerprint(
+        canonicalPath: String = "m.part",
+        fileSize: Long = 100L,
+        modifiedAt: Long = 1000L,
+        validationVersion: Int = 2,
+        mtpSupported: Boolean = true
+    ) = ModelFingerprint(
+        canonicalPath = canonicalPath,
+        fileSize = fileSize,
+        modifiedAt = modifiedAt,
+        validationVersion = validationVersion,
+        mtpSupported = mtpSupported
+    )
+
+    private fun key(
+        fingerprint: ModelFingerprint = fingerprint(),
+        accelerator: AcceleratorMode = AcceleratorMode.GPU,
+        kvCacheCapacityTokens: Int = 4096,
+        mtpEnabled: Boolean = false,
+        enableVisionBackend: Boolean = false
+    ) = EngineRuntimeKey(
+        fingerprint = fingerprint,
+        accelerator = accelerator,
+        kvCacheCapacityTokens = kvCacheCapacityTokens,
+        enableVisionBackend = enableVisionBackend,
+        mtpEnabled = mtpEnabled
+    )
+
     @Test
-    fun `cache key records effective MTP state so fallback is never cached as MTP`() {
-        val keyWithMtp = buildLiteRtEngineCacheKey(profile(mtpRequested = true))
-        val keyWithoutMtp = buildLiteRtEngineCacheKey(profile(mtpRequested = false))
-        assertNotEquals(keyWithMtp, keyWithoutMtp)
-        assertTrue(keyWithMtp.contains("|true|"))
-        assertTrue(keyWithoutMtp.contains("|false|"))
-        assertEquals(
-            buildLiteRtEngineCacheKey(profile(mtpRequested = false)),
-            buildLiteRtEngineCacheKey(profile(mtpRequested = false))
+    fun `runtime key records effective MTP state so fallback is never reused as MTP`() {
+        val withMtp = key(mtpEnabled = true)
+        val plain = key(mtpEnabled = false)
+        assertNotEquals(withMtp, plain)
+        // A plain engine (stored after an MTP fallback) reuses for a plain
+        // request; an MTP request never reuses a plain engine.
+        assertEquals(plain, key(mtpEnabled = false))
+    }
+
+    @Test
+    fun `runtime key distinguishes accelerator KV capacity and vision backend`() {
+        val base = key(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpEnabled = true)
+        assertEquals(base, key(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpEnabled = true))
+        assertNotEquals(
+            base,
+            key(accelerator = AcceleratorMode.GPU, kvCacheCapacityTokens = 512, mtpEnabled = true)
+        )
+        assertNotEquals(
+            base,
+            key(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 1024, mtpEnabled = true)
+        )
+        assertNotEquals(
+            base,
+            key(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpEnabled = true, enableVisionBackend = true)
         )
     }
 
     @Test
-    fun `cache key distinguishes accelerator KV capacity and vision backend`() {
+    fun `output limit is not part of the engine identity`() {
+        // The typed identity is built from the profile and fingerprint only;
+        // ConversationOptions (including the output limit) are structurally
+        // absent from it, so changing them can never rebuild or reload an engine.
         assertEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true))
+            key(kvCacheCapacityTokens = 4096, mtpEnabled = true),
+            key(kvCacheCapacityTokens = 4096, mtpEnabled = true)
         )
         assertNotEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.GPU, kvCacheCapacityTokens = 512, mtpRequested = true))
+            key(kvCacheCapacityTokens = 4096, mtpEnabled = true),
+            key(kvCacheCapacityTokens = 4096, mtpEnabled = false)
         )
-        assertNotEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 1024, mtpRequested = true))
-        )
-        assertNotEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true, enableVisionBackend = true))
-        )
+        // KV cache capacity IS part of the identity (EngineConfig.maxNumTokens).
+        assertNotEquals(key(kvCacheCapacityTokens = 4096), key(kvCacheCapacityTokens = 8192))
     }
 
     @Test
-    fun `output limit change never changes the engine identity`() {
-        val profileWithKv4096 = profile(kvCacheCapacityTokens = 4096, mtpRequested = true)
-        val sameProfileAgain = profile(kvCacheCapacityTokens = 4096, mtpRequested = true)
-        val differentKvCapacity = profile(kvCacheCapacityTokens = 8192, mtpRequested = true)
-
-        assertEquals(
-            buildLiteRtEngineCacheKey(profileWithKv4096),
-            buildLiteRtEngineCacheKey(sameProfileAgain)
-        )
-        assertNotEquals(
-            buildLiteRtEngineCacheKey(profileWithKv4096),
-            buildLiteRtEngineCacheKey(differentKvCapacity)
-        )
-
-        // The engine identity is built from the profile only: per-turn options
-        // (including the output limit) are never part of it, so changing them
-        // must never rebuild the engine. The cache-key function literally has
-        // no options input; assert the profile values it does consume.
-        assertNotEquals(
-            buildLiteRtEngineCacheKey(profile(kvCacheCapacityTokens = 4096, mtpRequested = false)),
-            buildLiteRtEngineCacheKey(profile(kvCacheCapacityTokens = 4096, mtpRequested = true))
-        )
-        assertEquals(
-            buildLiteRtEngineCacheKey(profileWithKv4096),
-            buildLiteRtEngineCacheKey(profileWithKv4096.copy(enableVisionBackend = profileWithKv4096.enableVisionBackend))
-        )
+    fun `fingerprint change invalidates the runtime key`() {
+        val base = key()
+        assertEquals(key(), key())
+        assertNotEquals(base, key(fingerprint = fingerprint(fileSize = 101L)))
+        assertNotEquals(base, key(fingerprint = fingerprint(modifiedAt = 1001L)))
+        assertNotEquals(base, key(fingerprint = fingerprint(mtpSupported = false)))
+        assertNotEquals(base, key(fingerprint = fingerprint(validationVersion = 3)))
+        assertNotEquals(base, key(fingerprint = fingerprint(canonicalPath = "other.part")))
     }
 
     @Test
     fun `KV capacity change reloads the engine`() {
-        // Same settings produce the same KV capacity -> same engine identity.
+        // Same settings map to the same KV capacity -> same engine identity.
         val a = com.projectnuke.fusion.model.GenerationSettings(maxTokens = 4096, accelerator = AcceleratorMode.GPU, speculativeDecodingEnabled = true)
         val b = a.copy(maxTokens = 4096)
         assertEquals(
-            buildLiteRtEngineCacheKey(a.toRequestedEngineProfile("m", enableVisionBackend = false)),
-            buildLiteRtEngineCacheKey(b.toRequestedEngineProfile("m", enableVisionBackend = false))
+            profile(kvCacheCapacityTokens = a.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens).kvCacheCapacityTokens,
+            profile(kvCacheCapacityTokens = b.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens).kvCacheCapacityTokens
         )
         // Changing KV capacity changes the engine identity -> engine reload.
         val c = a.copy(maxTokens = 2048)
         assertNotEquals(
-            buildLiteRtEngineCacheKey(a.toRequestedEngineProfile("m", enableVisionBackend = false)),
-            buildLiteRtEngineCacheKey(c.toRequestedEngineProfile("m", enableVisionBackend = false))
+            a.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens,
+            c.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens
         )
     }
 

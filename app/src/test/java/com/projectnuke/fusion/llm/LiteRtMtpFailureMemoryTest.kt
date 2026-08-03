@@ -27,22 +27,37 @@ class LiteRtMtpFailureMemoryTest {
         memory: MtpFailureMemory,
         modelPath: String = "/data/models/gemma.litertlm",
         backend: String = "GPU",
+        mtpEnabled: Boolean = true,
         reason: String = "MTP initialization failed, fell back to non-MTP"
     ) = memory.recordFailure(
         modelPath = modelPath,
-        actualBackend = backend,
+        backendName = backend,
+        mtpEnabled = mtpEnabled,
         validationVersion = 2,
-        accelerator = "AUTO",
         kvCacheCapacityTokens = 4096,
         enableVisionBackend = false,
         fallbackReason = reason
     )
 
+    private fun shouldSkip(
+        memory: MtpFailureMemory,
+        modelPath: String = "/data/models/gemma.litertlm",
+        backend: String = "GPU",
+        mtpEnabled: Boolean = true
+    ) = memory.shouldSkipMtp(
+        modelPath = modelPath,
+        backendName = backend,
+        mtpEnabled = mtpEnabled,
+        validationVersion = 2,
+        kvCacheCapacityTokens = 4096,
+        enableVisionBackend = false
+    )
+
     @Test
-    fun `recorded failure is skipped during cooldown and expired after`() {
+    fun `recorded failure is skipped during cooldown`() {
         val memory = MtpFailureMemory()
         record(memory)
-        assertTrue(memory.shouldSkipMtp("/data/models/gemma.litertlm", "GPU", 2, "AUTO", 4096, false) != null)
+        assertTrue(shouldSkip(memory) != null)
     }
 
     @Test
@@ -53,22 +68,31 @@ class LiteRtMtpFailureMemoryTest {
         assertEquals(1, first.persistedEntryCount())
 
         val reloaded = MtpFailureMemory(storage)
-        assertEquals(
-            "MTP flag application failed",
-            reloaded.shouldSkipMtp("/data/models/gemma.litertlm", "GPU", 2, "AUTO", 4096, false)
-        )
+        assertEquals("MTP flag application failed", shouldSkip(reloaded))
     }
 
     @Test
-    fun `different backend or capacity does not hit the persisted failure`() {
+    fun `failure is keyed by exact backend and MTP state`() {
         val storage = FakeStorage()
         val first = MtpFailureMemory(storage)
         record(first, backend = "GPU")
         val reloaded = MtpFailureMemory(storage)
 
-        assertNull(reloaded.shouldSkipMtp("/data/models/gemma.litertlm", "CPU", 2, "AUTO", 4096, false))
-        assertNull(reloaded.shouldSkipMtp("/data/models/gemma.litertlm", "GPU", 2, "AUTO", 8192, false))
-        assertNull(reloaded.shouldSkipMtp("/data/models/other.litertlm", "GPU", 2, "AUTO", 4096, false))
+        // A GPU+MTP failure must never poison a CPU request or a plain GPU request.
+        assertNull(shouldSkip(reloaded, backend = "CPU"))
+        assertNull(shouldSkip(reloaded, backend = "GPU", mtpEnabled = false))
+        assertNull(shouldSkip(reloaded, modelPath = "/data/models/other.litertlm"))
+        // Different KV capacity is a different engine configuration.
+        assertNull(
+            reloaded.shouldSkipMtp(
+                modelPath = "/data/models/gemma.litertlm",
+                backendName = "GPU",
+                mtpEnabled = true,
+                validationVersion = 2,
+                kvCacheCapacityTokens = 8192,
+                enableVisionBackend = false
+            )
+        )
     }
 
     @Test
@@ -81,8 +105,8 @@ class LiteRtMtpFailureMemoryTest {
 
         memory.clearForModel("/a/one.litertlm")
         val reloaded = MtpFailureMemory(storage)
-        assertNull(reloaded.shouldSkipMtp("/a/one.litertlm", "GPU", 2, "AUTO", 4096, false))
-        assertTrue(reloaded.shouldSkipMtp("/b/two.litertlm", "GPU", 2, "AUTO", 4096, false) != null)
+        assertNull(shouldSkip(reloaded, modelPath = "/a/one.litertlm"))
+        assertTrue(shouldSkip(reloaded, modelPath = "/b/two.litertlm") != null)
     }
 
     @Test
@@ -93,19 +117,17 @@ class LiteRtMtpFailureMemoryTest {
         memory.clearAll()
         assertEquals(0, memory.persistedEntryCount())
         assertEquals(1, storage.clearCount)
-        assertNull(
-            MtpFailureMemory(storage).shouldSkipMtp("/data/models/gemma.litertlm", "GPU", 2, "AUTO", 4096, false)
-        )
+        assertNull(MtpFailureMemory(storage).shouldSkipMtp("/data/models/gemma.litertlm", "GPU", true, 2, 4096, false))
     }
 
     @Test
     fun `corrupt persisted entries are ignored`() {
         val storage = FakeStorage()
         storage.map["not-enough-fields"] = "12345|reason"
-        storage.map["a\u001fb\u001f1\u001fc\u001f2\u001ftrue"] = "not-a-timestamp|reason"
-        storage.map["a\u001fb\u001fwat\u001fc\u001f2\u001ftrue"] = "12345|reason"
-        storage.map["a\u001fb\u001f1\u001fc\u001f2\u001ftrue"] = "12345" // valid key, value has one field only
+        storage.map["a\u001fb\u001ftrue\u001f1\u001fc\u001f2"] = "not-a-timestamp|reason"
+        storage.map["a\u001fb\u001fwat\u001f1\u001fc\u001f2"] = "12345|reason"
+        storage.map["a\u001fb\u001ftrue\u001f1\u001fc\u001f2"] = "12345" // valid key, value has one field only
         val memory = MtpFailureMemory(storage)
-        assertFalse(memory.shouldSkipMtp("x", "GPU", 2, "AUTO", 4096, false) != null)
+        assertNull(shouldSkip(memory, modelPath = "x", backend = "b"))
     }
 }

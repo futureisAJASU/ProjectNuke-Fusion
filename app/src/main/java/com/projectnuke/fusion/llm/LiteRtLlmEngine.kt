@@ -17,7 +17,6 @@ import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.ConversationOptions
 import com.projectnuke.fusion.model.RequestedEngineProfile
 import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
-import com.projectnuke.fusion.modelzoo.LiteRtLmPackageValidator
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import kotlinx.coroutines.CancellationException
@@ -41,19 +40,14 @@ class LiteRtLlmEngine(
     private val failureMemoryStorage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage
 ) : LlmEngine {
 
-    private var engine: Engine? = null
-    private var loadedKey: String? = null
-    private var actualBackend: String? = null
-    private var actualVisionBackend: String? = null
-    private var cachedMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
-    private var cachedRuntimeSelection: EngineSelectionRuntime? = null
+    private var loadedState: LoadedRuntimeState? = null
     private val mtpFailureMemory = MtpFailureMemory(failureMemoryStorage)
     @Volatile
     var lastMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
         private set
 
     val lastRuntimeSelection: EngineSelectionRuntime?
-        get() = cachedRuntimeSelection
+        get() = loadedState?.runtimeSelection
 
     override suspend fun generate(
         messages: List<ChatMessage>,
@@ -161,7 +155,7 @@ class LiteRtLlmEngine(
             } else {
                 GenerationOutcome.Success(
                     text = sanitized,
-                    actualBackend = actualBackend,
+                    actualBackend = loadedState?.actualTextBackend,
                     truncated = outputTruncated
                 )
             }
@@ -285,7 +279,7 @@ class LiteRtLlmEngine(
             } else {
                 GenerationOutcome.Success(
                     text = sanitized,
-                    actualBackend = actualBackend,
+                    actualBackend = loadedState?.actualTextBackend,
                     truncated = outputTruncated
                 )
             }
@@ -328,47 +322,56 @@ class LiteRtLlmEngine(
 
     private fun getOrCreateEngine(profile: RequestedEngineProfile): Engine {
         val mtpRequested = profile.mtpRequested
-        val mtpSupported = isSpeculativeDecodingSupportedModel(profile.modelPath)
+        val fingerprint = ModelFingerprint.of(profile.modelPath)
+        val mtpSupported = fingerprint.mtpSupported
         val maxNumTokens = profile.kvCacheCapacityTokens.coerceAtLeast(1)
 
-        // Check failure memory before attempting MTP
-        var effectiveMtpSupported = mtpSupported
-        var mtpSkipReason: String? = null
-        if (mtpRequested && mtpSupported) {
-            val validation = LiteRtLmPackageValidator.validate(File(profile.modelPath))
-            val validationVersion = validation.getOrNull()?.validationVersion ?: 0
-            mtpSkipReason = mtpFailureMemory.shouldSkipMtp(
-                modelPath = profile.modelPath,
-                actualBackend = profile.accelerator.name, // Use requested accelerator as proxy for actual backend
-                validationVersion = validationVersion,
-                accelerator = profile.accelerator.name,
-                kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                enableVisionBackend = profile.enableVisionBackend
-            )
-            if (mtpSkipReason != null) {
-                effectiveMtpSupported = false
-                Log.i("FusionLiteRT", "MTP skipped due to recent failure: $mtpSkipReason")
-            }
-        }
-
+        // Failure memory is consulted per candidate backend: an MTP failure on
+        // GPU must never poison an explicit CPU request, and AUTO failures are
+        // remembered under the exact backend that failed, not the accelerator.
+        var mtpSkippedByMemory = false
         val ladder = buildEngineCandidateLadder(
             accelerator = profile.accelerator,
             mtpRequested = mtpRequested,
-            mtpSupported = effectiveMtpSupported
-        )
+            mtpSupported = mtpSupported
+        ).filter { candidate ->
+            if (!candidate.mtpEnabled) return@filter true
+            val skipReason = mtpFailureMemory.shouldSkipMtp(
+                modelPath = fingerprint.canonicalPath,
+                backendName = candidate.backend,
+                mtpEnabled = true,
+                validationVersion = fingerprint.validationVersion,
+                kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+                enableVisionBackend = profile.enableVisionBackend
+            )
+            if (skipReason != null) {
+                mtpSkippedByMemory = true
+                Log.i(
+                    "FusionLiteRT",
+                    "MTP skipped due to recent failure: $skipReason (backend=${candidate.backend})"
+                )
+                return@filter false
+            }
+            true
+        }
         val preferredBackendName = ladder.first().backend
-        val requestedKeyProfile = profile.copy(mtpRequested = ladder.first().mtpEnabled)
-        val key = buildLiteRtEngineCacheKey(requestedKeyProfile)
+        val requestedKey = EngineRuntimeKey(
+            fingerprint = fingerprint,
+            accelerator = profile.accelerator,
+            kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+            enableVisionBackend = profile.enableVisionBackend,
+            mtpEnabled = ladder.first().mtpEnabled
+        )
 
-        val currentEngine = engine
-        if (currentEngine != null && loadedKey == key) {
-            lastMtpStatus = cachedMtpStatus
+        val currentState = loadedState
+        if (currentState != null && currentState.key == requestedKey) {
+            lastMtpStatus = currentState.mtpStatus
             Log.i("FusionLiteRT", "MTP requested: $mtpRequested (cached engine reused)")
             Log.i("FusionLiteRT", "MTP status: $lastMtpStatus")
             Log.i("FusionLiteRT", "Backend: $preferredBackendName")
             Log.i("FusionLiteRT", "Vision backend requested: ${profile.enableVisionBackend}")
             Log.i("FusionLiteRT", "Model path: ${File(profile.modelPath).name}")
-            return currentEngine
+            return currentState.engine
         }
 
         unload()
@@ -382,12 +385,9 @@ class LiteRtLlmEngine(
         if (mtpRequested && !mtpSupported) {
             lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
             Log.i("FusionLiteRT", "MTP unsupported model/runtime")
-        } else if (mtpRequested && effectiveMtpSupported) {
+        } else if (mtpRequested && mtpSupported) {
             lastMtpStatus = MtpRuntimeStatus.REQUESTED
             Log.i("FusionLiteRT", "MTP requested, model supports it")
-        } else if (mtpRequested && mtpSupported && !effectiveMtpSupported) {
-            lastMtpStatus = MtpRuntimeStatus.FALLBACK_DISABLED
-            Log.i("FusionLiteRT", "MTP fallback disabled due to previous failure")
         } else {
             lastMtpStatus = MtpRuntimeStatus.OFF
         }
@@ -395,6 +395,8 @@ class LiteRtLlmEngine(
         var newEngine: Engine? = null
         var selectedMtpEnabled = false
         var mtpFlagAppliedForMtp = false
+        var mtpAttempted = false
+        var lastMtpAttemptBackend: String? = null
         var failure: Throwable? = null
         val selection = selectFirstWorkingEngine(
             ladder = ladder,
@@ -402,7 +404,7 @@ class LiteRtLlmEngine(
             configureFlag = { settleSpeculativeDecodingFlag(it) },
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 val backend = if (backendName == "CPU") Backend.CPU() else Backend.GPU()
-                createEngine(
+                val result = createEngine(
                     modelPath = profile.modelPath,
                     backend = backend,
                     visionBackend = if (profile.enableVisionBackend) {
@@ -412,6 +414,11 @@ class LiteRtLlmEngine(
                     },
                     maxNumTokens = maxNumTokens
                 )
+                if (mtpEnabled) {
+                    mtpAttempted = true
+                    if (result.isFailure) lastMtpAttemptBackend = backendName
+                }
+                result
             }
         )
         val selectionResult = selection.first
@@ -419,8 +426,6 @@ class LiteRtLlmEngine(
             newEngine = selectionResult.engine
             selectedMtpEnabled = selectionResult.selectedMtpEnabled
             mtpFlagAppliedForMtp = selectionResult.mtpFlagAppliedForMtp
-            actualBackend = selectionResult.backendName
-            actualVisionBackend = selectionResult.visionBackend
             Log.i(
                 "FusionLiteRT",
                 "Engine initialized with ${selectionResult.backendName}" +
@@ -435,55 +440,61 @@ class LiteRtLlmEngine(
             // and the next engine selection will re-settle before any init.
             settleSpeculativeDecodingFlag(false)
             lastMtpStatus = MtpRuntimeStatus.FAILED
-            cachedMtpStatus = MtpRuntimeStatus.FAILED
             throw (failure ?: IllegalStateException("LiteRT engine candidates exhausted"))
         }
 
         lastMtpStatus = when {
-            mtpRequested && !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
-            mtpRequested && mtpSupported && !effectiveMtpSupported -> MtpRuntimeStatus.FALLBACK_DISABLED
-            mtpRequested && mtpSupported && selectedMtpEnabled && mtpFlagAppliedForMtp -> MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
-            mtpRequested && mtpSupported && !mtpFlagAppliedForMtp -> MtpRuntimeStatus.FAILED
-            mtpRequested && mtpSupported -> MtpRuntimeStatus.FALLBACK_DISABLED
-            else -> MtpRuntimeStatus.OFF
+            !mtpRequested -> MtpRuntimeStatus.OFF
+            !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
+            selectedMtpEnabled && mtpFlagAppliedForMtp -> MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
+            mtpSkippedByMemory -> MtpRuntimeStatus.FALLBACK_DISABLED
+            mtpAttempted -> MtpRuntimeStatus.FALLBACK_DISABLED
+            else -> MtpRuntimeStatus.FAILED
         }
-        cachedMtpStatus = lastMtpStatus
 
         val fallbackReason = when {
             mtpRequested && !mtpSupported -> "Model does not support MTP"
+            mtpSkippedByMemory -> "MTP disabled due to previous failure"
+            mtpAttempted && !selectedMtpEnabled -> "MTP initialization failed, fell back to non-MTP"
             mtpRequested && mtpSupported && !mtpFlagAppliedForMtp -> "MTP flag application failed"
-            mtpRequested && mtpSupported && !selectedMtpEnabled -> "MTP initialization failed, fell back to non-MTP"
-            mtpRequested && selectedMtpEnabled && mtpFlagAppliedForMtp -> null
             else -> null
         }
         val initializedWithMtp = mtpRequested && mtpSupported && selectedMtpEnabled && mtpFlagAppliedForMtp
 
-        // Record failure if MTP was requested but fell back
-        if (mtpRequested && mtpSupported && !selectedMtpEnabled && fallbackReason != null) {
-            val validation = LiteRtLmPackageValidator.validate(File(profile.modelPath))
-            val validationVersion = validation.getOrNull()?.validationVersion ?: 0
+        // Record the failure under the exact candidate backend that failed so
+        // the next load skips only that (backend, MTP) combination.
+        if (mtpRequested && mtpSupported && !selectedMtpEnabled && lastMtpAttemptBackend != null) {
             mtpFailureMemory.recordFailure(
-                modelPath = profile.modelPath,
-                actualBackend = actualBackend!!,
-                validationVersion = validationVersion,
-                accelerator = profile.accelerator.name,
+                modelPath = fingerprint.canonicalPath,
+                backendName = lastMtpAttemptBackend!!,
+                mtpEnabled = true,
+                validationVersion = fingerprint.validationVersion,
                 kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
                 enableVisionBackend = profile.enableVisionBackend,
-                fallbackReason = fallbackReason
+                fallbackReason = fallbackReason ?: "MTP initialization failed"
             )
         }
 
-        cachedRuntimeSelection = EngineSelectionRuntime(
+        val actualTextBackend = selectionResult?.backendName ?: preferredBackendName
+        val runtimeSelection = EngineSelectionRuntime(
             requestedAccelerator = profile.accelerator.name,
-            actualTextBackend = actualBackend!!,
-            actualVisionBackend = actualVisionBackend,
+            actualTextBackend = actualTextBackend,
+            actualVisionBackend = selectionResult?.visionBackend,
             requestedMtp = mtpRequested,
             initializedWithMtp = initializedWithMtp,
             fallbackReason = fallbackReason
         )
 
-        engine = resolvedEngine
-        loadedKey = buildLiteRtEngineCacheKey(profile.copy(mtpRequested = selectedMtpEnabled))
+        // The stored key reflects the engine actually loaded (the selected MTP
+        // state), so a later fallback is reused until the memory skip kicks in.
+        loadedState = LoadedRuntimeState(
+            engine = resolvedEngine,
+            key = requestedKey.copy(mtpEnabled = selectedMtpEnabled),
+            mtpStatus = lastMtpStatus,
+            runtimeSelection = runtimeSelection,
+            actualTextBackend = actualTextBackend,
+            actualVisionBackend = selectionResult?.visionBackend
+        )
 
         return resolvedEngine
     }
@@ -541,17 +552,12 @@ class LiteRtLlmEngine(
 
     override fun unload() {
         try {
-            engine?.close()
+            loadedState?.engine?.close()
         } catch (throwable: Throwable) {
             Log.w("FusionEngine", "Failed to close LiteRT engine", throwable)
         }
 
-        engine = null
-        loadedKey = null
-        actualBackend = null
-        actualVisionBackend = null
-        cachedMtpStatus = MtpRuntimeStatus.OFF
-        cachedRuntimeSelection = null
+        loadedState = null
         lastMtpStatus = MtpRuntimeStatus.OFF
         // Reset the global flag on unload; the next selection re-settles it
         // before any engine init, so a failed reset cannot poison a later load.
@@ -565,7 +571,8 @@ class LiteRtLlmEngine(
      * Call this when the model file has changed (size/mtime) or on explicit manual retry.
      */
     fun clearMtpFailureMemory(modelPath: String) {
-        mtpFailureMemory.clearForModel(modelPath)
+        val canonicalPath = runCatching { File(modelPath).canonicalPath }.getOrElse { modelPath }
+        mtpFailureMemory.clearForModel(canonicalPath)
     }
 
     /**
@@ -573,10 +580,6 @@ class LiteRtLlmEngine(
      */
     fun clearAllMtpFailureMemory() {
         mtpFailureMemory.clearAll()
-    }
-
-    private fun isSpeculativeDecodingSupportedModel(modelPath: String): Boolean {
-        return LiteRtLmPackageValidator.validate(File(modelPath)).getOrNull()?.hasDrafter == true
     }
 
     /**
@@ -681,18 +684,6 @@ internal fun buildPrompt(
 
         appendLine("Assistant:")
     }
-}
-
-internal fun buildLiteRtEngineCacheKey(profile: RequestedEngineProfile): String = buildString {
-    append(profile.modelPath)
-    append("|")
-    append(profile.accelerator.name)
-    append("|")
-    append(profile.kvCacheCapacityTokens)
-    append("|")
-    append(profile.mtpRequested)
-    append("|vision=")
-    append(profile.enableVisionBackend)
 }
 
 /**
@@ -834,9 +825,9 @@ internal class MtpFailureMemory(
 ) {
     private data class FailureKey(
         val modelPath: String,
-        val actualBackend: String,
+        val backendName: String,
+        val mtpEnabled: Boolean,
         val validationVersion: Int,
-        val accelerator: String,
         val kvCacheCapacityTokens: Int,
         val enableVisionBackend: Boolean
     )
@@ -856,9 +847,9 @@ internal class MtpFailureMemory(
 
         private fun serializeKey(key: FailureKey): String = listOf(
             key.modelPath,
-            key.actualBackend,
+            key.backendName,
+            key.mtpEnabled.toString(),
             key.validationVersion.toString(),
-            key.accelerator,
             key.kvCacheCapacityTokens.toString(),
             key.enableVisionBackend.toString()
         ).joinToString(KEY_SEPARATOR)
@@ -868,9 +859,9 @@ internal class MtpFailureMemory(
             if (parts.size != 6) return null
             return FailureKey(
                 modelPath = parts[0],
-                actualBackend = parts[1],
-                validationVersion = parts[2].toIntOrNull() ?: return null,
-                accelerator = parts[3],
+                backendName = parts[1],
+                mtpEnabled = parts[2].toBooleanStrictOrNull() ?: return null,
+                validationVersion = parts[3].toIntOrNull() ?: return null,
                 kvCacheCapacityTokens = parts[4].toIntOrNull() ?: return null,
                 enableVisionBackend = parts[5].toBooleanStrictOrNull() ?: return null
             )
@@ -892,17 +883,17 @@ internal class MtpFailureMemory(
      */
     fun shouldSkipMtp(
         modelPath: String,
-        actualBackend: String,
+        backendName: String,
+        mtpEnabled: Boolean,
         validationVersion: Int,
-        accelerator: String,
         kvCacheCapacityTokens: Int,
         enableVisionBackend: Boolean
     ): String? = synchronized(lock) {
         val key = FailureKey(
             modelPath = modelPath,
-            actualBackend = actualBackend,
+            backendName = backendName,
+            mtpEnabled = mtpEnabled,
             validationVersion = validationVersion,
-            accelerator = accelerator,
             kvCacheCapacityTokens = kvCacheCapacityTokens,
             enableVisionBackend = enableVisionBackend
         )
@@ -925,18 +916,18 @@ internal class MtpFailureMemory(
      */
     fun recordFailure(
         modelPath: String,
-        actualBackend: String,
+        backendName: String,
+        mtpEnabled: Boolean,
         validationVersion: Int,
-        accelerator: String,
         kvCacheCapacityTokens: Int,
         enableVisionBackend: Boolean,
         fallbackReason: String
     ) = synchronized(lock) {
         val key = FailureKey(
             modelPath = modelPath,
-            actualBackend = actualBackend,
+            backendName = backendName,
+            mtpEnabled = mtpEnabled,
             validationVersion = validationVersion,
-            accelerator = accelerator,
             kvCacheCapacityTokens = kvCacheCapacityTokens,
             enableVisionBackend = enableVisionBackend
         )
