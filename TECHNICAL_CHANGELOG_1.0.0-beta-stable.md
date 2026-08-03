@@ -158,3 +158,41 @@
 - `compileDebugKotlin`, `compileDebugUnitTestKotlin`, `testDebugUnitTest` (all suites, incl. the 2.4 GB golden package test), `assembleDebug`, and `lintDebug`: passed.
 - `git diff --check`: passed.
 - `versionCode` bumped `10005` → `10006` with `versionName` unchanged at `1.0.0-beta-stable`.
+
+## R5 LiteRT-LM MTP lifecycle hardening (2026-08-04, versionCode 10006 -> 10007)
+
+### Typed engine profile vs per-turn conversation options
+
+- RequestedEngineProfile (modelPath, accelerator, mtpRequested, kvCacheCapacityTokens, enableVisionBackend) is now the sole engine-creation identity; ConversationOptions (maxOutputToken, temperature, topK, topP, seed) is per-turn and can never rebuild or reload an engine.
+- KV cache capacity (EngineConfig.maxNumTokens) is the engine identity; the output limit is an app-level streaming guard (~4 chars/token estimate, cancelProcess + Success.truncated), because v0.14.0's ConversationConfig exposes no max output token.
+
+### Prompt byte identity
+
+- System instruction and user prompt are built from messages only; runtime settings never appear in prompt bytes, so MTP on/off produce byte-identical prompts (enforced by LiteRtPromptIdentityTest).
+
+### Mandatory flag settlement
+
+- Never initialize an Engine while ExperimentalFlags.enableSpeculativeDecoding state is unknown: a failed enable skips the MTP candidate, a failed disable skips the plain candidate, and the flag is re-settled before every candidate and on unload/failure.
+
+### Fallback ladder and persistent failure memory
+
+- AUTO ladder is now GPU+MTP -> GPU -> CPU (no automatic CPU+MTP, max 3 candidates); CPU+MTP remains an explicit experimental path.
+- MtpFailureMemory persists across restarts via SharedPreferences and is keyed by canonical model path, exact candidate backend, MTP state, validator version, KV capacity and vision flag, so a GPU+MTP failure never poisons a CPU or plain request.
+
+### Typed runtime identity
+
+- ModelFingerprint (canonical path, size, mtime, validator version, MTP capability) plus EngineRuntimeKey replace the string cache key; file/capability changes invalidate the loaded engine. LoadedRuntimeState holds one consistent snapshot for reuse decisions and status reporting.
+
+### Runtime probe and confirmed-active status
+
+- After a successful MTP init, the official Capabilities(modelPath).hasSpeculativeDecodingSupport() probe is required for RUNTIME_CONFIRMED_ACTIVE; a negative probe falls back and is remembered, an unavailable probe keeps the optimistic INITIALIZED_WITH_MTP_REQUEST claim.
+
+### Native benchmark stats
+
+- Conversation.getBenchmarkInfo() is distilled into GenerationBenchmarkStats on every successful generation and surfaced in chat metrics (native tTFT, decode/prefill tok/s) and benchmark results (native tTFT, prefill, decode, init time).
+
+### Validation performed
+
+- compileDebugKotlin, compileDebugUnitTestKotlin, 	estDebugUnitTest (444 tests, incl. the 2.4 GB golden package test), ssembleDebug, and lintDebug: passed.
+- git diff --check: passed.
+- versionCode bump 10006 -> 10007 pending device benchmark gate; versionName unchanged at 1.0.0-beta-stable.
