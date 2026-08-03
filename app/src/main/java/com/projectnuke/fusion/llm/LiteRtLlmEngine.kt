@@ -34,6 +34,9 @@ class LiteRtLlmEngine(
     },
     private val flagSetter: (Boolean) -> Boolean = { enabled ->
         runCatching { ExperimentalFlags.enableSpeculativeDecoding = enabled }.isSuccess
+    },
+    private val flagReader: () -> Boolean? = {
+        ExperimentalFlags.enableSpeculativeDecoding
     }
 ) : LlmEngine {
 
@@ -395,7 +398,7 @@ class LiteRtLlmEngine(
         val selection = selectFirstWorkingEngine(
             ladder = ladder,
             enableVisionBackend = profile.enableVisionBackend,
-            configureFlag = { configureSpeculativeDecodingFlag(it) },
+            configureFlag = { settleSpeculativeDecodingFlag(it) },
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 val backend = if (backendName == "CPU") Backend.CPU() else Backend.GPU()
                 createEngine(
@@ -427,7 +430,9 @@ class LiteRtLlmEngine(
         }
 
         val resolvedEngine = newEngine ?: run {
-            configureSpeculativeDecodingFlag(false)
+            // Best-effort reset; if this also fails the flag state is unknown
+            // and the next engine selection will re-settle before any init.
+            settleSpeculativeDecodingFlag(false)
             lastMtpStatus = MtpRuntimeStatus.FAILED
             cachedMtpStatus = MtpRuntimeStatus.FAILED
             throw (failure ?: IllegalStateException("LiteRT engine candidates exhausted"))
@@ -547,8 +552,10 @@ class LiteRtLlmEngine(
         cachedMtpStatus = MtpRuntimeStatus.OFF
         cachedRuntimeSelection = null
         lastMtpStatus = MtpRuntimeStatus.OFF
+        // Reset the global flag on unload; the next selection re-settles it
+        // before any engine init, so a failed reset cannot poison a later load.
         runCatching {
-            configureSpeculativeDecodingFlag(false)
+            settleSpeculativeDecodingFlag(false)
         }
     }
 
@@ -571,15 +578,33 @@ class LiteRtLlmEngine(
         return LiteRtLmPackageValidator.validate(File(modelPath)).getOrNull()?.hasDrafter == true
     }
 
-    private fun configureSpeculativeDecodingFlag(enabled: Boolean): Boolean {
-        return flagSetter(enabled).also { applied ->
-            if (!applied) {
-                Log.w(
-                    "FusionLiteRT",
-                    "Failed to ${if (enabled) "enable" else "disable"} MTP speculative decoding flag"
-                )
-            }
+    /**
+     * Settles the speculative-decoding flag to [desired] and verifies the
+     * result before any Engine initialization. Returns true only when the
+     * flag reached the desired state:
+     * - the setter must report success, and
+     * - if the runtime exposes the flag value, the read-back must match.
+     * A failed settle means the flag state is unknown; the caller must skip
+     * the candidate instead of initializing an engine on faith.
+     */
+    private fun settleSpeculativeDecodingFlag(desired: Boolean): Boolean {
+        val applied = flagSetter(desired)
+        if (!applied) {
+            Log.w(
+                "FusionLiteRT",
+                "Failed to ${if (desired) "enable" else "disable"} MTP speculative decoding flag"
+            )
+            return false
         }
+        val readBack = runCatching { flagReader() }.getOrNull()
+        if (readBack != null && readBack != desired) {
+            Log.w(
+                "FusionLiteRT",
+                "MTP speculative decoding flag read-back mismatch: desired=$desired actual=$readBack"
+            )
+            return false
+        }
+        return true
     }
 }
 
@@ -706,8 +731,15 @@ internal fun <T> selectFirstWorkingEngine(
     var mtpFlagAppliedForMtp = false
     var lastFailure: Throwable? = null
     for (candidate in ladder) {
+        // Mandatory settlement: never initialize an engine while the
+        // speculative-decoding flag is in an unknown state. A failed settle
+        // skips the candidate entirely instead of proceeding on faith.
         val flagApplied = configureFlag(candidate.mtpEnabled)
-        if (candidate.mtpEnabled && flagApplied) {
+        if (!flagApplied) {
+            lastFailure = IllegalStateException("Speculative decoding flag settle failed for mtp=${candidate.mtpEnabled}")
+            continue
+        }
+        if (candidate.mtpEnabled) {
             mtpFlagAppliedForMtp = true
         }
         val attempt = tryCreate(candidate.backend, candidate.mtpEnabled, false)
@@ -715,7 +747,7 @@ internal fun <T> selectFirstWorkingEngine(
             return Pair(
                 EngineSelectionResult(
                     engine = attempt.getOrThrow(),
-                    selectedMtpEnabled = candidate.mtpEnabled && flagApplied,
+                    selectedMtpEnabled = candidate.mtpEnabled,
                     mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                     backendName = candidate.backend,
                     visionBackend = if (enableVisionBackend) candidate.backend else null
@@ -729,7 +761,7 @@ internal fun <T> selectFirstWorkingEngine(
                 return Pair(
                     EngineSelectionResult(
                         engine = visionRetry.getOrThrow(),
-                        selectedMtpEnabled = candidate.mtpEnabled && flagApplied,
+                        selectedMtpEnabled = candidate.mtpEnabled,
                         mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                         backendName = candidate.backend,
                         visionBackend = "CPU"

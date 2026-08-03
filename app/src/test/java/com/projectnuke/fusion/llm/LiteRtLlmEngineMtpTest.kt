@@ -64,14 +64,40 @@ class LiteRtLlmEngineMtpTest {
     }
 
     @Test
-    fun `flag apply failure is tracked even when later candidate succeeds`() {
+    fun `enable failure skips the MTP candidate but lets the plain fallback run`() {
+        val flagCalls = mutableListOf<Boolean>()
+        val attempts = mutableListOf<Pair<String, Boolean>>()
         val selection = selectFirstWorkingEngine<String>(
             ladder = mtpLadder,
             enableVisionBackend = false,
-            configureFlag = { false },
+            configureFlag = { enabled -> flagCalls += enabled; !enabled },
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
-                if (backendName == "GPU" && !mtpEnabled) {
-                    Result.success("gpu-plain-engine")
+                attempts += (backendName to mtpEnabled)
+                Result.success("$backendName-mtp=$mtpEnabled")
+            }
+        )
+        val result = selection.first
+        assertNotNull(result)
+        assertEquals("GPU-mtp=false", result!!.engine)
+        assertFalse(result.selectedMtpEnabled)
+        assertFalse(result.mtpFlagAppliedForMtp)
+        // Enable settle failed: MTP candidate skipped before any attempt.
+        assertEquals(listOf(true, false), flagCalls)
+        assertEquals(listOf("GPU" to false), attempts)
+    }
+
+    @Test
+    fun `disable failure skips the plain candidate and keeps MTP`() {
+        val flagCalls = mutableListOf<Boolean>()
+        val attempts = mutableListOf<Pair<String, Boolean>>()
+        val selection = selectFirstWorkingEngine<String>(
+            ladder = mtpLadder,
+            enableVisionBackend = false,
+            configureFlag = { enabled -> flagCalls += enabled; enabled },
+            tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
+                attempts += (backendName to mtpEnabled)
+                if (mtpEnabled && backendName == "CPU") {
+                    Result.success("cpu-mtp-engine")
                 } else {
                     Result.failure(IllegalStateException("init failed"))
                 }
@@ -79,8 +105,26 @@ class LiteRtLlmEngineMtpTest {
         )
         val result = selection.first
         assertNotNull(result)
-        assertFalse(result!!.selectedMtpEnabled)
-        assertFalse(result.mtpFlagAppliedForMtp)
+        assertEquals("cpu-mtp-engine", result!!.engine)
+        assertTrue(result.selectedMtpEnabled)
+        assertTrue(result.mtpFlagAppliedForMtp)
+        // GPU+MTP failed init; GPU-plain disabled-settle failed and was skipped;
+        // CPU+MTP enabled and succeeded.
+        assertEquals(listOf(true, false, true), flagCalls)
+        assertEquals(listOf("GPU" to true, "CPU" to true), attempts)
+    }
+
+    @Test
+    fun `never initializes when the flag cannot be settled for any candidate`() {
+        val selection = selectFirstWorkingEngine<String>(
+            ladder = mtpLadder,
+            enableVisionBackend = false,
+            configureFlag = { false },
+            tryCreate = { _, _, _ -> Result.success("unreachable") }
+        )
+        assertNull(selection.first)
+        assertNotNull(selection.second)
+        assertTrue(selection.second is IllegalStateException)
     }
 
     @Test
@@ -120,19 +164,25 @@ class LiteRtLlmEngineMtpTest {
     }
 
     @Test
-    fun `flag is configured before each candidate attempt`() {
-        val flagCalls = mutableListOf<Boolean>()
-        val attempts = mutableListOf<Pair<String, Boolean>>()
+    fun `flag is settled before each candidate attempt`() {
+        val events = mutableListOf<String>()
         selectFirstWorkingEngine<String>(
             ladder = mtpLadder,
             enableVisionBackend = false,
-            configureFlag = { enabled -> flagCalls += enabled; true },
+            configureFlag = { enabled -> events += "flag:$enabled"; true },
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
-                attempts += (backendName to mtpEnabled)
+                events += "create:$backendName-$mtpEnabled"
                 Result.failure(IllegalStateException("fail"))
             }
         )
-        assertEquals(listOf(true, false, true, false), flagCalls)
-        assertEquals(4, attempts.size)
+        assertEquals(
+            listOf(
+                "flag:true", "create:GPU-true",
+                "flag:false", "create:GPU-false",
+                "flag:true", "create:CPU-true",
+                "flag:false", "create:CPU-false"
+            ),
+            events
+        )
     }
 }
