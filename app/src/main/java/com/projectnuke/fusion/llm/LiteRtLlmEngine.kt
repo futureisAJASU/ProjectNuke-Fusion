@@ -124,15 +124,25 @@ class LiteRtLlmEngine(
             )
 
             val output = StringBuilder()
+            var outputTruncated = false
             try {
                 engine.createConversation(conversationConfig).use { conversation ->
-                    conversation
-                        .sendMessageAsync(promptText)
-                        .collect { chunk ->
-                            val token = chunk.toString()
-                            output.append(token)
-                            onToken(token)
-                        }
+                    try {
+                        conversation
+                            .sendMessageAsync(promptText)
+                            .collect { chunk ->
+                                val token = chunk.toString()
+                                output.append(token)
+                                onToken(token)
+                                if (isAppOutputLimitReached(options, output)) {
+                                    outputTruncated = true
+                                    runCatching { conversation.cancelProcess() }
+                                    throw AppOutputLimitReachedException
+                                }
+                            }
+                    } catch (e: AppOutputLimitReachedException) {
+                        Log.i("FusionLiteRT", "App-level output limit reached: ${options.maxOutputToken} estimated tokens")
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -145,7 +155,11 @@ class LiteRtLlmEngine(
             if (sanitized.isBlank()) {
                 GenerationOutcome.Empty
             } else {
-                GenerationOutcome.Success(text = sanitized, actualBackend = actualBackend)
+                GenerationOutcome.Success(
+                    text = sanitized,
+                    actualBackend = actualBackend,
+                    truncated = outputTruncated
+                )
             }
         }
     }
@@ -234,15 +248,25 @@ class LiteRtLlmEngine(
             }
 
             val output = StringBuilder()
+            var outputTruncated = false
             try {
                 engine.createConversation(conversationConfig).use { conversation ->
-                    conversation
-                        .sendMessageAsync(Contents.of(contentParts))
-                        .collect { chunk ->
-                            val token = chunk.toString()
-                            output.append(token)
-                            onToken(token)
-                        }
+                    try {
+                        conversation
+                            .sendMessageAsync(Contents.of(contentParts))
+                            .collect { chunk ->
+                                val token = chunk.toString()
+                                output.append(token)
+                                onToken(token)
+                                if (isAppOutputLimitReached(options, output)) {
+                                    outputTruncated = true
+                                    runCatching { conversation.cancelProcess() }
+                                    throw AppOutputLimitReachedException
+                                }
+                            }
+                    } catch (e: AppOutputLimitReachedException) {
+                        Log.i("FusionLiteRT", "App-level output limit reached: ${options.maxOutputToken} estimated tokens")
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -255,7 +279,11 @@ class LiteRtLlmEngine(
             if (sanitized.isBlank()) {
                 GenerationOutcome.Empty
             } else {
-                GenerationOutcome.Success(text = sanitized, actualBackend = actualBackend)
+                GenerationOutcome.Success(
+                    text = sanitized,
+                    actualBackend = actualBackend,
+                    truncated = outputTruncated
+                )
             }
         }
     }
@@ -297,7 +325,7 @@ class LiteRtLlmEngine(
     private fun getOrCreateEngine(profile: RequestedEngineProfile): Engine {
         val mtpRequested = profile.mtpRequested
         val mtpSupported = isSpeculativeDecodingSupportedModel(profile.modelPath)
-        val maxNumTokens = profile.maxTokens.coerceAtLeast(1)
+        val maxNumTokens = profile.kvCacheCapacityTokens.coerceAtLeast(1)
 
         // Check failure memory before attempting MTP
         var effectiveMtpSupported = mtpSupported
@@ -310,7 +338,7 @@ class LiteRtLlmEngine(
                 actualBackend = profile.accelerator.name, // Use requested accelerator as proxy for actual backend
                 validationVersion = validationVersion,
                 accelerator = profile.accelerator.name,
-                maxTokens = profile.maxTokens,
+                kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
                 enableVisionBackend = profile.enableVisionBackend
             )
             if (mtpSkipReason != null) {
@@ -433,7 +461,7 @@ class LiteRtLlmEngine(
                 actualBackend = actualBackend!!,
                 validationVersion = validationVersion,
                 accelerator = profile.accelerator.name,
-                maxTokens = profile.maxTokens,
+                kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
                 enableVisionBackend = profile.enableVisionBackend,
                 fallbackReason = fallbackReason
             )
@@ -495,7 +523,7 @@ class LiteRtLlmEngine(
                 appendLine("Generation settings before request")
                 appendLine("modelPath=${File(profile.modelPath).name}")
                 appendLine("accelerator=${profile.accelerator.name} (runtime EngineConfig.backend)")
-                appendLine("maxTokens=${profile.maxTokens} (runtime EngineConfig.maxNumTokens)")
+                appendLine("kvCacheCapacityTokens=${profile.kvCacheCapacityTokens} (runtime EngineConfig.maxNumTokens)")
                 appendLine("topK=${options.topK} (runtime SamplerConfig.topK)")
                 appendLine("topP=${options.topP} (runtime SamplerConfig.topP)")
                 appendLine("temperature=${options.temperature} (runtime SamplerConfig.temperature)")
@@ -634,12 +662,27 @@ internal fun buildLiteRtEngineCacheKey(profile: RequestedEngineProfile): String 
     append("|")
     append(profile.accelerator.name)
     append("|")
-    append(profile.maxTokens)
+    append(profile.kvCacheCapacityTokens)
     append("|")
     append(profile.mtpRequested)
     append("|vision=")
     append(profile.enableVisionBackend)
 }
+
+/**
+ * Heuristic estimate of the token count in the accumulated streaming output
+ * (~4 characters per token, matching the existing benchmark estimator). Used
+ * only to enforce the app-level streaming output limit; the hard bound on
+ * memory is the KV cache capacity, not this estimate.
+ */
+internal fun estimateStreamOutputTokens(text: String): Int = (text.length / 4.0).toInt().coerceAtLeast(0)
+
+internal fun isAppOutputLimitReached(options: ConversationOptions, accumulatedOutput: StringBuilder): Boolean {
+    val limit = options.maxOutputToken ?: return false
+    return estimateStreamOutputTokens(accumulatedOutput.toString()) >= limit
+}
+
+private object AppOutputLimitReachedException : RuntimeException("app-level output limit reached")
 
 internal data class EngineCandidate(
     val backend: String,
@@ -736,7 +779,7 @@ internal class MtpFailureMemory {
         val actualBackend: String,
         val validationVersion: Int,
         val accelerator: String,
-        val maxTokens: Int,
+        val kvCacheCapacityTokens: Int,
         val enableVisionBackend: Boolean
     )
 
@@ -762,7 +805,7 @@ internal class MtpFailureMemory {
         actualBackend: String,
         validationVersion: Int,
         accelerator: String,
-        maxTokens: Int,
+        kvCacheCapacityTokens: Int,
         enableVisionBackend: Boolean
     ): String? = synchronized(lock) {
         val key = FailureKey(
@@ -770,7 +813,7 @@ internal class MtpFailureMemory {
             actualBackend = actualBackend,
             validationVersion = validationVersion,
             accelerator = accelerator,
-            maxTokens = maxTokens,
+            kvCacheCapacityTokens = kvCacheCapacityTokens,
             enableVisionBackend = enableVisionBackend
         )
         val record = failures[key]
@@ -794,7 +837,7 @@ internal class MtpFailureMemory {
         actualBackend: String,
         validationVersion: Int,
         accelerator: String,
-        maxTokens: Int,
+        kvCacheCapacityTokens: Int,
         enableVisionBackend: Boolean,
         fallbackReason: String
     ) = synchronized(lock) {
@@ -803,7 +846,7 @@ internal class MtpFailureMemory {
             actualBackend = actualBackend,
             validationVersion = validationVersion,
             accelerator = accelerator,
-            maxTokens = maxTokens,
+            kvCacheCapacityTokens = kvCacheCapacityTokens,
             enableVisionBackend = enableVisionBackend
         )
         failures[key] = FailureRecord(

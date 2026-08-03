@@ -28,7 +28,7 @@ class FakeLlmEngine : LlmEngine {
             appendLine()
             appendLine("입력: $lastUserMessage")
             appendLine("모델 경로: ${profile.modelPath}")
-            appendLine("설정: max=${profile.maxTokens}, topK=${options.topK}, topP=${options.topP}, temp=${options.temperature}, acc=${profile.accelerator}")
+            appendLine("설정: max=${profile.kvCacheCapacityTokens}, topK=${options.topK}, topP=${options.topP}, temp=${options.temperature}, acc=${profile.accelerator}")
         }
         return GenerationOutcome.Success(text = text, actualBackend = "CPU")
     }

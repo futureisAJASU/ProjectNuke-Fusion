@@ -8,11 +8,13 @@ sealed interface GenerationOutcome {
     /**
      * A successful generation. [text] contains the model's reply (sanitized
      * by the prompt adapter). [actualBackend] reports the backend that the
-     * runtime actually used, when reported by the engine.
+     * runtime actually used, when reported by the engine. [truncated] is true
+     * when the app-level streaming output limit cut the reply short.
      */
     data class Success(
         val text: String,
-        val actualBackend: String? = null
+        val actualBackend: String? = null,
+        val truncated: Boolean = false
     ) : GenerationOutcome
 
     /**

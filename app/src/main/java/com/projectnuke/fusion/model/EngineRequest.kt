@@ -13,10 +13,13 @@ data class RequestedEngineProfile(
     val accelerator: AcceleratorMode,
     val mtpRequested: Boolean,
     /**
-     * KV cache capacity in tokens (mapped to EngineConfig.maxNumTokens), not a
-     * response length limit. Renamed to `kvCacheCapacityTokens` in a later phase.
+     * KV cache capacity in tokens, mapped to EngineConfig.maxNumTokens.
+     * This is the combined input/output token capacity of the KV cache, NOT a
+     * response length limit; the response cap lives in
+     * [ConversationOptions.maxOutputToken]. Changing this value rebuilds the
+     * Engine (the KV cache is allocated at engine creation).
      */
-    val maxTokens: Int,
+    val kvCacheCapacityTokens: Int,
     val enableVisionBackend: Boolean,
 )
 
@@ -51,7 +54,7 @@ fun GenerationSettings.toRequestedEngineProfile(
     modelPath = modelPath,
     accelerator = accelerator,
     mtpRequested = speculativeDecodingEnabled == true,
-    maxTokens = maxTokens.coerceAtLeast(1),
+    kvCacheCapacityTokens = maxTokens.coerceAtLeast(1),
     enableVisionBackend = enableVisionBackend,
 )
 

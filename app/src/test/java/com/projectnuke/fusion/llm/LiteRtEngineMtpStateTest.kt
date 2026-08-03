@@ -14,13 +14,13 @@ class LiteRtEngineMtpStateTest {
         modelPath: String = "m.part",
         accelerator: AcceleratorMode = AcceleratorMode.GPU,
         mtpRequested: Boolean = false,
-        maxTokens: Int = 1024,
+        kvCacheCapacityTokens: Int = 1024,
         enableVisionBackend: Boolean = false
     ) = RequestedEngineProfile(
         modelPath = modelPath,
         accelerator = accelerator,
         mtpRequested = mtpRequested,
-        maxTokens = maxTokens,
+        kvCacheCapacityTokens = kvCacheCapacityTokens,
         enableVisionBackend = enableVisionBackend
     )
 
@@ -38,22 +38,68 @@ class LiteRtEngineMtpStateTest {
     }
 
     @Test
-    fun `cache key distinguishes accelerator maxTokens and vision backend`() {
+    fun `cache key distinguishes accelerator KV capacity and vision backend`() {
         assertEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true))
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true))
         )
         assertNotEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.GPU, maxTokens = 512, mtpRequested = true))
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.GPU, kvCacheCapacityTokens = 512, mtpRequested = true))
         )
         assertNotEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 1024, mtpRequested = true))
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 1024, mtpRequested = true))
         )
         assertNotEquals(
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
-            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true, enableVisionBackend = true))
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, kvCacheCapacityTokens = 512, mtpRequested = true, enableVisionBackend = true))
+        )
+    }
+
+    @Test
+    fun `output limit change never changes the engine identity`() {
+        val profileWithKv4096 = profile(kvCacheCapacityTokens = 4096, mtpRequested = true)
+        val sameProfileAgain = profile(kvCacheCapacityTokens = 4096, mtpRequested = true)
+        val differentKvCapacity = profile(kvCacheCapacityTokens = 8192, mtpRequested = true)
+
+        assertEquals(
+            buildLiteRtEngineCacheKey(profileWithKv4096),
+            buildLiteRtEngineCacheKey(sameProfileAgain)
+        )
+        assertNotEquals(
+            buildLiteRtEngineCacheKey(profileWithKv4096),
+            buildLiteRtEngineCacheKey(differentKvCapacity)
+        )
+
+        // The engine identity is built from the profile only: per-turn options
+        // (including the output limit) are never part of it, so changing them
+        // must never rebuild the engine. The cache-key function literally has
+        // no options input; assert the profile values it does consume.
+        assertNotEquals(
+            buildLiteRtEngineCacheKey(profile(kvCacheCapacityTokens = 4096, mtpRequested = false)),
+            buildLiteRtEngineCacheKey(profile(kvCacheCapacityTokens = 4096, mtpRequested = true))
+        )
+        assertEquals(
+            buildLiteRtEngineCacheKey(profileWithKv4096),
+            buildLiteRtEngineCacheKey(profileWithKv4096.copy(enableVisionBackend = profileWithKv4096.enableVisionBackend))
+        )
+    }
+
+    @Test
+    fun `KV capacity change reloads the engine`() {
+        // Same settings produce the same KV capacity -> same engine identity.
+        val a = com.projectnuke.fusion.model.GenerationSettings(maxTokens = 4096, accelerator = AcceleratorMode.GPU, speculativeDecodingEnabled = true)
+        val b = a.copy(maxTokens = 4096)
+        assertEquals(
+            buildLiteRtEngineCacheKey(a.toRequestedEngineProfile("m", enableVisionBackend = false)),
+            buildLiteRtEngineCacheKey(b.toRequestedEngineProfile("m", enableVisionBackend = false))
+        )
+        // Changing KV capacity changes the engine identity -> engine reload.
+        val c = a.copy(maxTokens = 2048)
+        assertNotEquals(
+            buildLiteRtEngineCacheKey(a.toRequestedEngineProfile("m", enableVisionBackend = false)),
+            buildLiteRtEngineCacheKey(c.toRequestedEngineProfile("m", enableVisionBackend = false))
         )
     }
 
@@ -82,7 +128,7 @@ class LiteRtEngineMtpStateTest {
         assertEquals("model.litertlm", migrated.modelPath)
         assertEquals(AcceleratorMode.GPU, migrated.accelerator)
         assertTrue(migrated.mtpRequested)
-        assertEquals(4096, migrated.maxTokens)
+        assertEquals(4096, migrated.kvCacheCapacityTokens)
         assertTrue(migrated.enableVisionBackend)
     }
 
