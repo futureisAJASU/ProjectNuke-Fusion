@@ -211,9 +211,11 @@ class LiteRtEngineMtpStateTest {
             MtpRuntimeStatus.FALLBACK_DISABLED,
             resolveMtpRuntimeStatus(true, true, false, true, null, true, false)
         )
-        // Flag could not be applied and nothing was attempted or skipped -> broken.
+        // Flag could not be applied and a non-MTP engine later succeeded: Phase 4
+        // returns FALLBACK_DISABLED (not FAILED); FAILED is only set by the
+        // engine when no usable Engine was initialized at all.
         assertEquals(
-            MtpRuntimeStatus.FAILED,
+            MtpRuntimeStatus.FALLBACK_DISABLED,
             resolveMtpRuntimeStatus(true, true, false, false, null, false, false)
         )
     }

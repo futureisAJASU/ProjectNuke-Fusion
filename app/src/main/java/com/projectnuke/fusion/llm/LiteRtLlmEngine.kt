@@ -742,6 +742,14 @@ public data class EngineSelectionRuntime(
  * value that becomes reachable only if LiteRT-LM later exposes positive
  * execution evidence (e.g. drafted/accepted-token counters); absent such an
  * API it is deliberately unreachable from this resolver.
+ *
+ * Phase 4: [MtpRuntimeStatus.FAILED] is reserved for the no-usable-Engine case
+ * (set explicitly in [LiteRtLlmEngine.getOrCreateEngine] before the throw). This
+ * resolver is reached only after a usable Engine initialized, so any "MTP was
+ * requested but a non-MTP engine succeeded" path returns
+ * [MtpRuntimeStatus.FALLBACK_DISABLED] — including the flag-settlement-failed
+ * path previously encoded as FAILED. The flag-settle-failed event carries the
+ * [FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED] reason.
  */
 internal fun resolveMtpRuntimeStatus(
     mtpRequested: Boolean,
@@ -757,7 +765,7 @@ internal fun resolveMtpRuntimeStatus(
     selectedMtpEnabled && mtpFlagAppliedForMtp -> MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
     mtpSkippedByMemory -> MtpRuntimeStatus.FALLBACK_DISABLED
     mtpAttempted -> MtpRuntimeStatus.FALLBACK_DISABLED
-    else -> MtpRuntimeStatus.FAILED
+    else -> MtpRuntimeStatus.FALLBACK_DISABLED
 }
 
 internal fun resolveMtpFallbackReason(
