@@ -1,0 +1,75 @@
+package com.projectnuke.fusion.model
+
+/**
+ * Engine-creation-time settings for a LiteRT-LM Engine.
+ *
+ * Every field here decides how the native Engine is built (backend selection,
+ * KV cache capacity, speculative-decoding flag, vision backend). Changing any
+ * field rebuilds the Engine; changing none of them reuses the loaded Engine.
+ * Per-turn sampling/limits live in [ConversationOptions] instead.
+ */
+data class RequestedEngineProfile(
+    val modelPath: String,
+    val accelerator: AcceleratorMode,
+    val mtpRequested: Boolean,
+    /**
+     * KV cache capacity in tokens (mapped to EngineConfig.maxNumTokens), not a
+     * response length limit. Renamed to `kvCacheCapacityTokens` in a later phase.
+     */
+    val maxTokens: Int,
+    val enableVisionBackend: Boolean,
+)
+
+/**
+ * Per-turn generation options for a single Conversation.
+ *
+ * Changing any field never rebuilds the Engine; each request creates a new
+ * Conversation with these options applied as the SamplerConfig.
+ */
+data class ConversationOptions(
+    /**
+     * Explicit app-level streaming output limit in tokens. The pinned
+     * litertlm-android 0.14.0 API has no ConversationConfig.maxOutputToken,
+     * so enforcement is implemented by the caller when this is non-null.
+     */
+    val maxOutputToken: Int? = null,
+    val temperature: Float = 1.0f,
+    val topK: Int = 64,
+    val topP: Float = 0.95f,
+    val seed: Int? = null,
+    /**
+     * Prompt-only decoration until the GENERATION_SETTINGS block is removed
+     * from the system instruction; the LiteRT-LM API does not expose a
+     * reasoning budget config.
+     */
+    val reasoningBudgetTokens: Int = 512,
+)
+
+/**
+ * Backward-compatible migration: builds the engine-creation profile from a
+ * [GenerationSettings] value. [modelPath] is the path as passed by the caller;
+ * the engine resolves the runnable model before building its cache identity.
+ */
+fun GenerationSettings.toRequestedEngineProfile(
+    modelPath: String,
+    enableVisionBackend: Boolean
+): RequestedEngineProfile = RequestedEngineProfile(
+    modelPath = modelPath,
+    accelerator = accelerator,
+    mtpRequested = speculativeDecodingEnabled == true,
+    maxTokens = maxTokens.coerceAtLeast(1),
+    enableVisionBackend = enableVisionBackend,
+)
+
+/**
+ * Backward-compatible migration: builds the per-turn options from a
+ * [GenerationSettings] value.
+ */
+fun GenerationSettings.toConversationOptions(): ConversationOptions = ConversationOptions(
+    maxOutputToken = maxTokens.coerceAtLeast(1),
+    temperature = temperature,
+    topK = topK,
+    topP = topP,
+    seed = null,
+    reasoningBudgetTokens = reasoningBudgetTokens,
+)

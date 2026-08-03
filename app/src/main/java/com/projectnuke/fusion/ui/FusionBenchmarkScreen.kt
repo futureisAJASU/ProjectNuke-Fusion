@@ -46,6 +46,8 @@ import com.projectnuke.fusion.llm.MtpRuntimeStatus
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.toConversationOptions
+import com.projectnuke.fusion.model.toRequestedEngineProfile
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.MtpPolicyProduction
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
@@ -284,8 +286,11 @@ private suspend fun runBenchmark(
             onStatus("응답을 생성하는 중입니다.")
             val outcome = engine.generateStreaming(
                 messages = listOf(ChatMessage("user", FusionBenchmarkPrompt)),
-                modelPath = snapshot.modelPath.orEmpty(),
-                settings = snapshot.settings,
+                profile = snapshot.settings.toRequestedEngineProfile(
+                    modelPath = snapshot.modelPath.orEmpty(),
+                    enableVisionBackend = false
+                ),
+                options = snapshot.settings.toConversationOptions(),
                 onToken = { token ->
                     if (firstTokenMs == null && token.isNotEmpty()) {
                         firstTokenMs = SystemClock.elapsedRealtime() - start

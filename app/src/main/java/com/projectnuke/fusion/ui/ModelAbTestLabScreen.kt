@@ -47,6 +47,8 @@ import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.toConversationOptions
+import com.projectnuke.fusion.model.toRequestedEngineProfile
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
 import com.projectnuke.fusion.modelzoo.FusionModelProfiles
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
@@ -566,8 +568,11 @@ private suspend fun runSingleAbTarget(
     var firstTokenLatencyMs: Long? = null
     val outcome = engine.generateStreaming(
         messages = listOf(ChatMessage("user", input)),
-        modelPath = target.model.path,
-        settings = resolvedSettings,
+        profile = resolvedSettings.toRequestedEngineProfile(
+            modelPath = target.model.path,
+            enableVisionBackend = false
+        ),
+        options = resolvedSettings.toConversationOptions(),
         onToken = { token ->
             if (firstTokenLatencyMs == null && token.isNotEmpty()) {
                 firstTokenLatencyMs = SystemClock.elapsedRealtime() - startedAt

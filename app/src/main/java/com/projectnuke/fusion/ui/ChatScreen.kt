@@ -134,6 +134,8 @@ import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.toConversationOptions
+import com.projectnuke.fusion.model.toRequestedEngineProfile
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibility
 import com.projectnuke.fusion.modelzoo.FusionModelCompatibilityReport
@@ -1221,6 +1223,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             }
                             val started = SystemClock.elapsedRealtime()
                             val firstToken = java.util.concurrent.atomic.AtomicLong(-1L)
+                            val engineProfile = request.settings.toRequestedEngineProfile(
+                                modelPath = modelPath,
+                                enableVisionBackend = isImageGeneration
+                            )
+                            val conversationOptions = request.settings.toConversationOptions()
                             val outcome = FusionRuntimeLock.withChatGeneration {
                                 generateWithLiteRtRecovery(
                                     engine = engine,
@@ -1232,7 +1239,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingText = "") }
                                             try {
                                                 chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(generationStatus = "이미지 분석 중...") }
-                                                val result = engine.generateMultimodalStreaming(messagesForGeneration, modelPath, request.settings, imageAttachments.map { it.localPath }) { token ->
+                                                val result = engine.generateMultimodalStreaming(messagesForGeneration, engineProfile, conversationOptions, imageAttachments.map { it.localPath }) { token ->
                                                     if (token.isNotEmpty()) firstToken.compareAndSet(-1L, SystemClock.elapsedRealtime() - started)
                                                     coalescer.append(token)
                                                 }
@@ -1241,14 +1248,14 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             } catch (e: Exception) { coalescer.abort(); throw e }
                                         } else if (isImageGeneration) {
                                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(generationStatus = "이미지 분석 중...") }
-                                            engine.generateMultimodalStreaming(messagesForGeneration, modelPath, request.settings, imageAttachments.map { it.localPath }) { token ->
+                                            engine.generateMultimodalStreaming(messagesForGeneration, engineProfile, conversationOptions, imageAttachments.map { it.localPath }) { token ->
                                                 if (token.isNotEmpty()) firstToken.compareAndSet(-1L, SystemClock.elapsedRealtime() - started)
                                             }
                                         } else if (!isReasoningEnabled) {
                                             val coalescer = TokenCoalescer(requestScope, shouldPublish = { chatViewModel.registry.isActive(request.conversationId, request.requestId) }, onPublish = { text -> chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingText = text) } })
                                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingText = "") }
                                             try {
-                                                val result = engine.generateStreaming(messagesForGeneration, modelPath, request.settings) { token ->
+                                                val result = engine.generateStreaming(messagesForGeneration, engineProfile, conversationOptions) { token ->
                                                     if (token.isNotEmpty()) firstToken.compareAndSet(-1L, SystemClock.elapsedRealtime() - started)
                                                     coalescer.append(token)
                                                 }
@@ -1256,7 +1263,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 result
                                             } catch (e: Exception) { coalescer.abort(); throw e }
                                         } else {
-                                            engine.generate(messagesForGeneration, modelPath, request.settings)
+                                            engine.generate(messagesForGeneration, engineProfile, conversationOptions)
                                         }
                                     }
                                 )
@@ -1420,6 +1427,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             }
                             val started = SystemClock.elapsedRealtime()
                             val firstToken = java.util.concurrent.atomic.AtomicLong(-1L)
+                            val engineProfile = request.settings.toRequestedEngineProfile(modelPath, enableVisionBackend = false)
+                            val conversationOptions = request.settings.toConversationOptions()
                             val outcome = FusionRuntimeLock.withChatGeneration {
                                 generateWithLiteRtRecovery(
                                     engine = engine,
@@ -1430,7 +1439,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             val coalescer = TokenCoalescer(requestScope, shouldPublish = { chatViewModel.registry.isActive(request.conversationId, request.requestId) }, onPublish = { text -> chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingText = text) } })
                                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingText = "") }
                                             try {
-                                                val result = engine.generateStreaming(messagesForGeneration, modelPath, request.settings) { token ->
+                                                val result = engine.generateStreaming(messagesForGeneration, engineProfile, conversationOptions) { token ->
                                                     if (token.isNotEmpty()) firstToken.compareAndSet(-1L, SystemClock.elapsedRealtime() - started)
                                                     coalescer.append(token)
                                                 }
@@ -1438,7 +1447,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 result
                                             } catch (e: Exception) { coalescer.abort(); throw e }
                                         } else {
-                                            engine.generate(messagesForGeneration, modelPath, request.settings)
+                                            engine.generate(messagesForGeneration, engineProfile, conversationOptions)
                                         }
                                     }
                                 )
@@ -2145,8 +2154,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 generateOnce = {
                                     engine.generate(
                                         messages = sessionMessages,
-                                        modelPath = activeModelPath,
-                                        settings = request.settings
+                                        profile = request.settings.toRequestedEngineProfile(activeModelPath, enableVisionBackend = false),
+                                        options = request.settings.toConversationOptions()
                                     )
                                 }
                             )
@@ -3177,6 +3186,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             // === GENERATION ===
                                             val generationStartMs = SystemClock.elapsedRealtime()
                                             val firstTokenLatency = java.util.concurrent.atomic.AtomicLong(-1L)
+                                            val engineProfile = requestSettings.toRequestedEngineProfile(
+                                                modelPath = activeModelPath!!,
+                                                enableVisionBackend = snapshot.multimodalImagePaths.isNotEmpty()
+                                            )
+                                            val conversationOptions = requestSettings.toConversationOptions()
 
                                             val rawOutcome = FusionRuntimeLock.withChatGeneration {
                                                 generateWithLiteRtRecovery(
@@ -3200,8 +3214,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             try {
                                                                 val outcome = engine.generateMultimodalStreaming(
                                                                     messages = gatedMessages,
-                                                                    modelPath = activeModelPath!!,
-                                                                    settings = requestSettings,
+                                                                    profile = engineProfile,
+                                                                    options = conversationOptions,
                                                                     imagePaths = snapshot.multimodalImagePaths,
                                                                     onToken = { token ->
                                                                         if (token.isNotEmpty()) firstTokenLatency.compareAndSet(-1L, SystemClock.elapsedRealtime() - generationStartMs)
@@ -3222,8 +3236,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 중...") }
                                                             engine.generateMultimodalStreaming(
                                                                 messages = gatedMessages,
-                                                                modelPath = activeModelPath!!,
-                                                                settings = requestSettings,
+                                                                profile = engineProfile,
+                                                                options = conversationOptions,
                                                                 imagePaths = snapshot.multimodalImagePaths,
                                                                 onToken = { token ->
                                                                     if (token.isNotEmpty()) firstTokenLatency.compareAndSet(-1L, SystemClock.elapsedRealtime() - generationStartMs)
@@ -3231,7 +3245,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             )
                                                         } else if (snapshot.reasoningEnabled) {
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "더 깊게 생각하는 중...") }
-                                                            engine.generate(messages = gatedMessages, modelPath = activeModelPath!!, settings = requestSettings)
+                                                            engine.generate(messages = gatedMessages, profile = engineProfile, options = conversationOptions)
                                                         } else {
                                                             val coalescer = TokenCoalescer(
                                                                 scope = requestScope,
@@ -3245,8 +3259,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             try {
                                                                 val outcome = engine.generateStreaming(
                                                                     messages = gatedMessages,
-                                                                    modelPath = activeModelPath!!,
-                                                                    settings = requestSettings,
+                                                                    profile = engineProfile,
+                                                                    options = conversationOptions,
                                                                     onToken = { token ->
                                                                         if (token.isNotEmpty()) firstTokenLatency.compareAndSet(-1L, SystemClock.elapsedRealtime() - generationStartMs)
                                                                         coalescer.append(token)
@@ -9466,11 +9480,19 @@ private fun AdvancedSettingsDialog(
                             onClick = { accelerator = AcceleratorMode.CPU }
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = "가속기를 변경하면 모델을 다시 불러옵니다.",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
                 }
 
                 SettingSwitchRow(
                     title = "MTP 가속",
-                    subtitle = "지원되는 모델에서 speculative decoding으로 출력 속도를 높입니다.",
+                    subtitle = "지원되는 모델에서 speculative decoding으로 출력 속도를 높입니다. 가속기 또는 MTP를 변경하면 모델을 다시 불러옵니다.",
                     checked = if (speculativeDecodingTouched) {
                         speculativeDecodingEnabled
                     } else {

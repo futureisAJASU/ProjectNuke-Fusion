@@ -1,15 +1,16 @@
 package com.projectnuke.fusion.llm
 
 import com.projectnuke.fusion.model.ChatMessage
-import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.ConversationOptions
+import com.projectnuke.fusion.model.RequestedEngineProfile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
 class FakeLlmEngine : LlmEngine {
     override suspend fun generate(
         messages: List<ChatMessage>,
-        modelPath: String,
-        settings: GenerationSettings
+        profile: RequestedEngineProfile,
+        options: ConversationOptions
     ): GenerationOutcome {
         try {
             delay(500)
@@ -26,20 +27,20 @@ class FakeLlmEngine : LlmEngine {
             appendLine("FakeLlmEngine 테스트 응답입니다.")
             appendLine()
             appendLine("입력: $lastUserMessage")
-            appendLine("모델 경로: $modelPath")
-            appendLine("설정: max=${settings.maxTokens}, topK=${settings.topK}, topP=${settings.topP}, temp=${settings.temperature}, acc=${settings.accelerator}")
+            appendLine("모델 경로: ${profile.modelPath}")
+            appendLine("설정: max=${profile.maxTokens}, topK=${options.topK}, topP=${options.topP}, temp=${options.temperature}, acc=${profile.accelerator}")
         }
         return GenerationOutcome.Success(text = text, actualBackend = "CPU")
     }
 
     override suspend fun generateStreaming(
         messages: List<ChatMessage>,
-        modelPath: String,
-        settings: GenerationSettings,
+        profile: RequestedEngineProfile,
+        options: ConversationOptions,
         onToken: (String) -> Unit
     ): GenerationOutcome {
         try {
-            val outcome = generate(messages, modelPath, settings)
+            val outcome = generate(messages, profile, options)
             if (outcome is GenerationOutcome.Success) {
                 outcome.text.split(" ").forEach { token ->
                     onToken("$token ")
@@ -54,8 +55,8 @@ class FakeLlmEngine : LlmEngine {
 
     override suspend fun generateMultimodalStreaming(
         messages: List<ChatMessage>,
-        modelPath: String,
-        settings: GenerationSettings,
+        profile: RequestedEngineProfile,
+        options: ConversationOptions,
         imagePaths: List<String>,
         onToken: (String) -> Unit
     ): GenerationOutcome {
@@ -63,7 +64,7 @@ class FakeLlmEngine : LlmEngine {
             val text = buildString {
                 appendLine("FakeLlmEngine image test response.")
                 appendLine("Images: ${imagePaths.joinToString()}")
-                appendLine("Model: $modelPath")
+                appendLine("Model: ${profile.modelPath}")
             }
             text.split(" ").forEach { token ->
                 onToken("$token ")

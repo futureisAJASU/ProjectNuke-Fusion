@@ -1,43 +1,59 @@
 package com.projectnuke.fusion.llm
 
 import com.projectnuke.fusion.model.AcceleratorMode
+import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.RequestedEngineProfile
+import com.projectnuke.fusion.model.toRequestedEngineProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LiteRtEngineMtpStateTest {
+    private fun profile(
+        modelPath: String = "m.part",
+        accelerator: AcceleratorMode = AcceleratorMode.GPU,
+        mtpRequested: Boolean = false,
+        maxTokens: Int = 1024,
+        enableVisionBackend: Boolean = false
+    ) = RequestedEngineProfile(
+        modelPath = modelPath,
+        accelerator = accelerator,
+        mtpRequested = mtpRequested,
+        maxTokens = maxTokens,
+        enableVisionBackend = enableVisionBackend
+    )
+
     @Test
     fun `cache key records effective MTP state so fallback is never cached as MTP`() {
-        val base = "m.part"
-        val keyWithMtp = buildLiteRtEngineCacheKey(base, AcceleratorMode.GPU, 1024, mtpEnabled = true, enableVisionBackend = false)
-        val keyWithoutMtp = buildLiteRtEngineCacheKey(base, AcceleratorMode.GPU, 1024, mtpEnabled = false, enableVisionBackend = false)
+        val keyWithMtp = buildLiteRtEngineCacheKey(profile(mtpRequested = true))
+        val keyWithoutMtp = buildLiteRtEngineCacheKey(profile(mtpRequested = false))
         assertNotEquals(keyWithMtp, keyWithoutMtp)
         assertTrue(keyWithMtp.contains("|true|"))
         assertTrue(keyWithoutMtp.contains("|false|"))
         assertEquals(
-            buildLiteRtEngineCacheKey(base, AcceleratorMode.GPU, 1024, mtpEnabled = false, enableVisionBackend = false),
-            buildLiteRtEngineCacheKey(base, AcceleratorMode.GPU, 1024, mtpEnabled = false, enableVisionBackend = false)
+            buildLiteRtEngineCacheKey(profile(mtpRequested = false)),
+            buildLiteRtEngineCacheKey(profile(mtpRequested = false))
         )
     }
 
     @Test
     fun `cache key distinguishes accelerator maxTokens and vision backend`() {
         assertEquals(
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.CPU, 512, mtpEnabled = true, enableVisionBackend = false),
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.CPU, 512, mtpEnabled = true, enableVisionBackend = false)
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true))
         )
         assertNotEquals(
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.CPU, 512, mtpEnabled = true, enableVisionBackend = false),
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.GPU, 512, mtpEnabled = true, enableVisionBackend = false)
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.GPU, maxTokens = 512, mtpRequested = true))
         )
         assertNotEquals(
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.CPU, 512, mtpEnabled = true, enableVisionBackend = false),
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.CPU, 1024, mtpEnabled = true, enableVisionBackend = false)
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 1024, mtpRequested = true))
         )
         assertNotEquals(
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.CPU, 512, mtpEnabled = true, enableVisionBackend = false),
-            buildLiteRtEngineCacheKey("m", AcceleratorMode.CPU, 512, mtpEnabled = true, enableVisionBackend = true)
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true)),
+            buildLiteRtEngineCacheKey(profile(accelerator = AcceleratorMode.CPU, maxTokens = 512, mtpRequested = true, enableVisionBackend = true))
         )
     }
 
@@ -53,6 +69,21 @@ class LiteRtEngineMtpStateTest {
             MtpRuntimeStatus.FAILED
         )
         assertEquals(expected, MtpRuntimeStatus.entries.toSet())
+    }
+
+    @Test
+    fun `GenerationSettings migration carries MTP backend KV capacity and vision flags into the profile`() {
+        val settings = GenerationSettings(
+            maxTokens = 4096,
+            accelerator = AcceleratorMode.GPU,
+            speculativeDecodingEnabled = true
+        )
+        val migrated = settings.toRequestedEngineProfile(modelPath = "model.litertlm", enableVisionBackend = true)
+        assertEquals("model.litertlm", migrated.modelPath)
+        assertEquals(AcceleratorMode.GPU, migrated.accelerator)
+        assertTrue(migrated.mtpRequested)
+        assertEquals(4096, migrated.maxTokens)
+        assertTrue(migrated.enableVisionBackend)
     }
 
     @Test

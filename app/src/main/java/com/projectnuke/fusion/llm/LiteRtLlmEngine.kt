@@ -14,7 +14,8 @@ import com.google.ai.edge.litertlm.LogSeverity
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
-import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.ConversationOptions
+import com.projectnuke.fusion.model.RequestedEngineProfile
 import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
 import com.projectnuke.fusion.modelzoo.LiteRtLmPackageValidator
 import com.projectnuke.fusion.util.AttachmentStorageManager
@@ -52,39 +53,36 @@ class LiteRtLlmEngine(
 
     override suspend fun generate(
         messages: List<ChatMessage>,
-        modelPath: String,
-        settings: GenerationSettings
+        profile: RequestedEngineProfile,
+        options: ConversationOptions
     ): GenerationOutcome {
         return generateStreaming(
             messages = messages,
-            modelPath = modelPath,
-            settings = settings,
+            profile = profile,
+            options = options,
             onToken = {}
         )
     }
 
     override suspend fun generateStreaming(
         messages: List<ChatMessage>,
-        modelPath: String,
-        settings: GenerationSettings,
+        profile: RequestedEngineProfile,
+        options: ConversationOptions,
         onToken: (String) -> Unit
     ): GenerationOutcome {
         return withContext(Dispatchers.IO) {
-            val modelFile = ManagedModelPathPolicy.resolveRunnableModel(context, modelPath)
+            val modelFile = ManagedModelPathPolicy.resolveRunnableModel(context, profile.modelPath)
             if (modelFile == null) {
-                Log.e("FusionEngine", "Selected model path is missing or unmanaged: ${File(modelPath).name}")
+                Log.e("FusionEngine", "Selected model path is missing or unmanaged: ${File(profile.modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
                     message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
                 )
             }
 
+            val resolvedProfile = profile.copy(modelPath = modelFile.absolutePath)
             val engine = try {
-                getOrCreateEngine(
-                    modelPath = modelFile.absolutePath,
-                    settings = settings,
-                    enableVisionBackend = false
-                )
+                getOrCreateEngine(resolvedProfile)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: OutOfMemoryError) {
@@ -111,23 +109,18 @@ class LiteRtLlmEngine(
                 )
             }
             logGenerationSettings(
-                modelPath = modelFile.absolutePath,
-                settings = settings,
-                enableVisionBackend = false
+                profile = resolvedProfile,
+                options = options
             )
 
             val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
             val adaptedMessages = promptAdapter.buildMessages(messages)
-            val systemText = buildSystemInstruction(adaptedMessages, settings)
+            val systemText = buildSystemInstruction(adaptedMessages, resolvedProfile, options)
             val promptText = buildPrompt(adaptedMessages)
 
             val conversationConfig = ConversationConfig(
                 systemInstruction = Contents.of(systemText),
-                samplerConfig = SamplerConfig(
-                    topK = settings.topK.coerceAtLeast(1),
-                    topP = settings.topP.coerceIn(0f, 1f).toDouble(),
-                    temperature = settings.temperature.coerceAtLeast(0f).toDouble()
-                )
+                samplerConfig = buildSamplerConfig(options)
             )
 
             val output = StringBuilder()
@@ -159,15 +152,15 @@ class LiteRtLlmEngine(
 
     override suspend fun generateMultimodalStreaming(
         messages: List<ChatMessage>,
-        modelPath: String,
-        settings: GenerationSettings,
+        profile: RequestedEngineProfile,
+        options: ConversationOptions,
         imagePaths: List<String>,
         onToken: (String) -> Unit
     ): GenerationOutcome {
         return withContext(Dispatchers.IO) {
-            val modelFile = ManagedModelPathPolicy.resolveRunnableModel(context, modelPath)
+            val modelFile = ManagedModelPathPolicy.resolveRunnableModel(context, profile.modelPath)
             if (modelFile == null) {
-                Log.e("FusionEngine", "Selected multimodal model path is missing or unmanaged: ${File(modelPath).name}")
+                Log.e("FusionEngine", "Selected multimodal model path is missing or unmanaged: ${File(profile.modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
                     message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
@@ -184,12 +177,9 @@ class LiteRtLlmEngine(
                 )
             }
 
+            val resolvedProfile = profile.copy(modelPath = modelFile.absolutePath)
             val engine = try {
-                getOrCreateEngine(
-                    modelPath = modelFile.absolutePath,
-                    settings = settings,
-                    enableVisionBackend = true
-                )
+                getOrCreateEngine(resolvedProfile)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: OutOfMemoryError) {
@@ -222,23 +212,18 @@ class LiteRtLlmEngine(
                 )
             }
             logGenerationSettings(
-                modelPath = modelFile.absolutePath,
-                settings = settings,
-                enableVisionBackend = true
+                profile = resolvedProfile,
+                options = options
             )
 
             val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
             val adaptedMessages = promptAdapter.buildMessages(messages)
-            val systemText = buildSystemInstruction(adaptedMessages, settings)
+            val systemText = buildSystemInstruction(adaptedMessages, resolvedProfile, options)
             val promptText = buildPrompt(adaptedMessages)
 
             val conversationConfig = ConversationConfig(
                 systemInstruction = Contents.of(systemText),
-                samplerConfig = SamplerConfig(
-                    topK = settings.topK.coerceAtLeast(1),
-                    topP = settings.topP.coerceIn(0f, 1f).toDouble(),
-                    temperature = settings.temperature.coerceAtLeast(0f).toDouble()
-                )
+                samplerConfig = buildSamplerConfig(options)
             )
 
             val contentParts = buildList<Content> {
@@ -309,28 +294,24 @@ class LiteRtLlmEngine(
         return GenerationOutcome.Failure(kind = kind, message = message)
     }
 
-    private fun getOrCreateEngine(
-        modelPath: String,
-        settings: GenerationSettings,
-        enableVisionBackend: Boolean
-    ): Engine {
-        val mtpRequested = settings.speculativeDecodingEnabled == true
-        val mtpSupported = isSpeculativeDecodingSupportedModel(modelPath)
-        val maxNumTokens = settings.maxTokens.coerceAtLeast(1)
+    private fun getOrCreateEngine(profile: RequestedEngineProfile): Engine {
+        val mtpRequested = profile.mtpRequested
+        val mtpSupported = isSpeculativeDecodingSupportedModel(profile.modelPath)
+        val maxNumTokens = profile.maxTokens.coerceAtLeast(1)
 
         // Check failure memory before attempting MTP
         var effectiveMtpSupported = mtpSupported
         var mtpSkipReason: String? = null
         if (mtpRequested && mtpSupported) {
-            val validation = LiteRtLmPackageValidator.validate(File(modelPath))
+            val validation = LiteRtLmPackageValidator.validate(File(profile.modelPath))
             val validationVersion = validation.getOrNull()?.validationVersion ?: 0
             mtpSkipReason = mtpFailureMemory.shouldSkipMtp(
-                modelPath = modelPath,
-                actualBackend = settings.accelerator.name, // Use requested accelerator as proxy for actual backend
+                modelPath = profile.modelPath,
+                actualBackend = profile.accelerator.name, // Use requested accelerator as proxy for actual backend
                 validationVersion = validationVersion,
-                accelerator = settings.accelerator.name,
-                maxTokens = settings.maxTokens,
-                enableVisionBackend = enableVisionBackend
+                accelerator = profile.accelerator.name,
+                maxTokens = profile.maxTokens,
+                enableVisionBackend = profile.enableVisionBackend
             )
             if (mtpSkipReason != null) {
                 effectiveMtpSupported = false
@@ -339,18 +320,13 @@ class LiteRtLlmEngine(
         }
 
         val ladder = buildEngineCandidateLadder(
-            accelerator = settings.accelerator,
+            accelerator = profile.accelerator,
             mtpRequested = mtpRequested,
             mtpSupported = effectiveMtpSupported
         )
         val preferredBackendName = ladder.first().backend
-        val key = buildLiteRtEngineCacheKey(
-            modelPath = modelPath,
-            accelerator = settings.accelerator,
-            maxTokens = settings.maxTokens,
-            mtpEnabled = ladder.first().mtpEnabled,
-            enableVisionBackend = enableVisionBackend
-        )
+        val requestedKeyProfile = profile.copy(mtpRequested = ladder.first().mtpEnabled)
+        val key = buildLiteRtEngineCacheKey(requestedKeyProfile)
 
         val currentEngine = engine
         if (currentEngine != null && loadedKey == key) {
@@ -358,8 +334,8 @@ class LiteRtLlmEngine(
             Log.i("FusionLiteRT", "MTP requested: $mtpRequested (cached engine reused)")
             Log.i("FusionLiteRT", "MTP status: $lastMtpStatus")
             Log.i("FusionLiteRT", "Backend: $preferredBackendName")
-            Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
-            Log.i("FusionLiteRT", "Model path: ${File(modelPath).name}")
+            Log.i("FusionLiteRT", "Vision backend requested: ${profile.enableVisionBackend}")
+            Log.i("FusionLiteRT", "Model path: ${File(profile.modelPath).name}")
             return currentEngine
         }
 
@@ -369,8 +345,8 @@ class LiteRtLlmEngine(
 
         Log.i("FusionLiteRT", "MTP requested: $mtpRequested")
         Log.i("FusionLiteRT", "Backend: $preferredBackendName")
-        Log.i("FusionLiteRT", "Vision backend requested: $enableVisionBackend")
-        Log.i("FusionLiteRT", "Model path: ${File(modelPath).name}")
+        Log.i("FusionLiteRT", "Vision backend requested: ${profile.enableVisionBackend}")
+        Log.i("FusionLiteRT", "Model path: ${File(profile.modelPath).name}")
         if (mtpRequested && !mtpSupported) {
             lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
             Log.i("FusionLiteRT", "MTP unsupported model/runtime")
@@ -390,14 +366,14 @@ class LiteRtLlmEngine(
         var failure: Throwable? = null
         val selection = selectFirstWorkingEngine(
             ladder = ladder,
-            enableVisionBackend = enableVisionBackend,
+            enableVisionBackend = profile.enableVisionBackend,
             configureFlag = { configureSpeculativeDecodingFlag(it) },
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 val backend = if (backendName == "CPU") Backend.CPU() else Backend.GPU()
                 createEngine(
-                    modelPath = modelPath,
+                    modelPath = profile.modelPath,
                     backend = backend,
-                    visionBackend = if (enableVisionBackend) {
+                    visionBackend = if (profile.enableVisionBackend) {
                         if (visionBackendIsCpu) Backend.CPU() else backend
                     } else {
                         null
@@ -450,21 +426,21 @@ class LiteRtLlmEngine(
 
         // Record failure if MTP was requested but fell back
         if (mtpRequested && mtpSupported && !selectedMtpEnabled && fallbackReason != null) {
-            val validation = LiteRtLmPackageValidator.validate(File(modelPath))
+            val validation = LiteRtLmPackageValidator.validate(File(profile.modelPath))
             val validationVersion = validation.getOrNull()?.validationVersion ?: 0
             mtpFailureMemory.recordFailure(
-                modelPath = modelPath,
+                modelPath = profile.modelPath,
                 actualBackend = actualBackend!!,
                 validationVersion = validationVersion,
-                accelerator = settings.accelerator.name,
-                maxTokens = settings.maxTokens,
-                enableVisionBackend = enableVisionBackend,
+                accelerator = profile.accelerator.name,
+                maxTokens = profile.maxTokens,
+                enableVisionBackend = profile.enableVisionBackend,
                 fallbackReason = fallbackReason
             )
         }
 
         cachedRuntimeSelection = EngineSelectionRuntime(
-            requestedAccelerator = settings.accelerator.name,
+            requestedAccelerator = profile.accelerator.name,
             actualTextBackend = actualBackend!!,
             actualVisionBackend = actualVisionBackend,
             requestedMtp = mtpRequested,
@@ -473,13 +449,7 @@ class LiteRtLlmEngine(
         )
 
         engine = resolvedEngine
-        loadedKey = buildLiteRtEngineCacheKey(
-            modelPath = modelPath,
-            accelerator = settings.accelerator,
-            maxTokens = settings.maxTokens,
-            mtpEnabled = selectedMtpEnabled,
-            enableVisionBackend = enableVisionBackend
-        )
+        loadedKey = buildLiteRtEngineCacheKey(profile.copy(mtpRequested = selectedMtpEnabled))
 
         return resolvedEngine
     }
@@ -504,9 +474,21 @@ class LiteRtLlmEngine(
         }
     }
 
+    private fun buildSamplerConfig(options: ConversationOptions): SamplerConfig {
+        val topK = options.topK.coerceAtLeast(1)
+        val topP = options.topP.coerceIn(0f, 1f).toDouble()
+        val temperature = options.temperature.coerceAtLeast(0f).toDouble()
+        return if (options.seed != null) {
+            SamplerConfig(topK, topP, temperature, options.seed)
+        } else {
+            SamplerConfig(topK, topP, temperature)
+        }
+    }
+
     private fun buildSystemInstruction(
         messages: List<ChatMessage>,
-        settings: GenerationSettings
+        profile: RequestedEngineProfile,
+        options: ConversationOptions
     ): String {
         val systemMessages = messages
             .filter { it.role == "system" }
@@ -519,13 +501,13 @@ class LiteRtLlmEngine(
             appendLine("추론이나 추정은 그 사실을 명확히 구분합니다.")
             appendLine()
             appendLine("GENERATION_SETTINGS")
-            appendLine("maxTokens=${settings.maxTokens}")
-            appendLine("topK=${settings.topK}")
-            appendLine("topP=${settings.topP}")
-            appendLine("temperature=${settings.temperature}")
-            appendLine("accelerator=${settings.accelerator.name}")
-            appendLine("speculativeDecoding=${settings.speculativeDecodingEnabled == true}")
-            appendLine("reasoningBudgetTokens=${settings.reasoningBudgetTokens} (prompt-only; LiteRT-LM API does not expose a reasoning budget config here)")
+            appendLine("maxTokens=${profile.maxTokens}")
+            appendLine("topK=${options.topK}")
+            appendLine("topP=${options.topP}")
+            appendLine("temperature=${options.temperature}")
+            appendLine("accelerator=${profile.accelerator.name}")
+            appendLine("speculativeDecoding=${profile.mtpRequested}")
+            appendLine("reasoningBudgetTokens=${options.reasoningBudgetTokens} (prompt-only; LiteRT-LM API does not expose a reasoning budget config here)")
 
             if (systemMessages.isNotBlank()) {
                 appendLine()
@@ -535,23 +517,22 @@ class LiteRtLlmEngine(
     }
 
     private fun logGenerationSettings(
-        modelPath: String,
-        settings: GenerationSettings,
-        enableVisionBackend: Boolean
+        profile: RequestedEngineProfile,
+        options: ConversationOptions
     ) {
         Log.i(
             "FusionLiteRT",
             buildString {
                 appendLine("Generation settings before request")
-                appendLine("modelPath=${File(modelPath).name}")
-                appendLine("accelerator=${settings.accelerator.name} (runtime EngineConfig.backend)")
-                appendLine("maxTokens=${settings.maxTokens} (runtime EngineConfig.maxNumTokens)")
-                appendLine("topK=${settings.topK} (runtime SamplerConfig.topK)")
-                appendLine("topP=${settings.topP} (runtime SamplerConfig.topP)")
-                appendLine("temperature=${settings.temperature} (runtime SamplerConfig.temperature)")
-                appendLine("reasoningBudgetTokens=${settings.reasoningBudgetTokens} (prompt-only unsupported by current LiteRT-LM API)")
-                appendLine("MTP requested=${settings.speculativeDecodingEnabled == true} (runtime ExperimentalFlags.enableSpeculativeDecoding)")
-                appendLine("visionBackend=$enableVisionBackend (runtime EngineConfig.visionBackend when true)")
+                appendLine("modelPath=${File(profile.modelPath).name}")
+                appendLine("accelerator=${profile.accelerator.name} (runtime EngineConfig.backend)")
+                appendLine("maxTokens=${profile.maxTokens} (runtime EngineConfig.maxNumTokens)")
+                appendLine("topK=${options.topK} (runtime SamplerConfig.topK)")
+                appendLine("topP=${options.topP} (runtime SamplerConfig.topP)")
+                appendLine("temperature=${options.temperature} (runtime SamplerConfig.temperature)")
+                appendLine("reasoningBudgetTokens=${options.reasoningBudgetTokens} (prompt-only unsupported by current LiteRT-LM API)")
+                appendLine("MTP requested=${profile.mtpRequested} (runtime ExperimentalFlags.enableSpeculativeDecoding)")
+                appendLine("visionBackend=${profile.enableVisionBackend} (runtime EngineConfig.visionBackend when true)")
             }.trimEnd()
         )
     }
@@ -653,22 +634,16 @@ public data class EngineSelectionRuntime(
     val fallbackReason: String?
 )
 
-internal fun buildLiteRtEngineCacheKey(
-    modelPath: String,
-    accelerator: AcceleratorMode,
-    maxTokens: Int,
-    mtpEnabled: Boolean,
-    enableVisionBackend: Boolean
-): String = buildString {
-    append(modelPath)
+internal fun buildLiteRtEngineCacheKey(profile: RequestedEngineProfile): String = buildString {
+    append(profile.modelPath)
     append("|")
-    append(accelerator.name)
+    append(profile.accelerator.name)
     append("|")
-    append(maxTokens)
+    append(profile.maxTokens)
     append("|")
-    append(mtpEnabled)
+    append(profile.mtpRequested)
     append("|vision=")
-    append(enableVisionBackend)
+    append(profile.enableVisionBackend)
 }
 
 internal data class EngineCandidate(
