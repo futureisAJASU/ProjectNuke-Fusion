@@ -140,6 +140,63 @@ class LiteRtEngineMtpStateTest {
     }
 
     @Test
+    fun `status is confirmed active only with a positive native probe`() {
+        fun status(selected: Boolean, flag: Boolean, probe: Boolean?) = resolveMtpRuntimeStatus(
+            mtpRequested = true,
+            mtpSupported = true,
+            selectedMtpEnabled = selected,
+            mtpFlagAppliedForMtp = flag,
+            mtpProbeResult = probe,
+            mtpSkippedByMemory = false,
+            mtpAttempted = selected
+        )
+        assertEquals(MtpRuntimeStatus.RUNTIME_CONFIRMED_ACTIVE, status(true, true, true))
+        // Null probe (native unavailable) keeps the optimistic claim, no confirmation.
+        assertEquals(MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST, status(true, true, null))
+        // Negative probe means the MTP candidate fell back (it was attempted).
+        assertEquals(
+            MtpRuntimeStatus.FALLBACK_DISABLED,
+            resolveMtpRuntimeStatus(true, true, false, true, false, false, true)
+        )
+    }
+
+    @Test
+    fun `status resolution keeps pessimistic states`() {
+        assertEquals(
+            MtpRuntimeStatus.OFF,
+            resolveMtpRuntimeStatus(false, true, false, false, null, false, false)
+        )
+        assertEquals(
+            MtpRuntimeStatus.UNSUPPORTED,
+            resolveMtpRuntimeStatus(true, false, false, false, null, false, false)
+        )
+        assertEquals(
+            MtpRuntimeStatus.FALLBACK_DISABLED,
+            resolveMtpRuntimeStatus(true, true, false, true, null, true, false)
+        )
+        // Flag could not be applied and nothing was attempted or skipped -> broken.
+        assertEquals(
+            MtpRuntimeStatus.FAILED,
+            resolveMtpRuntimeStatus(true, true, false, false, null, false, false)
+        )
+    }
+
+    @Test
+    fun `fallback reason distinguishes negative probe from generic init failure`() {
+        val skipped = resolveMtpFallbackReason(true, true, false, true, null, true, false)
+        assertEquals("MTP disabled due to previous failure", skipped)
+
+        val negativeProbe = resolveMtpFallbackReason(true, true, false, true, false, false, true)
+        assertEquals("MTP runtime probe: no speculative decoding support", negativeProbe)
+
+        val genericFailure = resolveMtpFallbackReason(true, true, false, true, true, false, true)
+        assertEquals("MTP initialization failed, fell back to non-MTP", genericFailure)
+
+        val flagFailure = resolveMtpFallbackReason(true, true, false, false, null, false, false)
+        assertEquals("MTP flag application failed", flagFailure)
+    }
+
+    @Test
     fun `GenerationSettings migration carries MTP backend KV capacity and vision flags into the profile`() {
         val settings = GenerationSettings(
             maxTokens = 4096,
