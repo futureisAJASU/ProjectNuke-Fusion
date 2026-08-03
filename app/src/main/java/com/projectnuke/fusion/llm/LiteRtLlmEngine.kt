@@ -343,6 +343,7 @@ class LiteRtLlmEngine(
         // GPU must never poison an explicit CPU request, and AUTO failures are
         // remembered under the exact backend that failed, not the accelerator.
         var mtpSkippedByMemory = false
+        val recordedFallbackEvents = mutableListOf<RuntimeFallbackEvent>()
         val ladder = buildEngineCandidateLadder(
             accelerator = profile.accelerator,
             mtpRequested = mtpRequested,
@@ -359,6 +360,11 @@ class LiteRtLlmEngine(
             )
             if (skipReason != null) {
                 mtpSkippedByMemory = true
+                recordedFallbackEvents += RuntimeFallbackEvent(
+                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                    attemptedMtpEnabled = true,
+                    reason = FallbackReason.MTP_SKIPPED_RECENT_FAILURE
+                )
                 Log.i(
                     "FusionLiteRT",
                     "MTP skipped due to recent failure: $skipReason (backend=${candidate.backend})"
@@ -431,6 +437,11 @@ class LiteRtLlmEngine(
                             // Engine init justifies INITIALIZED_WITH_MTP_REQUEST.
                             mtpCapabilityResult = false
                             lastMtpAttemptBackend = backendName
+                            recordedFallbackEvents += RuntimeFallbackEvent(
+                                attemptedTextBackend = backendName.toRuntimeBackend(),
+                                attemptedMtpEnabled = true,
+                                reason = FallbackReason.MTP_UNSUPPORTED
+                            )
                             return@selectFirstWorkingEngine Result.failure(
                                 IllegalStateException("MTP capability probe: no speculative decoding support")
                             )
@@ -453,7 +464,7 @@ class LiteRtLlmEngine(
                 result
             }
         )
-        val selectionResult = selection.first
+        val selectionResult = selection.selection
         if (selectionResult != null) {
             newEngine = selectionResult.engine
             selectedMtpEnabled = selectionResult.selectedMtpEnabled
@@ -464,8 +475,12 @@ class LiteRtLlmEngine(
                     (if (selectedMtpEnabled) " + MTP" else " without MTP")
             )
         } else {
-            failure = selection.second
+            failure = selection.failure
+            recordedFallbackEvents += RuntimeFallbackEvent(
+                reason = FallbackReason.ALL_CANDIDATES_EXHAUSTED
+            )
         }
+        recordedFallbackEvents += selection.fallbackEvents
 
         val resolvedEngine = newEngine ?: run {
             // Best-effort reset; if this also fails the flag state is unknown
@@ -511,13 +526,14 @@ class LiteRtLlmEngine(
         }
 
         val actualTextBackend = selectionResult?.backendName ?: preferredBackendName
+        val selectionFirstReason = recordedFallbackEvents.firstOrNull()?.reason?.name
         val runtimeSelection = EngineSelectionRuntime(
             requestedAccelerator = profile.accelerator.name,
             actualTextBackend = actualTextBackend,
             actualVisionBackend = selectionResult?.visionBackend,
             requestedMtp = mtpRequested,
             initializedWithMtp = initializedWithMtp,
-            fallbackReason = fallbackReason
+            fallbackReason = selectionFirstReason ?: fallbackReason
         )
 
         // The stored key reflects the engine actually loaded (the selected MTP
@@ -528,7 +544,8 @@ class LiteRtLlmEngine(
             mtpStatus = lastMtpStatus,
             runtimeSelection = runtimeSelection,
             actualTextBackend = actualTextBackend,
-            actualVisionBackend = selectionResult?.visionBackend
+            actualVisionBackend = selectionResult?.visionBackend,
+            fallbackEvents = recordedFallbackEvents
         )
 
         return resolvedEngine
@@ -574,25 +591,17 @@ class LiteRtLlmEngine(
 
     /**
      * Builds the immutable [RuntimeExecutionSnapshot] for the currently loaded
-     * runtime. Phase 2 populates status/backend/model fingerprint with a
-     * best-effort fallback-event list derived from [resolveMtpFallbackReason]
-     * (which is a single nullable string today). Phase 3 replaces this with the
-     * typed event list built during candidate selection so multiple concurrent
-     * fallbacks (MTP + backend) survive. [samplerBackend] is UNKNOWN until a
-     * stable LiteRT-LM API reports sampler placement (see Phase 9).
+     * runtime. The fallback event list comes from the typed events captured
+     * during candidate selection (Phase 3) rather than from a single fallback
+     * reason string, so multiple concurrent fallbacks (MTP + backend) survive.
+     * [samplerBackend] is UNKNOWN until a stable LiteRT-LM API reports sampler
+     * placement (see Phase 9).
      */
     private fun buildRuntimeExecutionSnapshot(
         profile: RequestedEngineProfile
     ): RuntimeExecutionSnapshot? {
         val state = loadedState ?: return null
         val fingerprint = state.key.fingerprint
-        val reasonString = state.runtimeSelection.fallbackReason
-        val fallbackEvents = buildFallbackEvents(
-            mtpStatus = state.mtpStatus,
-            requestedAccelerator = profile.accelerator,
-            selectedTextBackend = state.actualTextBackend.toRuntimeBackend(),
-            reasonString = reasonString
-        )
         return RuntimeExecutionSnapshot(
             requestedAccelerator = profile.accelerator,
             selectedTextBackend = state.actualTextBackend.toRuntimeBackend(),
@@ -600,7 +609,7 @@ class LiteRtLlmEngine(
             samplerBackend = RuntimeComponentBackend.UNKNOWN,
             mtpRequested = profile.mtpRequested,
             mtpStatus = state.mtpStatus,
-            fallbackEvents = fallbackEvents,
+            fallbackEvents = state.fallbackEvents,
             modelFingerprint = ModelFingerprintSummary(
                 canonicalPath = fingerprint.canonicalPath,
                 fileSize = fingerprint.fileSize,
@@ -609,40 +618,6 @@ class LiteRtLlmEngine(
                 mtpSupported = fingerprint.mtpSupported
             )
         )
-    }
-
-    private fun buildFallbackEvents(
-        mtpStatus: MtpRuntimeStatus,
-        requestedAccelerator: com.projectnuke.fusion.model.AcceleratorMode,
-        selectedTextBackend: RuntimeBackend,
-        reasonString: String?
-    ): List<RuntimeFallbackEvent> {
-        val events = mutableListOf<RuntimeFallbackEvent>()
-        if (reasonString != null) {
-            val reason = when (reasonString) {
-                "Model does not support MTP" -> FallbackReason.MTP_UNSUPPORTED
-                "MTP disabled due to previous failure" -> FallbackReason.MTP_SKIPPED_RECENT_FAILURE
-                "MTP capability probe: no speculative decoding support",
-                "MTP runtime probe: no speculative decoding support" -> FallbackReason.MTP_UNSUPPORTED
-                "MTP initialization failed, fell back to non-MTP" -> FallbackReason.MTP_ENGINE_INIT_FAILED
-                "MTP flag application failed" -> FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED
-                else -> null
-            }
-            if (reason != null) {
-                events += RuntimeFallbackEvent(
-                    attemptedMtpEnabled = true,
-                    selectedReplacementBackend = selectedTextBackend,
-                    reason = reason
-                )
-            }
-        }
-        return events
-    }
-
-    private fun String.toRuntimeBackend(): RuntimeBackend = when (this) {
-        "CPU" -> RuntimeBackend.CPU
-        "GPU" -> RuntimeBackend.GPU
-        else -> RuntimeBackend.UNKNOWN
     }
 
     private fun buildSamplerConfig(options: ConversationOptions): SamplerConfig {        val topK = options.topK.coerceAtLeast(1)
@@ -885,20 +860,43 @@ internal data class EngineSelectionResult<T>(
     val visionBackend: String?,
 )
 
+/**
+ * Outcome of iterating the candidate ladder: the first working selection (if
+ * any), the last failure when nothing worked, and the typed fallback events
+ * captured along the way. Replaces the previous `Pair<EngineSelectionResult<T>?, Throwable?>`
+ * so app-level fallbacks are recorded as stable enums instead of English strings.
+ */
+internal data class EngineSelectionOutcome<T>(
+    val selection: EngineSelectionResult<T>?,
+    val failure: Throwable?,
+    val fallbackEvents: List<RuntimeFallbackEvent> = emptyList()
+)
+
 internal fun <T> selectFirstWorkingEngine(
     ladder: List<EngineCandidate>,
     enableVisionBackend: Boolean,
     configureFlag: (Boolean) -> Boolean,
     tryCreate: (backendName: String, mtpEnabled: Boolean, visionBackendIsCpu: Boolean) -> Result<T>
-): Pair<EngineSelectionResult<T>?, Throwable?> {
+): EngineSelectionOutcome<T> {
     var mtpFlagAppliedForMtp = false
     var lastFailure: Throwable? = null
+    val fallbackEvents = mutableListOf<RuntimeFallbackEvent>()
+    var pendingGpuPlainFailure = false
     for (candidate in ladder) {
         // Mandatory settlement: never initialize an engine while the
         // speculative-decoding flag is in an unknown state. A failed settle
-        // skips the candidate entirely instead of proceeding on faith.
+        // skips the candidate entirely instead of proceeding on faith. Record
+        // a typed event so callers never parse English exception text. The
+        // spec-decoding flag can be requested on or off; the failure is
+        // specific to that direction.
         val flagApplied = configureFlag(candidate.mtpEnabled)
         if (!flagApplied) {
+            fallbackEvents += RuntimeFallbackEvent(
+                attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                attemptedMtpEnabled = candidate.mtpEnabled,
+                reason = if (candidate.mtpEnabled) FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED
+                    else FallbackReason.SPECULATIVE_DISABLE_FLAG_SETTLEMENT_FAILED
+            )
             lastFailure = IllegalStateException("Speculative decoding flag settle failed for mtp=${candidate.mtpEnabled}")
             continue
         }
@@ -907,37 +905,77 @@ internal fun <T> selectFirstWorkingEngine(
         }
         val attempt = tryCreate(candidate.backend, candidate.mtpEnabled, false)
         if (attempt.isSuccess) {
-            return Pair(
-                EngineSelectionResult(
+            if (pendingGpuPlainFailure && candidate.backend == "CPU" && !candidate.mtpEnabled) {
+                fallbackEvents += RuntimeFallbackEvent(
+                    attemptedTextBackend = RuntimeBackend.GPU,
+                    attemptedMtpEnabled = false,
+                    selectedReplacementBackend = RuntimeBackend.CPU,
+                    reason = FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED
+                )
+            }
+            return EngineSelectionOutcome(
+                selection = EngineSelectionResult(
                     engine = attempt.getOrThrow(),
                     selectedMtpEnabled = candidate.mtpEnabled,
                     mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                     backendName = candidate.backend,
                     visionBackend = if (enableVisionBackend) candidate.backend else null
                 ),
-                null
+                failure = null,
+                fallbackEvents = fallbackEvents
             )
         }
         if (enableVisionBackend && candidate.backend == "GPU") {
             val visionRetry = tryCreate(candidate.backend, candidate.mtpEnabled, true)
             if (visionRetry.isSuccess) {
-                return Pair(
-                    EngineSelectionResult(
+                // GPU text backend succeeded but GPU vision backend failed:
+                // specifically record the vision fallback.
+                fallbackEvents += RuntimeFallbackEvent(
+                    attemptedTextBackend = RuntimeBackend.GPU,
+                    attemptedVisionBackend = RuntimeBackend.GPU,
+                    attemptedMtpEnabled = candidate.mtpEnabled,
+                    selectedReplacementBackend = RuntimeBackend.CPU,
+                    reason = FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED
+                )
+                return EngineSelectionOutcome(
+                    selection = EngineSelectionResult(
                         engine = visionRetry.getOrThrow(),
                         selectedMtpEnabled = candidate.mtpEnabled,
                         mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                         backendName = candidate.backend,
                         visionBackend = "CPU"
                     ),
-                    null
+                    failure = null,
+                    fallbackEvents = fallbackEvents
                 )
             }
             lastFailure = attempt.exceptionOrNull() ?: visionRetry.exceptionOrNull()
         } else {
             lastFailure = attempt.exceptionOrNull()
+            if (candidate.mtpEnabled) {
+                fallbackEvents += RuntimeFallbackEvent(
+                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                    attemptedMtpEnabled = true,
+                    reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                )
+            } else if (candidate.backend == "GPU") {
+                // GPU plain candidate failed; the next CPU candidate (if any)
+                // records the text-backend fallback when it succeeds.
+                pendingGpuPlainFailure = true
+            }
         }
     }
-    return Pair(null, lastFailure)
+    return EngineSelectionOutcome(
+        selection = null,
+        failure = lastFailure,
+        fallbackEvents = fallbackEvents
+    )
+}
+
+internal fun String.toRuntimeBackend(): RuntimeBackend = when (this) {
+    "CPU" -> RuntimeBackend.CPU
+    "GPU" -> RuntimeBackend.GPU
+    else -> RuntimeBackend.UNKNOWN
 }
 
 internal fun buildEngineCandidateLadder(

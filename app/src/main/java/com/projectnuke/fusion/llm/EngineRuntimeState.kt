@@ -58,5 +58,6 @@ internal class LoadedRuntimeState(
     val mtpStatus: MtpRuntimeStatus,
     val runtimeSelection: EngineSelectionRuntime,
     val actualTextBackend: String,
-    val actualVisionBackend: String?
+    val actualVisionBackend: String?,
+    val fallbackEvents: List<RuntimeFallbackEvent> = emptyList()
 )

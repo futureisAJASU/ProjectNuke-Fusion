@@ -31,12 +31,12 @@ class LiteRtLlmEngineMtpTest {
                 }
             }
         )
-        val result = selection.first
+        val result = selection.selection
         assertNotNull(result)
         assertEquals("gpu-mtp-engine", result!!.engine)
         assertTrue(result.selectedMtpEnabled)
         assertTrue(result.mtpFlagAppliedForMtp)
-        assertNull(selection.second)
+        assertNull(selection.failure)
     }
 
     @Test
@@ -55,7 +55,7 @@ class LiteRtLlmEngineMtpTest {
                 }
             }
         )
-        val result = selection.first
+        val result = selection.selection
         assertNotNull(result)
         assertEquals("gpu-plain-engine", result!!.engine)
         assertFalse(result.selectedMtpEnabled)
@@ -76,7 +76,7 @@ class LiteRtLlmEngineMtpTest {
                 Result.success("$backendName-mtp=$mtpEnabled")
             }
         )
-        val result = selection.first
+        val result = selection.selection
         assertNotNull(result)
         assertEquals("GPU-mtp=false", result!!.engine)
         assertFalse(result.selectedMtpEnabled)
@@ -103,7 +103,7 @@ class LiteRtLlmEngineMtpTest {
                 }
             }
         )
-        val result = selection.first
+        val result = selection.selection
         assertNotNull(result)
         assertEquals("cpu-mtp-engine", result!!.engine)
         assertTrue(result.selectedMtpEnabled)
@@ -122,9 +122,9 @@ class LiteRtLlmEngineMtpTest {
             configureFlag = { false },
             tryCreate = { _, _, _ -> Result.success("unreachable") }
         )
-        assertNull(selection.first)
-        assertNotNull(selection.second)
-        assertTrue(selection.second is IllegalStateException)
+        assertNull(selection.selection)
+        assertNotNull(selection.failure)
+        assertTrue(selection.failure is IllegalStateException)
     }
 
     @Test
@@ -143,7 +143,7 @@ class LiteRtLlmEngineMtpTest {
                 }
             }
         )
-        val result = selection.first
+        val result = selection.selection
         assertNotNull(result)
         assertTrue(cpuVisionRetry)
         assertEquals("gpu-engine-cpu-vision", result!!.engine)
@@ -159,8 +159,8 @@ class LiteRtLlmEngineMtpTest {
             configureFlag = alwaysFlag(),
             tryCreate = { _, _, _ -> Result.failure(failure) }
         )
-        assertNull(selection.first)
-        assertEquals(failure, selection.second)
+        assertNull(selection.selection)
+        assertEquals(failure, selection.failure)
     }
 
     @Test
