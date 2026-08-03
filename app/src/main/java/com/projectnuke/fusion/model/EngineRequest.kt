@@ -37,12 +37,6 @@ data class ConversationOptions(
     val topK: Int = 64,
     val topP: Float = 0.95f,
     val seed: Int? = null,
-    /**
-     * Prompt-only decoration until the GENERATION_SETTINGS block is removed
-     * from the system instruction; the LiteRT-LM API does not expose a
-     * reasoning budget config.
-     */
-    val reasoningBudgetTokens: Int = 512,
 )
 
 /**
@@ -71,5 +65,4 @@ fun GenerationSettings.toConversationOptions(): ConversationOptions = Conversati
     topK = topK,
     topP = topP,
     seed = null,
-    reasoningBudgetTokens = reasoningBudgetTokens,
 )

@@ -115,7 +115,7 @@ class LiteRtLlmEngine(
 
             val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
             val adaptedMessages = promptAdapter.buildMessages(messages)
-            val systemText = buildSystemInstruction(adaptedMessages, resolvedProfile, options)
+            val systemText = buildSystemInstruction(adaptedMessages)
             val promptText = buildPrompt(adaptedMessages)
 
             val conversationConfig = ConversationConfig(
@@ -218,7 +218,7 @@ class LiteRtLlmEngine(
 
             val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
             val adaptedMessages = promptAdapter.buildMessages(messages)
-            val systemText = buildSystemInstruction(adaptedMessages, resolvedProfile, options)
+            val systemText = buildSystemInstruction(adaptedMessages)
             val promptText = buildPrompt(adaptedMessages)
 
             val conversationConfig = ConversationConfig(
@@ -485,37 +485,6 @@ class LiteRtLlmEngine(
         }
     }
 
-    private fun buildSystemInstruction(
-        messages: List<ChatMessage>,
-        profile: RequestedEngineProfile,
-        options: ConversationOptions
-    ): String {
-        val systemMessages = messages
-            .filter { it.role == "system" }
-            .joinToString("\n\n") { it.content }
-
-        return buildString {
-            appendLine("당신은 기기 내에서 실행되는 AI 비서 Fusion입니다.")
-            appendLine("한국어로 자연스럽게 답변하며 일관되게 존댓말을 사용합니다.")
-            appendLine("모르는 내용은 모른다고 명확히 밝힙니다.")
-            appendLine("추론이나 추정은 그 사실을 명확히 구분합니다.")
-            appendLine()
-            appendLine("GENERATION_SETTINGS")
-            appendLine("maxTokens=${profile.maxTokens}")
-            appendLine("topK=${options.topK}")
-            appendLine("topP=${options.topP}")
-            appendLine("temperature=${options.temperature}")
-            appendLine("accelerator=${profile.accelerator.name}")
-            appendLine("speculativeDecoding=${profile.mtpRequested}")
-            appendLine("reasoningBudgetTokens=${options.reasoningBudgetTokens} (prompt-only; LiteRT-LM API does not expose a reasoning budget config here)")
-
-            if (systemMessages.isNotBlank()) {
-                appendLine()
-                appendLine(systemMessages)
-            }
-        }
-    }
-
     private fun logGenerationSettings(
         profile: RequestedEngineProfile,
         options: ConversationOptions
@@ -530,39 +499,10 @@ class LiteRtLlmEngine(
                 appendLine("topK=${options.topK} (runtime SamplerConfig.topK)")
                 appendLine("topP=${options.topP} (runtime SamplerConfig.topP)")
                 appendLine("temperature=${options.temperature} (runtime SamplerConfig.temperature)")
-                appendLine("reasoningBudgetTokens=${options.reasoningBudgetTokens} (prompt-only unsupported by current LiteRT-LM API)")
                 appendLine("MTP requested=${profile.mtpRequested} (runtime ExperimentalFlags.enableSpeculativeDecoding)")
                 appendLine("visionBackend=${profile.enableVisionBackend} (runtime EngineConfig.visionBackend when true)")
             }.trimEnd()
         )
-    }
-
-    private fun buildPrompt(
-        messages: List<ChatMessage>
-    ): String {
-        val nonSystemMessages = messages.filter { it.role != "system" }
-
-        val recentMessages = nonSystemMessages.takeLast(12)
-
-        return buildString {
-            recentMessages.forEach { message ->
-                when (message.role) {
-                    "user" -> {
-                        appendLine("User:")
-                        appendLine(message.content)
-                        appendLine()
-                    }
-
-                    "assistant" -> {
-                        appendLine("Assistant:")
-                        appendLine(message.content)
-                        appendLine()
-                    }
-                }
-            }
-
-            appendLine("Assistant:")
-        }
     }
 
     override fun unload() {
@@ -633,6 +573,61 @@ public data class EngineSelectionRuntime(
     val initializedWithMtp: Boolean,
     val fallbackReason: String?
 )
+
+/**
+ * Builds the system instruction from the given messages. Deliberately takes no
+ * settings: runtime settings (accelerator/MTP/KV capacity/sampling) must never
+ * appear in prompt bytes, so MTP on/off produce identical prompts.
+ */
+internal fun buildSystemInstruction(messages: List<ChatMessage>): String {
+    val systemMessages = messages
+        .filter { it.role == "system" }
+        .joinToString("\n\n") { it.content }
+
+    return buildString {
+        appendLine("당신은 기기 내에서 실행되는 AI 비서 Fusion입니다.")
+        appendLine("한국어로 자연스럽게 답변하며 일관되게 존댓말을 사용합니다.")
+        appendLine("모르는 내용은 모른다고 명확히 밝힙니다.")
+        appendLine("추론이나 추정은 그 사실을 명확히 구분합니다.")
+
+        if (systemMessages.isNotBlank()) {
+            appendLine()
+            appendLine(systemMessages)
+        }
+    }
+}
+
+/**
+ * Builds the user turn prompt. Takes no settings for the same reason as
+ * [buildSystemInstruction].
+ */
+internal fun buildPrompt(
+    messages: List<ChatMessage>
+): String {
+    val nonSystemMessages = messages.filter { it.role != "system" }
+
+    val recentMessages = nonSystemMessages.takeLast(12)
+
+    return buildString {
+        recentMessages.forEach { message ->
+            when (message.role) {
+                "user" -> {
+                    appendLine("User:")
+                    appendLine(message.content)
+                    appendLine()
+                }
+
+                "assistant" -> {
+                    appendLine("Assistant:")
+                    appendLine(message.content)
+                    appendLine()
+                }
+            }
+        }
+
+        appendLine("Assistant:")
+    }
+}
 
 internal fun buildLiteRtEngineCacheKey(profile: RequestedEngineProfile): String = buildString {
     append(profile.modelPath)
