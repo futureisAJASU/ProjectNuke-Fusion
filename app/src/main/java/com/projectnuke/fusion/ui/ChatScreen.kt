@@ -1281,7 +1281,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     return@start
                                 }
                             }
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, engine.lastMtpStatus, engine.lastRuntimeSelection?.actualTextBackend, engine.lastRuntimeSelection?.actualVisionBackend)), outcome.stats)
+                            val runtimeFields = outcomeRuntimeFields(outcome, engine)
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats)
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -1465,7 +1466,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     return@start
                                 }
                             }
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, engine.lastMtpStatus, engine.lastRuntimeSelection?.actualTextBackend, engine.lastRuntimeSelection?.actualVisionBackend)), outcome.stats)
+                            val runtimeFields = outcomeRuntimeFields(outcome, engine)
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats)
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -3307,13 +3309,14 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
 
                                             val totalGenerationMs = SystemClock.elapsedRealtime() - generationStartMs
+                                            val runtimeFields = outcomeRuntimeFields(rawOutcome, engine)
                                             val metricsLine = buildFusionMetricsLine(
                                                 modelName = shortModelName(snapshot.selectedModelId!!),
                                                 acceleratorName = buildAcceleratorLabel(acceleratorName = requestSettings.accelerator.name, speculativeDecodingEnabled = requestSettings.speculativeDecodingEnabled == true),
                                                 generatedText = rawReply,
                                                 totalGenerationMs = totalGenerationMs,
                                                 firstTokenLatencyMs = firstTokenLatencyMs,
-                                                settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = actualWebSearchUsed, mtpStatus = engine.lastMtpStatus, actualBackend = engine.lastRuntimeSelection?.actualTextBackend, actualVisionBackend = engine.lastRuntimeSelection?.actualVisionBackend)),
+                                                settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = actualWebSearchUsed, mtpStatus = runtimeFields.mtpStatus, actualBackend = runtimeFields.actualBackend, actualVisionBackend = runtimeFields.actualVisionBackend)),
                                                 nativeStats = rawOutcome.stats
                                             )
                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingMetricsLine = metricsLine, generationStatus = "답변 저장 중...") }
@@ -9922,6 +9925,39 @@ private fun estimateOutputTokens(text: String): Int {
         }
 
     return wordLikeTokens.coerceAtLeast(1)
+}
+
+/**
+ * Returns the immutable runtime execution snapshot from a generation outcome
+ * when present. Callers use this single source of truth for visible metrics
+ * and persisted state instead of rereading mutable [LiteRtLlmEngine.lastMtpStatus]
+ * / [LiteRtLlmEngine.lastRuntimeSelection] after generation to reconstruct it.
+ * Falls back to the engine lifetime state only when the outcome carries no
+ * snapshot (e.g. fake/preview engines).
+ */
+private data class OutcomeRuntimeFields(
+    val mtpStatus: com.projectnuke.fusion.llm.MtpRuntimeStatus,
+    val actualBackend: String?,
+    val actualVisionBackend: String?
+)
+
+private fun outcomeRuntimeFields(
+    outcome: GenerationOutcome,
+    engine: LiteRtLlmEngine
+): OutcomeRuntimeFields {
+    val snapshot = (outcome as? GenerationOutcome.Success)?.snapshot
+    if (snapshot != null) {
+        return OutcomeRuntimeFields(
+            mtpStatus = snapshot.mtpStatus,
+            actualBackend = snapshot.selectedTextBackend.name,
+            actualVisionBackend = snapshot.selectedVisionBackend?.name
+        )
+    }
+    return OutcomeRuntimeFields(
+        mtpStatus = engine.lastMtpStatus,
+        actualBackend = engine.lastRuntimeSelection?.actualTextBackend,
+        actualVisionBackend = engine.lastRuntimeSelection?.actualVisionBackend
+    )
 }
 
 private fun buildFusionMetricsLine(

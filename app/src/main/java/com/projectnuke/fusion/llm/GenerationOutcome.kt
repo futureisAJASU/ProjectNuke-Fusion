@@ -8,16 +8,21 @@ sealed interface GenerationOutcome {
     /**
      * A successful generation. [text] contains the model's reply (sanitized
      * by the prompt adapter). [actualBackend] reports the backend that the
-     * runtime actually used, when reported by the engine. [truncated] is true
-     * when the app-level streaming output limit cut the reply short.
-     * [stats] carries the native runtime benchmark snapshot of the last
-     * generation when the runtime reports one.
+     * runtime actually used, when reported by the engine — retained for
+     * transitional callers; new callers should read [snapshot].selectedTextBackend.
+     * [truncated] is true when the app-level streaming output limit cut the
+     * reply short. [stats] carries the native runtime benchmark snapshot of
+     * the last generation when the runtime reports one. [snapshot] is the
+     * immutable runtime execution snapshot that is the single source of truth
+     * for runtime state; callers must not reread mutable engine state after
+     * generation to reconstruct the result.
      */
     data class Success(
         val text: String,
         val actualBackend: String? = null,
         val truncated: Boolean = false,
-        val stats: GenerationBenchmarkStats? = null
+        val stats: GenerationBenchmarkStats? = null,
+        val snapshot: RuntimeExecutionSnapshot? = null
     ) : GenerationOutcome
 
     /**

@@ -38,6 +38,7 @@ import com.projectnuke.fusion.data.AppDatabase
 import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.llm.ChatGenerationRunningException
+import com.projectnuke.fusion.llm.EngineSelectionRuntime
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.GenerationOutcome
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
@@ -323,8 +324,18 @@ private suspend fun runBenchmark(
             val totalTps = if (totalMs > 0) estimatedTokens * 1000.0 / totalMs else 0.0
             val decodeMs = firstTokenMs?.let { totalMs - it }?.takeIf { it > 0 }
             val decodeTps = decodeMs?.let { estimatedTokens * 1000.0 / it }
-            val mtpStatus = engine.lastMtpStatus
-            val runtimeSelection = engine.lastRuntimeSelection
+            val outcomeSnapshot = success.snapshot
+            val mtpStatus = outcomeSnapshot?.mtpStatus ?: engine.lastMtpStatus
+            val runtimeSelection = outcomeSnapshot?.let {
+                EngineSelectionRuntime(
+                    requestedAccelerator = it.requestedAccelerator.name,
+                    actualTextBackend = it.selectedTextBackend.name,
+                    actualVisionBackend = it.selectedVisionBackend?.name,
+                    requestedMtp = it.mtpRequested,
+                    initializedWithMtp = it.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST,
+                    fallbackReason = null
+                )
+            } ?: engine.lastRuntimeSelection
             val nativeStats = success.stats
             val effective = buildEffectiveRuntimeSettings(
                 modelName = snapshot.modelName,

@@ -164,7 +164,8 @@ class LiteRtLlmEngine(
                     text = sanitized,
                     actualBackend = loadedState?.actualTextBackend,
                     truncated = outputTruncated,
-                    stats = nativeStats
+                    stats = nativeStats,
+                    snapshot = buildRuntimeExecutionSnapshot(profile)
                 )
             }
         }
@@ -291,7 +292,8 @@ class LiteRtLlmEngine(
                     text = sanitized,
                     actualBackend = loadedState?.actualTextBackend,
                     truncated = outputTruncated,
-                    stats = nativeStats
+                    stats = nativeStats,
+                    snapshot = buildRuntimeExecutionSnapshot(profile)
                 )
             }
         }
@@ -568,6 +570,79 @@ class LiteRtLlmEngine(
                 decodeTokensPerSecond = info.lastDecodeTokensPerSecond
             )
         }.getOrNull()
+    }
+
+    /**
+     * Builds the immutable [RuntimeExecutionSnapshot] for the currently loaded
+     * runtime. Phase 2 populates status/backend/model fingerprint with a
+     * best-effort fallback-event list derived from [resolveMtpFallbackReason]
+     * (which is a single nullable string today). Phase 3 replaces this with the
+     * typed event list built during candidate selection so multiple concurrent
+     * fallbacks (MTP + backend) survive. [samplerBackend] is UNKNOWN until a
+     * stable LiteRT-LM API reports sampler placement (see Phase 9).
+     */
+    private fun buildRuntimeExecutionSnapshot(
+        profile: RequestedEngineProfile
+    ): RuntimeExecutionSnapshot? {
+        val state = loadedState ?: return null
+        val fingerprint = state.key.fingerprint
+        val reasonString = state.runtimeSelection.fallbackReason
+        val fallbackEvents = buildFallbackEvents(
+            mtpStatus = state.mtpStatus,
+            requestedAccelerator = profile.accelerator,
+            selectedTextBackend = state.actualTextBackend.toRuntimeBackend(),
+            reasonString = reasonString
+        )
+        return RuntimeExecutionSnapshot(
+            requestedAccelerator = profile.accelerator,
+            selectedTextBackend = state.actualTextBackend.toRuntimeBackend(),
+            selectedVisionBackend = state.actualVisionBackend?.toRuntimeBackend(),
+            samplerBackend = RuntimeComponentBackend.UNKNOWN,
+            mtpRequested = profile.mtpRequested,
+            mtpStatus = state.mtpStatus,
+            fallbackEvents = fallbackEvents,
+            modelFingerprint = ModelFingerprintSummary(
+                canonicalPath = fingerprint.canonicalPath,
+                fileSize = fingerprint.fileSize,
+                modifiedAt = fingerprint.modifiedAt,
+                validationVersion = fingerprint.validationVersion,
+                mtpSupported = fingerprint.mtpSupported
+            )
+        )
+    }
+
+    private fun buildFallbackEvents(
+        mtpStatus: MtpRuntimeStatus,
+        requestedAccelerator: com.projectnuke.fusion.model.AcceleratorMode,
+        selectedTextBackend: RuntimeBackend,
+        reasonString: String?
+    ): List<RuntimeFallbackEvent> {
+        val events = mutableListOf<RuntimeFallbackEvent>()
+        if (reasonString != null) {
+            val reason = when (reasonString) {
+                "Model does not support MTP" -> FallbackReason.MTP_UNSUPPORTED
+                "MTP disabled due to previous failure" -> FallbackReason.MTP_SKIPPED_RECENT_FAILURE
+                "MTP capability probe: no speculative decoding support",
+                "MTP runtime probe: no speculative decoding support" -> FallbackReason.MTP_UNSUPPORTED
+                "MTP initialization failed, fell back to non-MTP" -> FallbackReason.MTP_ENGINE_INIT_FAILED
+                "MTP flag application failed" -> FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED
+                else -> null
+            }
+            if (reason != null) {
+                events += RuntimeFallbackEvent(
+                    attemptedMtpEnabled = true,
+                    selectedReplacementBackend = selectedTextBackend,
+                    reason = reason
+                )
+            }
+        }
+        return events
+    }
+
+    private fun String.toRuntimeBackend(): RuntimeBackend = when (this) {
+        "CPU" -> RuntimeBackend.CPU
+        "GPU" -> RuntimeBackend.GPU
+        else -> RuntimeBackend.UNKNOWN
     }
 
     private fun buildSamplerConfig(options: ConversationOptions): SamplerConfig {        val topK = options.topK.coerceAtLeast(1)
