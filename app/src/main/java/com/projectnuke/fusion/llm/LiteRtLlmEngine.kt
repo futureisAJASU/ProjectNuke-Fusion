@@ -945,6 +945,16 @@ internal fun <T> selectFirstWorkingEngine(
                     selectedReplacementBackend = RuntimeBackend.CPU,
                     reason = FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED
                 )
+                // If the candidate was an MTP candidate and the first tryCreate
+                // failed (MTP init failed), record the MTP init failure too so
+                // the MTP and vision fallbacks coexist in the typed event list.
+                if (candidate.mtpEnabled) {
+                    fallbackEvents += RuntimeFallbackEvent(
+                        attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                        attemptedMtpEnabled = true,
+                        reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                    )
+                }
                 return EngineSelectionOutcome(
                     selection = EngineSelectionResult(
                         engine = visionRetry.getOrThrow(),
@@ -955,6 +965,16 @@ internal fun <T> selectFirstWorkingEngine(
                     ),
                     failure = null,
                     fallbackEvents = fallbackEvents
+                )
+            }
+            // Both first attempt and vision retry failed for an MTP candidate:
+            // record the MTP init failure event here (the generic else branch
+            // is unreachable for GPU candidates with vision enabled).
+            if (candidate.mtpEnabled) {
+                fallbackEvents += RuntimeFallbackEvent(
+                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                    attemptedMtpEnabled = true,
+                    reason = FallbackReason.MTP_ENGINE_INIT_FAILED
                 )
             }
             lastFailure = attempt.exceptionOrNull() ?: visionRetry.exceptionOrNull()
