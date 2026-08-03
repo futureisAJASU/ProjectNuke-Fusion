@@ -140,24 +140,61 @@ class LiteRtEngineMtpStateTest {
     }
 
     @Test
-    fun `status is confirmed active only with a positive native probe`() {
-        fun status(selected: Boolean, flag: Boolean, probe: Boolean?) = resolveMtpRuntimeStatus(
+    fun `positive pre-initialization capability check never produces RUNTIME_CONFIRMED_ACTIVE`() {
+        fun status(selected: Boolean, flag: Boolean, capability: Boolean?) = resolveMtpRuntimeStatus(
             mtpRequested = true,
             mtpSupported = true,
             selectedMtpEnabled = selected,
             mtpFlagAppliedForMtp = flag,
-            mtpProbeResult = probe,
+            mtpCapabilityResult = capability,
             mtpSkippedByMemory = false,
             mtpAttempted = selected
         )
-        assertEquals(MtpRuntimeStatus.RUNTIME_CONFIRMED_ACTIVE, status(true, true, true))
-        // Null probe (native unavailable) keeps the optimistic claim, no confirmation.
+        // A positive capability check is NOT runtime-activity evidence; only
+        // a successful Engine init with the MTP flag applied is reported, and
+        // that always reports INITIALIZED_WITH_MTP_REQUEST.
+        assertEquals(MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST, status(true, true, true))
         assertEquals(MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST, status(true, true, null))
-        // Negative probe means the MTP candidate fell back (it was attempted).
+        // Negative capability means the MTP candidate fell back (it was attempted).
         assertEquals(
             MtpRuntimeStatus.FALLBACK_DISABLED,
             resolveMtpRuntimeStatus(true, true, false, true, false, false, true)
         )
+    }
+
+    @Test
+    fun `RUNTIME_CONFIRMED_ACTIVE is unreachable from the resolver without execution evidence`() {
+        // Enumerate a broad matrix of resolver inputs and assert the reserved
+        // RUNTIME_CONFIRMED_ACTIVE value never appears. It is only reachable
+        // when LiteRT-LM exposes positive execution evidence (e.g. drafted/
+        // accepted-token counters) which the resolver does not consume today.
+        for (mtpRequested in listOf(true, false)) {
+            for (mtpSupported in listOf(true, false)) {
+                for (selectedMtpEnabled in listOf(true, false)) {
+                    for (mtpFlagAppliedForMtp in listOf(true, false)) {
+                        for (capability in listOf(true, false, null)) {
+                            for (skipped in listOf(true, false)) {
+                                for (attempted in listOf(true, false)) {
+                                    val status = resolveMtpRuntimeStatus(
+                                        mtpRequested = mtpRequested,
+                                        mtpSupported = mtpSupported,
+                                        selectedMtpEnabled = selectedMtpEnabled,
+                                        mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
+                                        mtpCapabilityResult = capability,
+                                        mtpSkippedByMemory = skipped,
+                                        mtpAttempted = attempted
+                                    )
+                                    assertNotEquals(
+                                        MtpRuntimeStatus.RUNTIME_CONFIRMED_ACTIVE,
+                                        status
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @Test
@@ -182,12 +219,12 @@ class LiteRtEngineMtpStateTest {
     }
 
     @Test
-    fun `fallback reason distinguishes negative probe from generic init failure`() {
+    fun `fallback reason distinguishes negative capability from generic init failure`() {
         val skipped = resolveMtpFallbackReason(true, true, false, true, null, true, false)
         assertEquals("MTP disabled due to previous failure", skipped)
 
-        val negativeProbe = resolveMtpFallbackReason(true, true, false, true, false, false, true)
-        assertEquals("MTP runtime probe: no speculative decoding support", negativeProbe)
+        val negativeCapability = resolveMtpFallbackReason(true, true, false, true, false, false, true)
+        assertEquals("MTP capability probe: no speculative decoding support", negativeCapability)
 
         val genericFailure = resolveMtpFallbackReason(true, true, false, true, true, false, true)
         assertEquals("MTP initialization failed, fell back to non-MTP", genericFailure)

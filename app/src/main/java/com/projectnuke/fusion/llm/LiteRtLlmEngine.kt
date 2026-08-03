@@ -40,7 +40,7 @@ class LiteRtLlmEngine(
         ExperimentalFlags.enableSpeculativeDecoding
     },
     private val failureMemoryStorage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage,
-    private val runtimeMtpProbe: (modelPath: String) -> Boolean? = { modelPath ->
+    private val mtpCapabilityProbe: (modelPath: String) -> Boolean? = { modelPath ->
         runCatching { Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() } }.getOrNull()
     }
 ) : LlmEngine {
@@ -407,7 +407,7 @@ class LiteRtLlmEngine(
         var selectedMtpEnabled = false
         var mtpFlagAppliedForMtp = false
         var mtpAttempted = false
-        var mtpProbeResult: Boolean? = null
+        var mtpCapabilityResult: Boolean? = null
         var lastMtpAttemptBackend: String? = null
         var failure: Throwable? = null
         val selection = selectFirstWorkingEngine(
@@ -417,20 +417,23 @@ class LiteRtLlmEngine(
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 if (mtpEnabled) {
                     mtpAttempted = true
-                    when (runtimeMtpProbe(profile.modelPath)) {
-                        true -> mtpProbeResult = true
+                    when (mtpCapabilityProbe(profile.modelPath)) {
+                        true -> mtpCapabilityResult = true
                         false -> {
                             // Official native capability check says the runtime
                             // has no speculative-decoding support: treat the
                             // candidate as failed so the ladder falls back and
-                            // the failure is remembered per backend.
-                            mtpProbeResult = false
+                            // the failure is remembered per backend. A positive
+                            // capability result is NOT runtime-activity evidence;
+                            // only the MTP flag being applied during a successful
+                            // Engine init justifies INITIALIZED_WITH_MTP_REQUEST.
+                            mtpCapabilityResult = false
                             lastMtpAttemptBackend = backendName
                             return@selectFirstWorkingEngine Result.failure(
-                                IllegalStateException("MTP runtime probe: no speculative decoding support")
+                                IllegalStateException("MTP capability probe: no speculative decoding support")
                             )
                         }
-                        null -> Unit // probe unavailable; proceed optimistically
+                        null -> Unit // capability unavailable; proceed optimistically
                     }
                 }
                 val backend = if (backendName == "CPU") Backend.CPU() else Backend.GPU()
@@ -475,7 +478,7 @@ class LiteRtLlmEngine(
             mtpSupported = mtpSupported,
             selectedMtpEnabled = selectedMtpEnabled,
             mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
-            mtpProbeResult = mtpProbeResult,
+            mtpCapabilityResult = mtpCapabilityResult,
             mtpSkippedByMemory = mtpSkippedByMemory,
             mtpAttempted = mtpAttempted
         )
@@ -485,7 +488,7 @@ class LiteRtLlmEngine(
             mtpSupported = mtpSupported,
             selectedMtpEnabled = selectedMtpEnabled,
             mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
-            mtpProbeResult = mtpProbeResult,
+            mtpCapabilityResult = mtpCapabilityResult,
             mtpSkippedByMemory = mtpSkippedByMemory,
             mtpAttempted = mtpAttempted
         )
@@ -680,22 +683,27 @@ public data class EngineSelectionRuntime(
 
 /**
  * Resolves the authoritative MTP runtime status from the selection evidence.
- * RUNTIME_CONFIRMED_ACTIVE is only claimed with a positive native probe; a
- * null probe (unavailable) keeps the optimistic INITIALIZED_WITH_MTP_REQUEST
- * claim instead of confirming it.
+ *
+ * A pre-Engine [Capabilities.hasSpeculativeDecodingSupport] capability check
+ * cannot prove that speculative decoding was active during generation; it only
+ * filters out candidates that definitely lack support. A successful MTP Engine
+ * initialization therefore reports [MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST],
+ * never `RUNTIME_CONFIRMED_ACTIVE`. The latter remains in the enum as a reserved
+ * value that becomes reachable only if LiteRT-LM later exposes positive
+ * execution evidence (e.g. drafted/accepted-token counters); absent such an
+ * API it is deliberately unreachable from this resolver.
  */
 internal fun resolveMtpRuntimeStatus(
     mtpRequested: Boolean,
     mtpSupported: Boolean,
     selectedMtpEnabled: Boolean,
     mtpFlagAppliedForMtp: Boolean,
-    mtpProbeResult: Boolean?,
+    mtpCapabilityResult: Boolean?,
     mtpSkippedByMemory: Boolean,
     mtpAttempted: Boolean
 ): MtpRuntimeStatus = when {
     !mtpRequested -> MtpRuntimeStatus.OFF
     !mtpSupported -> MtpRuntimeStatus.UNSUPPORTED
-    selectedMtpEnabled && mtpFlagAppliedForMtp && mtpProbeResult == true -> MtpRuntimeStatus.RUNTIME_CONFIRMED_ACTIVE
     selectedMtpEnabled && mtpFlagAppliedForMtp -> MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
     mtpSkippedByMemory -> MtpRuntimeStatus.FALLBACK_DISABLED
     mtpAttempted -> MtpRuntimeStatus.FALLBACK_DISABLED
@@ -707,13 +715,13 @@ internal fun resolveMtpFallbackReason(
     mtpSupported: Boolean,
     selectedMtpEnabled: Boolean,
     mtpFlagAppliedForMtp: Boolean,
-    mtpProbeResult: Boolean?,
+    mtpCapabilityResult: Boolean?,
     mtpSkippedByMemory: Boolean,
     mtpAttempted: Boolean
 ): String? = when {
     mtpRequested && !mtpSupported -> "Model does not support MTP"
     mtpSkippedByMemory -> "MTP disabled due to previous failure"
-    mtpAttempted && !selectedMtpEnabled && mtpProbeResult == false -> "MTP runtime probe: no speculative decoding support"
+    mtpAttempted && !selectedMtpEnabled && mtpCapabilityResult == false -> "MTP capability probe: no speculative decoding support"
     mtpAttempted && !selectedMtpEnabled -> "MTP initialization failed, fell back to non-MTP"
     mtpRequested && mtpSupported && !mtpFlagAppliedForMtp -> "MTP flag application failed"
     else -> null

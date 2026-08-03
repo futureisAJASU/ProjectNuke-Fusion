@@ -183,9 +183,13 @@
 
 - ModelFingerprint (canonical path, size, mtime, validator version, MTP capability) plus EngineRuntimeKey replace the string cache key; file/capability changes invalidate the loaded engine. LoadedRuntimeState holds one consistent snapshot for reuse decisions and status reporting.
 
-### Runtime probe and confirmed-active status
+### Capability probe and truthful runtime status
 
-- After a successful MTP init, the official Capabilities(modelPath).hasSpeculativeDecodingSupport() probe is required for RUNTIME_CONFIRMED_ACTIVE; a negative probe falls back and is remembered, an unavailable probe keeps the optimistic INITIALIZED_WITH_MTP_REQUEST claim.
+- Renamed the pre-Engine `runtimeMtpProbe` to `mtpCapabilityProbe` to reflect that `Capabilities(modelPath).hasSpeculativeDecodingSupport()` is a capability check performed before Engine creation, not runtime-activity evidence.
+- A positive capability result no longer produces `RUNTIME_CONFIRMED_ACTIVE`; a successful MTP Engine initialization now reports `INITIALIZED_WITH_MTP_REQUEST`. `RUNTIME_CONFIRMED_ACTIVE` remains a reserved enum value, deliberately unreachable from `resolveMtpRuntimeStatus` until LiteRT-LM exposes positive execution evidence (e.g. drafted/accepted-token counters).
+- A negative capability result still skips the MTP candidate (kept from R5).
+- Added an exhaustive matrix test proving `RUNTIME_CONFIRMED_ACTIVE` is never produced by the resolver for any combination of inputs.
+- Corrected release notes that previously claimed "runtime activity confirmation" to describe the truthful capability-gated status.
 
 ### Native benchmark stats
 
