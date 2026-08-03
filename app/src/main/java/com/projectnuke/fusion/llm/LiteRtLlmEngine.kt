@@ -37,7 +37,8 @@ class LiteRtLlmEngine(
     },
     private val flagReader: () -> Boolean? = {
         ExperimentalFlags.enableSpeculativeDecoding
-    }
+    },
+    private val failureMemoryStorage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage
 ) : LlmEngine {
 
     private var engine: Engine? = null
@@ -46,7 +47,7 @@ class LiteRtLlmEngine(
     private var actualVisionBackend: String? = null
     private var cachedMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
     private var cachedRuntimeSelection: EngineSelectionRuntime? = null
-    private val mtpFailureMemory = MtpFailureMemory()
+    private val mtpFailureMemory = MtpFailureMemory(failureMemoryStorage)
     @Volatile
     var lastMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
         private set
@@ -785,6 +786,9 @@ internal fun buildEngineCandidateLadder(
     val canUseMtp = mtpRequested && mtpSupported
     return when (accelerator) {
         AcceleratorMode.CPU -> buildList {
+            // CPU+MTP requires an explicit user MTP request (the AUTO policy
+            // never enables MTP on CPU), so this stays as an explicit
+            // experimental path only.
             if (canUseMtp) add(EngineCandidate("CPU", mtpEnabled = true))
             add(EngineCandidate("CPU", mtpEnabled = false))
         }
@@ -793,19 +797,41 @@ internal fun buildEngineCandidateLadder(
             add(EngineCandidate("GPU", mtpEnabled = false))
         }
         AcceleratorMode.AUTO -> buildList {
+            // Beta AUTO ladder: GPU+MTP -> GPU -> CPU. CPU+MTP is never an
+            // automatic fallback, and the ladder stays at most 3 candidates
+            // to avoid sequential engine inits after MTP failure.
             if (canUseMtp) add(EngineCandidate("GPU", mtpEnabled = true))
             add(EngineCandidate("GPU", mtpEnabled = false))
-            if (canUseMtp) add(EngineCandidate("CPU", mtpEnabled = true))
             add(EngineCandidate("CPU", mtpEnabled = false))
         }
     }
 }
 
 /**
- * Tracks MTP initialization failures to prevent repeated failed rebuilds.
- * Keyed by canonical model identity, actual backend, package capability version, and engine settings.
+ * Persistence bridge for MTP failure memory. Entries survive engine unloads and
+ * process restarts so the app does not repeatedly attempt a known-bad MTP
+ * configuration across restarts.
  */
-internal class MtpFailureMemory {
+interface MtpFailureMemoryStorage {
+    fun load(): Map<String, String>
+    fun save(entries: Map<String, String>)
+    fun clear()
+}
+
+object NoopMtpFailureMemoryStorage : MtpFailureMemoryStorage {
+    override fun load(): Map<String, String> = emptyMap()
+    override fun save(entries: Map<String, String>) {}
+    override fun clear() {}
+}
+
+/**
+ * Tracks MTP initialization failures to prevent repeated failed rebuilds.
+ * Keyed by canonical model identity, actual backend, package capability
+ * version, and engine settings. Entries are persisted through [storage].
+ */
+internal class MtpFailureMemory(
+    private val storage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage
+) {
     private data class FailureKey(
         val modelPath: String,
         val actualBackend: String,
@@ -826,6 +852,38 @@ internal class MtpFailureMemory {
     companion object {
         private const val COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
         private const val MAX_ENTRIES = 32
+        private const val KEY_SEPARATOR = "\u001f"
+
+        private fun serializeKey(key: FailureKey): String = listOf(
+            key.modelPath,
+            key.actualBackend,
+            key.validationVersion.toString(),
+            key.accelerator,
+            key.kvCacheCapacityTokens.toString(),
+            key.enableVisionBackend.toString()
+        ).joinToString(KEY_SEPARATOR)
+
+        private fun deserializeKey(serialized: String): FailureKey? {
+            val parts = serialized.split(KEY_SEPARATOR)
+            if (parts.size != 6) return null
+            return FailureKey(
+                modelPath = parts[0],
+                actualBackend = parts[1],
+                validationVersion = parts[2].toIntOrNull() ?: return null,
+                accelerator = parts[3],
+                kvCacheCapacityTokens = parts[4].toIntOrNull() ?: return null,
+                enableVisionBackend = parts[5].toBooleanStrictOrNull() ?: return null
+            )
+        }
+    }
+
+    init {
+        storage.load().forEach { (serializedKey, serializedValue) ->
+            val key = deserializeKey(serializedKey) ?: return@forEach
+            val parts = serializedValue.split("|", limit = 2)
+            val failedAt = parts.getOrNull(0)?.toLongOrNull() ?: return@forEach
+            failures[key] = FailureRecord(failedAt = failedAt, fallbackReason = parts.getOrNull(1).orEmpty())
+        }
     }
 
     /**
@@ -856,6 +914,7 @@ internal class MtpFailureMemory {
             } else {
                 // Cooldown expired, allow retry
                 failures.remove(key)
+                persist()
             }
         }
         return null
@@ -885,10 +944,12 @@ internal class MtpFailureMemory {
             failedAt = System.currentTimeMillis(),
             fallbackReason = fallbackReason
         )
+        persist()
         // Evict oldest if over limit
         if (failures.size > MAX_ENTRIES) {
             val oldestKey = failures.minByOrNull { it.value.failedAt }?.key
             oldestKey?.let { failures.remove(it) }
+            persist()
         }
     }
 
@@ -897,6 +958,7 @@ internal class MtpFailureMemory {
      */
     fun clearForModel(modelPath: String) = synchronized(lock) {
         failures.keys.filter { it.modelPath == modelPath }.forEach { failures.remove(it) }
+        persist()
     }
 
     /**
@@ -904,5 +966,18 @@ internal class MtpFailureMemory {
      */
     fun clearAll() = synchronized(lock) {
         failures.clear()
+        storage.clear()
+    }
+
+    internal fun persistedEntryCount(): Int = synchronized(lock) { storage.load().size }
+
+    private fun persist() {
+        runCatching {
+            storage.save(
+                failures.entries.associate { (key, record) ->
+                    serializeKey(key) to "${record.failedAt}|${record.fallbackReason}"
+                }
+            )
+        }
     }
 }

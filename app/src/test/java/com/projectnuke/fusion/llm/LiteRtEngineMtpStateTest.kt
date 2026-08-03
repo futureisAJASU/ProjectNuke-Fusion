@@ -133,17 +133,20 @@ class LiteRtEngineMtpStateTest {
     }
 
     @Test
-    fun `AUTO ladder prefers GPU+MTP then GPU then CPU+MTP then CPU`() {
+    fun `AUTO ladder prefers GPU+MTP then GPU then CPU, never CPU+MTP`() {
         val ladder = buildEngineCandidateLadder(AcceleratorMode.AUTO, mtpRequested = true, mtpSupported = true)
         assertEquals(
             listOf(
                 EngineCandidate("GPU", true),
                 EngineCandidate("GPU", false),
-                EngineCandidate("CPU", true),
                 EngineCandidate("CPU", false)
             ),
             ladder
         )
+        // Beta AUTO never falls back to CPU+MTP (explicit experimental only)
+        // and keeps the ladder at most 3 candidates to avoid sequential inits.
+        assertTrue(ladder.none { it.backend == "CPU" && it.mtpEnabled })
+        assertTrue(ladder.size <= 3)
     }
 
     @Test
@@ -183,7 +186,7 @@ class LiteRtEngineMtpStateTest {
     }
 
     @Test
-    fun `CPU ladder keeps MTP fallback when MTP supported`() {
+    fun `CPU ladder keeps MTP fallback only for explicit MTP requests`() {
         val ladder = buildEngineCandidateLadder(AcceleratorMode.CPU, mtpRequested = true, mtpSupported = true)
         assertEquals(
             listOf(
@@ -193,5 +196,8 @@ class LiteRtEngineMtpStateTest {
             ladder
         )
         assertEquals("CPU", ladder.first().backend)
+
+        val withoutRequest = buildEngineCandidateLadder(AcceleratorMode.CPU, mtpRequested = false, mtpSupported = true)
+        assertEquals(listOf(EngineCandidate("CPU", false)), withoutRequest)
     }
 }

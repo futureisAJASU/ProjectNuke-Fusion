@@ -32,7 +32,12 @@ object FusionRuntimeManager {
      * unload never orphans it and the next generation reloads its native engine.
      */
     fun sharedEngine(context: Context): LiteRtLlmEngine =
-        owner.acquire { LiteRtLlmEngine(context.applicationContext) }
+        owner.acquire {
+            LiteRtLlmEngine(
+                context.applicationContext,
+                failureMemoryStorage = PrefsMtpFailureMemoryStorage(context.applicationContext)
+            )
+        }
 
     fun unloadSharedEngineIfIdle(reason: String) {
         if (FusionRuntimeLock.isChatGenerationRunning || FusionRuntimeLock.isBenchmarkRunning) return
