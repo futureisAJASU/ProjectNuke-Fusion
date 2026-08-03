@@ -494,10 +494,13 @@ public object LiteRtLmFileParser {
             .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
             .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
         val out = java.nio.CharBuffer.allocate(bytes.size)
-        try {
-            decoder.decode(java.nio.ByteBuffer.wrap(bytes), out, true)
-            decoder.flush(out)
-        } catch (e: java.nio.charset.CharacterCodingException) {
+        val input = java.nio.ByteBuffer.wrap(bytes)
+        val result = decoder.decode(input, out, true)
+        val flushed = decoder.flush(out)
+        if (result.isMalformed || result.isUnmappable ||
+            flushed.isMalformed || flushed.isUnmappable ||
+            input.hasRemaining()
+        ) {
             throw ParseException("$what is not valid UTF-8")
         }
         out.flip()

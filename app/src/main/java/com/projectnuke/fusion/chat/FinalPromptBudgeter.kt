@@ -13,42 +13,21 @@ internal object FinalPromptBudgeter {
     private const val MAX_MESSAGE_CHARS = 8_000
 
     fun fit(messages: List<ChatMessage>, budget: FinalPromptBudget): FittedMessages {
-        val limit = if (budget.externaModelContextChars != null && budget.externaModelContextChars > 0) {
-            budget.externaModelContextChars
-        } else if (budget.external) {
-            48_000
-        } else when {
-            budget.modelId.orEmpty().contains("4b", true) -> 24_000
-            budget.modelId.orEmpty().contains("2b", true) -> 16_000
-            else -> 20_000
-        }
+        val limit = computeLimit(budget)
         val reserve = budget.maxOutputTokens.coerceAtLeast(0) * 4
-        var available = (limit - reserve).coerceAtLeast(0)
+        val available = (limit - reserve).coerceAtLeast(0)
 
         val bounded = messages.map { it.bounded() }
 
         if (bounded.sumOf { it.content.length + 32 } <= available) return FittedMessages(bounded, false)
 
-        val mandatory = bounded.filter { it.role == "system" }.toMutableList()
-        val current = bounded.lastOrNull { it.role == "user" }
-        if (current != null) {
-            mandatory += current
-        }
-
+        val mandatory = bounded.filter { it.role == "system" } +
+            bounded.lastOrNull { it.role == "user" }.let { listOfNotNull(it) }
+        val current = mandatory.lastOrNull { it.role == "user" }
         val mandatoryCost = mandatory.sumOf { it.content.length + 32 }
-        if (mandatoryCost > limit) {
-            available = (limit - reserve).coerceAtLeast(0)
-            val lastUser = mandatory.lastOrNull { it.role == "user" }
-            return FittedMessages(
-                buildList {
-                    add(ChatMessage("system", "Budget exceeded"))
-                    lastUser?.let { add(it) }
-                },
-                true,
-            )
-        }
+        if (mandatoryCost > available) return FittedMessages(emptyList(), true)
 
-        available -= mandatoryCost
+        var remaining = available - mandatoryCost
 
         val nonMandatory = bounded.filter { it.role != "system" && it !== current }
         val turns = nonMandatory.chunked(2).asReversed()
@@ -56,16 +35,16 @@ internal object FinalPromptBudgeter {
 
         for (turn in turns) {
             val cost = turn.sumOf { it.content.length + 32 }
-            if (cost > available) break
+            if (cost > remaining) break
             selected += turn
-            available -= cost
+            remaining -= cost
         }
 
         return FittedMessages(
             buildList {
-            addAll(bounded.filter { it.role == "system" })
-            addAll(selected.asReversed().flatten())
-            current?.let { add(it) }
+                addAll(bounded.filter { it.role == "system" })
+                addAll(selected.asReversed().flatten())
+                current?.let { add(it) }
             },
             false,
         )
@@ -81,7 +60,7 @@ internal object FinalPromptBudgeter {
             else -> 20_000
         }
 
-private fun ChatMessage.bounded(): ChatMessage {
+    private fun ChatMessage.bounded(): ChatMessage {
         if (content.length <= MAX_MESSAGE_CHARS) return this
         return copy(
             content = content.take(MAX_MESSAGE_CHARS / 2) +

@@ -210,9 +210,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.projectnuke.fusion.util.FusionFileProvider
+import com.projectnuke.fusion.util.MtpPolicyProduction
 import com.projectnuke.fusion.util.normalizeUserVisibleName
-import com.projectnuke.fusion.util.defaultSpeculativeDecodingEnabled
-import com.projectnuke.fusion.util.resolveEffectiveMtpSetting
 private val BlackBg = Color(0xFF000000)
 private val PanelBg = Color(0xFF171717)
 private val MenuBg = Color(0xFF202020)
@@ -724,9 +723,10 @@ fun ChatScreen(
 
     fun isRunnableExternalProvider(provider: AiProviderConfig): Boolean {
         return provider.isEnabled &&
-            !provider.apiKeySecretId.isNullOrBlank() &&
             provider.baseUrl.isNotBlank() &&
-            provider.modelId.isNotBlank()
+            provider.modelId.isNotBlank() &&
+            (provider.authMode == com.projectnuke.fusion.ai.model.AiProviderAuthMode.NONE ||
+                !provider.apiKeySecretId.isNullOrBlank())
     }
 
     suspend fun refreshExternalProviderState() {
@@ -743,15 +743,33 @@ fun ChatScreen(
         providerId: String? = null,
         providerSelectionFrozen: Boolean = false,
     ): ExternalAiChatResult {
+        val assembled = FinalPromptAssembler.assemble(
+            FinalPromptRequest(currentMessages, FinalPromptBudget(null, true, generationSettings.maxTokens))
+        )
+        if (FinalPromptAssembler.isTooLarge(assembled)) {
+            return ExternalAiChatResult.Error("대화 내용이 너무 길어 요청을 보낼 수 없습니다. 새 대화를 시작하거나 대화를 요약해 주세요.")
+        }
         return externalAiChatRunner.generateFromMessages(
             messages = buildExternalAiMessages(
-                messages = FinalPromptAssembler.readyOrThrow(FinalPromptAssembler.assemble(FinalPromptRequest(currentMessages, FinalPromptBudget(null, true, generationSettings.maxTokens)))),
+                messages = FinalPromptAssembler.readyOrThrow(assembled),
                 stripAttachments = { stripSearchSourcesMetadata(parseMessageAttachments(context, it).body) }
             ),
             hasAttachments = hasAttachments,
             providerId = providerId,
             providerSelectionFrozen = providerSelectionFrozen,
         )
+    }
+
+    fun assembleLocalGenerationMessages(
+        messages: List<ChatMessage>,
+        budget: FinalPromptBudget,
+    ): List<ChatMessage>? {
+        val result = FinalPromptAssembler.assemble(FinalPromptRequest(messages, budget))
+        if (FinalPromptAssembler.isTooLarge(result)) {
+            Toast.makeText(context, "대화 내용이 너무 길어 요청을 보낼 수 없습니다. 새 대화를 시작하거나 대화를 요약해 주세요.", Toast.LENGTH_LONG).show()
+            return null
+        }
+        return FinalPromptAssembler.readyOrThrow(result)
     }
 
     LaunchedEffect(aiProviderRepository) {
@@ -809,6 +827,7 @@ fun ChatScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 attachmentLifecycleRefreshKey++
+                modelImportCoordinator.cleanupAbandoned()
             }
         }
         lifecycleOwner?.lifecycle?.addObserver(observer)
@@ -1077,8 +1096,8 @@ fun ChatScreen(
 if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
             val requestId = UUID.randomUUID().toString()
             val capturedSettings = generationSettings.copy(
-                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
-                    modelName = selectedModel,
+                speculativeDecodingEnabled = MtpPolicyProduction.resolveEffectiveMtpSetting(
+                    modelPath = selectedModelPath!!,
                     settings = generationSettings
                 )
             )
@@ -1154,7 +1173,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 }
                                 return@start
                             }
-                            val messagesForGeneration = buildList<ChatMessage> {
+                            val rawMessagesForGeneration = buildList<ChatMessage> {
                                 add(
                                     ChatMessage(
                                         role = "system",
@@ -1179,7 +1198,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 val retryAttachments = (if (imageAttachments.isNotEmpty()) nonImageAttachments else attachmentsToSend)
                                     .map { AttachmentRecord(it.name, it.mimeType, it.localPath) }
                                 add(ChatMessage(role = "user", content = buildFinalUserContent(request.promptText, retryAttachments, actualWebSearchUsed, webSearchResult)))
-                            }.let { FinalPromptAssembler.readyOrThrow(FinalPromptAssembler.assemble(FinalPromptRequest(it, FinalPromptBudget(request.selectedModelId, false, request.settings.maxTokens)))) }
+                            }
+                            val messagesForGeneration = assembleLocalGenerationMessages(
+                                rawMessagesForGeneration,
+                                FinalPromptBudget(request.selectedModelId, false, request.settings.maxTokens),
+                            ) ?: return@start
                             val isImageGeneration = imageAttachments.isNotEmpty()
                             val isReasoningEnabled = request.reasoningEnabled
                             when {
@@ -1250,7 +1273,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     return@start
                                 }
                             }
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, engine.lastMtpStatus)))
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, engine.lastMtpStatus, engine.lastRuntimeSelection?.actualTextBackend, engine.lastRuntimeSelection?.actualVisionBackend)))
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -1316,8 +1339,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         if (isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API) {
             val requestId = UUID.randomUUID().toString()
             val capturedSettings = generationSettings.copy(
-                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
-                    modelName = selectedModel,
+                speculativeDecodingEnabled = MtpPolicyProduction.resolveEffectiveMtpSetting(
+                    modelPath = selectedModelPath!!,
                     settings = generationSettings
                 )
             )
@@ -1363,7 +1386,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 }
                                 return@start
                             }
-                            val messagesForGeneration = buildList<ChatMessage> {
+                            val rawMessagesForGeneration = buildList<ChatMessage> {
                                 add(
                                     ChatMessage(
                                         role = "system",
@@ -1386,7 +1409,11 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 buildConversationSummaryContextText(loadConversationSummary(context, request.conversationId))?.let { add(ChatMessage(role = "system", content = it)) }
                                 addAll(request.history)
                                 add(ChatMessage(role = "user", content = request.promptText))
-                            }.let { FinalPromptAssembler.readyOrThrow(FinalPromptAssembler.assemble(FinalPromptRequest(it, FinalPromptBudget(request.selectedModelId, false, request.settings.maxTokens)))) }
+                            }
+                            val messagesForGeneration = assembleLocalGenerationMessages(
+                                rawMessagesForGeneration,
+                                FinalPromptBudget(request.selectedModelId, false, request.settings.maxTokens),
+                            ) ?: return@start
                             val isReasoningEnabled = request.reasoningEnabled
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) {
                                 it.copy(generationStatus = if (isReasoningEnabled) "더 깊게 생각하는 중..." else "답변을 다시 작성하는 중입니다.")
@@ -1428,7 +1455,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     return@start
                                 }
                             }
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, engine.lastMtpStatus)))
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, engine.lastMtpStatus, engine.lastRuntimeSelection?.actualTextBackend, engine.lastRuntimeSelection?.actualVisionBackend)))
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -1500,10 +1527,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 selectedModelId = selectedModel,
                 selectedModelPath = null,
                 settings = generationSettings.copy(
-                    speculativeDecodingEnabled = resolveEffectiveMtpSetting(
-                        modelName = selectedModel,
-                        settings = generationSettings
-                    )
+                    speculativeDecodingEnabled = false
                 ),
                 reasoningEnabled = reasoningEnabled,
                 webSearchPolicy = GenerationRequestSnapshot.WebSearchPolicy.DISABLED,
@@ -1652,10 +1676,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                 selectedModelId = selectedModel,
                 selectedModelPath = null,
                 settings = generationSettings.copy(
-                    speculativeDecodingEnabled = resolveEffectiveMtpSetting(
-                        modelName = selectedModel,
-                        settings = generationSettings
-                    )
+                    speculativeDecodingEnabled = false
                 ),
                 reasoningEnabled = reasoningEnabled,
                 webSearchPolicy = GenerationRequestSnapshot.resolveWebSearchPolicy(
@@ -1729,10 +1750,12 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                             // === PROMPT CONSTRUCTION ===
                             val requestSettings = retrySnapshot.settings.copy(
-                                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
-                                    modelName = retrySnapshot.selectedModelId ?: "",
-                                    settings = retrySnapshot.settings
-                                )
+                                speculativeDecodingEnabled = retrySnapshot.selectedModelPath?.let { path ->
+                                    MtpPolicyProduction.resolveEffectiveMtpSetting(
+                                        modelPath = path,
+                                        settings = retrySnapshot.settings
+                                    )
+                                } ?: false
                             )
                             val fusionSystemPrompt = buildFusionSystemPrompt(
                                 reasoningEnabled = retrySnapshot.reasoningEnabled,
@@ -1890,10 +1913,12 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
             return
         }
 
-        val mtpEnabledForRequest = resolveEffectiveMtpSetting(
-            modelName = selectedModel,
-            settings = generationSettings
-        )
+        val mtpEnabledForRequest = selectedModelPath?.let { path ->
+            MtpPolicyProduction.resolveEffectiveMtpSetting(
+                modelPath = path,
+                settings = generationSettings
+            )
+        } ?: false
         val requestSettings = generationSettings.copy(
             speculativeDecodingEnabled = mtpEnabledForRequest
         )
@@ -2811,10 +2836,12 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                                                     // === PROMPT CONSTRUCTION ===
                                                     val requestSettings = snapshot.settings.copy(
-                                                        speculativeDecodingEnabled = resolveEffectiveMtpSetting(
-                                                            modelName = snapshot.selectedModelId ?: "",
-                                                            settings = snapshot.settings
-                                                        )
+                                                        speculativeDecodingEnabled = snapshot.selectedModelPath?.let { path ->
+                                                            MtpPolicyProduction.resolveEffectiveMtpSetting(
+                                                                modelPath = path,
+                                                                settings = snapshot.settings
+                                                            )
+                                                        } ?: false
                                                     )
                                                     val fusionSystemPrompt = buildFusionSystemPrompt(
                                                         reasoningEnabled = snapshot.reasoningEnabled,
@@ -3080,10 +3107,12 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
 
                                             // === PROMPT CONSTRUCTION ===
                                             val requestSettings = snapshot.settings.copy(
-                                                speculativeDecodingEnabled = resolveEffectiveMtpSetting(
-                                                    modelName = snapshot.selectedModelId!!,
-                                                    settings = snapshot.settings
-                                                )
+                                                speculativeDecodingEnabled = snapshot.selectedModelPath?.let { path ->
+                                                    MtpPolicyProduction.resolveEffectiveMtpSetting(
+                                                        modelPath = path,
+                                                        settings = snapshot.settings
+                                                    )
+                                                } ?: false
                                             )
                                             val fusionSystemPrompt = buildFusionSystemPrompt(
                                                 reasoningEnabled = snapshot.reasoningEnabled,
@@ -3115,6 +3144,33 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                     webSearchResult = webSearchResult
                                                 )))
                                             }
+                                            val gatedMessages = assembleLocalGenerationMessages(
+                                                currentMessages,
+                                                FinalPromptBudget(snapshot.selectedModelId, false, requestSettings.maxTokens),
+                                            )
+                                            if (gatedMessages == null) {
+                                                if (chatViewModel.registry.isActive(s.conversationId, s.requestId)) {
+                                                    persistAssistantMessage(
+                                                        insertMessage = {
+                                                            dao.insertMessage(
+                                                                MessageEntity(
+                                                                    conversationId = s.conversationId,
+                                                                    role = "assistant",
+                                                                    content = "대화 내용이 너무 길어 요청을 보낼 수 없습니다. 새 대화를 시작하거나 대화를 요약해 주세요.",
+                                                                    createdAt = System.currentTimeMillis(),
+                                                                )
+                                                            )
+                                                        },
+                                                        updateConversationTimestamp = {
+                                                            dao.updateConversationTime(s.conversationId, System.currentTimeMillis())
+                                                        },
+                                                        onTimestampFailure = {
+                                                            Log.e("FusionEngine", "Failed to update conversation time after context-too-large error", it)
+                                                        },
+                                                    )
+                                                }
+                                                return@start
+                                            }
 
                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "모델 로딩 중...") }
 
@@ -3143,7 +3199,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 중...") }
                                                             try {
                                                                 val outcome = engine.generateMultimodalStreaming(
-                                                                    messages = currentMessages,
+                                                                    messages = gatedMessages,
                                                                     modelPath = activeModelPath!!,
                                                                     settings = requestSettings,
                                                                     imagePaths = snapshot.multimodalImagePaths,
@@ -3165,7 +3221,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 준비 중...") }
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "이미지 분석 중...") }
                                                             engine.generateMultimodalStreaming(
-                                                                messages = currentMessages,
+                                                                messages = gatedMessages,
                                                                 modelPath = activeModelPath!!,
                                                                 settings = requestSettings,
                                                                 imagePaths = snapshot.multimodalImagePaths,
@@ -3175,7 +3231,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             )
                                                         } else if (snapshot.reasoningEnabled) {
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "더 깊게 생각하는 중...") }
-                                                            engine.generate(messages = currentMessages, modelPath = activeModelPath!!, settings = requestSettings)
+                                                            engine.generate(messages = gatedMessages, modelPath = activeModelPath!!, settings = requestSettings)
                                                         } else {
                                                             val coalescer = TokenCoalescer(
                                                                 scope = requestScope,
@@ -3188,7 +3244,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(generationStatus = "답변 생성 중...") }
                                                             try {
                                                                 val outcome = engine.generateStreaming(
-                                                                    messages = currentMessages,
+                                                                    messages = gatedMessages,
                                                                     modelPath = activeModelPath!!,
                                                                     settings = requestSettings,
                                                                     onToken = { token ->
@@ -3242,7 +3298,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 generatedText = rawReply,
                                                 totalGenerationMs = totalGenerationMs,
                                                 firstTokenLatencyMs = firstTokenLatencyMs,
-                                                settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = actualWebSearchUsed, mtpStatus = engine.lastMtpStatus))
+                                                settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = actualWebSearchUsed, mtpStatus = engine.lastMtpStatus, actualBackend = engine.lastRuntimeSelection?.actualTextBackend, actualVisionBackend = engine.lastRuntimeSelection?.actualVisionBackend))
                                             )
                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingMetricsLine = metricsLine, generationStatus = "답변 저장 중...") }
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
@@ -3832,6 +3888,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
         AdvancedSettingsDialog(
             settings = generationSettings,
             selectedModel = selectedModel,
+            selectedModelPath = selectedModelPath,
             reasoningEnabled = reasoningEnabled,
             webSearchEnabled = webSearchEnabled,
             webSearchProviderRepository = webSearchProviderRepository,
@@ -9173,6 +9230,7 @@ private fun DownloadModelDialog(
 private fun AdvancedSettingsDialog(
     settings: GenerationSettings,
     selectedModel: String,
+    selectedModelPath: String?,
     reasoningEnabled: Boolean,
     webSearchEnabled: Boolean,
     webSearchProviderRepository: WebSearchProviderRepository,
@@ -9203,16 +9261,18 @@ private fun AdvancedSettingsDialog(
             }
         )
     }
-    var speculativeDecodingEnabled by remember(settings, selectedModel) {
+    var speculativeDecodingEnabled by remember(settings, selectedModelPath) {
         mutableStateOf(
             settings.speculativeDecodingEnabled
-                ?: defaultSpeculativeDecodingEnabled(
-                    modelName = selectedModel,
-                    accelerator = settings.accelerator
-                )
+                ?: selectedModelPath?.let { path ->
+                    MtpPolicyProduction.getDefaultMtpSetting(
+                        modelPath = path,
+                        accelerator = settings.accelerator
+                    )
+                } ?: false
         )
     }
-    var speculativeDecodingTouched by remember(settings, selectedModel) {
+    var speculativeDecodingTouched by remember(settings, selectedModelPath) {
         mutableStateOf(settings.speculativeDecodingEnabled != null)
     }
     var maxTokensText by remember(settings) { mutableStateOf(maxTokens.toString()) }
@@ -9410,23 +9470,27 @@ private fun AdvancedSettingsDialog(
 
                 SettingSwitchRow(
                     title = "MTP 가속",
-                    subtitle = "Gemma 4에서 speculative decoding으로 출력 속도를 높입니다.",
+                    subtitle = "지원되는 모델에서 speculative decoding으로 출력 속도를 높입니다.",
                     checked = if (speculativeDecodingTouched) {
                         speculativeDecodingEnabled
                     } else {
-                        defaultSpeculativeDecodingEnabled(
-                            modelName = selectedModel,
-                            accelerator = accelerator
-                        )
+                        selectedModelPath?.let { path ->
+                            MtpPolicyProduction.getDefaultMtpSetting(
+                                modelPath = path,
+                                accelerator = accelerator
+                            )
+                        } ?: false
                     },
                     onToggle = {
                         val current = if (speculativeDecodingTouched) {
                             speculativeDecodingEnabled
                         } else {
-                            defaultSpeculativeDecodingEnabled(
-                                modelName = selectedModel,
-                                accelerator = accelerator
-                            )
+                            selectedModelPath?.let { path ->
+                                MtpPolicyProduction.getDefaultMtpSetting(
+                                    modelPath = path,
+                                    accelerator = accelerator
+                                )
+                            } ?: false
                         }
                         speculativeDecodingEnabled = !current
                         speculativeDecodingTouched = true

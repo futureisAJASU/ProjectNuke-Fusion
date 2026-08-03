@@ -52,19 +52,32 @@ internal object ConversationCleanupDebtStore {
         val terminal = entries.filter { it.attempts >= MAX_ATTEMPTS }
         val remaining = entries.toMutableList()
         pending.forEach { entry ->
-            val success = runCatching {
-                deleteResponseVersionState(context, entry.conversationId)
-                deleteConversationSummary(context, entry.conversationId)
-                check(deleteConversationOnlyMemoryCandidates(context, entry.conversationId))
-                check(FusionResponseRatings.deleteForMessages(context, entry.messageIds))
-                entry.pendingPaths.forEach { path ->
-                    check(AttachmentStorageManager.deletePendingAttachmentFile(context, path))
+            var remainingMessageIds = entry.messageIds
+            var remainingPaths = entry.pendingPaths
+            val componentsOk = runCatching {
+                val stateOk = deleteResponseVersionState(context, entry.conversationId)
+                val summaryOk = deleteConversationSummary(context, entry.conversationId)
+                val memoryOk = deleteConversationOnlyMemoryCandidates(context, entry.conversationId)
+                val ratingsOk = FusionResponseRatings.deleteForMessages(context, remainingMessageIds)
+                remainingPaths = remainingPaths.filterTo(mutableSetOf()) { path ->
+                    !AttachmentStorageManager.deletePendingAttachmentFile(context, path)
+                }
+                if (!ratingsOk) {
+                    remainingMessageIds = entry.messageIds
+                } else {
+                    remainingMessageIds = emptySet()
                 }
                 AttachmentStorageManager.cleanupUnreferencedAttachments(context, dao)
-            }.isSuccess
+                stateOk && summaryOk && memoryOk && ratingsOk && remainingPaths.isEmpty()
+            }.getOrDefault(false)
             remaining.remove(entry)
-            if (!success) {
-                remaining += entry.copy(attempts = entry.attempts + 1, lastAttemptAt = System.currentTimeMillis())
+            if (!componentsOk) {
+                remaining += entry.copy(
+                    messageIds = remainingMessageIds,
+                    pendingPaths = remainingPaths,
+                    attempts = entry.attempts + 1,
+                    lastAttemptAt = System.currentTimeMillis(),
+                )
             }
         }
         check(synchronized(lock) { persistLocked(context, (remaining + terminal).takeLast(MAX_ENTRIES)) })

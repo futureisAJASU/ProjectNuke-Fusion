@@ -124,4 +124,38 @@ class LiteRtLmParserLimitsTest {
         assertFalse(LiteRtLmPackageValidator.validate(file).isValid)
         file.deleteRecursively()
     }
+
+    @Test
+    fun `malformed UTF-8 in metadata string is rejected as INVALID_UTF8`() {
+        val marker = "MALFORMED_UTF8_MARKER"
+        val bytes = LiteRtLmPackageBuilder.buildBytes(
+            sections = LiteRtLmPackageBuilder.defaultSections(),
+            systemEntries = listOf("author" to marker),
+        )
+        val markerBytes = marker.toByteArray(Charsets.US_ASCII)
+        val markerIndex = bytes.indexOfBytes(markerBytes)
+        assertTrue(markerIndex >= 0)
+        val patched = bytes.copyOf()
+        patched[markerIndex + markerBytes.size - 1] = 0x80.toByte() // lone continuation byte
+        val file = createTestFile(patched)
+        val result = LiteRtLmPackageValidator.validate(file)
+        assertFalse(result.isValid)
+        assertEquals(
+            FailureReason.INVALID_UTF8,
+            (result as LiteRtLmValidationResult.Invalid).reason,
+        )
+        assertEquals(0, LiteRtLmPackageValidator.capabilities(file).validationVersion)
+        file.deleteRecursively()
+    }
+
+    private fun ByteArray.indexOfBytes(target: ByteArray): Int {
+        if (target.isEmpty()) return 0
+        outer@ for (index in 0..size - target.size) {
+            for (offset in target.indices) {
+                if (this[index + offset] != target[offset]) continue@outer
+            }
+            return index
+        }
+        return -1
+    }
 }

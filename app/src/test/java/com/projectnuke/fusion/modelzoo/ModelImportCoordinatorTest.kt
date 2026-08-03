@@ -3,6 +3,9 @@ package com.projectnuke.fusion.modelzoo
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.nio.file.Files
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -10,6 +13,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ModelImportCoordinatorTest {
+    private val testScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     @Test
     fun `default validator rejects random bytes renamed to litertlm`() = runTest {
         val root = Files.createTempDirectory("fusion-model-import").toFile()
@@ -17,6 +22,7 @@ class ModelImportCoordinatorTest {
             modelDirectory = root,
             openSource = { ByteArrayInputStream(ByteArray(1024 * 1024) { 7 }) },
             usableSpace = { Long.MAX_VALUE },
+            scope = testScope,
         )
         val result = coordinator.import(ModelImportRequest(sourceIdentity = "random", displayName = "random.litertlm"))
         assertEquals(ModelImportFailure.INVALID_MODEL, (result as ModelImportResult.Failure).kind)
@@ -33,6 +39,7 @@ class ModelImportCoordinatorTest {
             openSource = { ByteArrayInputStream(ByteArray(1024 * 1024) { 9 }) },
             usableSpace = { Long.MAX_VALUE },
             validator = LiteRtLmValidator { it.extension == "litertlm" || it.name.contains(".litertlm") },
+            scope = testScope,
         )
         val result = coordinator.import(ModelImportRequest(sourceIdentity = "source", displayName = "model.litertlm"))
         val file = (result as ModelImportResult.Success).file
@@ -49,6 +56,7 @@ class ModelImportCoordinatorTest {
             modelDirectory = root,
             openSource = { ByteArrayInputStream(packageBytes) },
             usableSpace = { Long.MAX_VALUE },
+            scope = testScope,
         )
         val result = coordinator.import(
             ModelImportRequest(sourceIdentity = "official", displayName = "gemma.litertlm")

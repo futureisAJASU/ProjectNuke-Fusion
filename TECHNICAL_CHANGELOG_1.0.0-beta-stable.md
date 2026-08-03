@@ -132,3 +132,29 @@
 - `compileDebugKotlin`, `compileDebugUnitTestKotlin`, `testDebugUnitTest` (349 tests), `assembleDebug`, and `lintDebug`: passed.
 - `git diff --check`: passed.
 - `versionCode` bumped `10004` → `10005` with `versionName` unchanged at `1.0.0-beta-stable`.
+
+## R4 hardening (2026-08-03, versionCode 10006)
+
+### Truthful final prompt budgeting
+
+- `FinalPromptBudgeter.fit` deducts the output-token reserve from the context limit once and validates mandatory (system + current user) input against the reserve-deducted `available`, not the raw limit; when mandatory input exceeds `available` it returns `TooLarge` with an empty message list instead of emitting fabricated "Budget exceeded" content.
+- `FinalPromptAssembler.Ready.contextsRemoved` counts whole removed turns (`(removed messages + 1) / 2`) instead of raw message counts.
+- `TooLarge` is now a user-visible gate, not a throw: `runExternalAiRequest` returns `ExternalAiChatResult.Error`, and the local retry, style-regeneration and primary send paths abort with a toast (and an assistant error reply in the primary send path) before any engine or provider invocation.
+- Added budgeter tests for `TooLarge`-with-empty-messages, reserve-exhaustion, and assembler turn counting.
+
+### Cleanup truthfulness
+
+- `ConversationCleanupDebtStore.retry` checks every component's Boolean result (`deleteResponseVersionState`, `deleteConversationSummary`, memory candidates, ratings, pending paths); previously ignored `false` results dropped the debt as successful. Only the failed message-ids/paths are re-recorded, so one transient failure no longer forces completed components to be redone.
+- `ConversationDeletion` captures pending attachment paths inside `settleTarget` from the exact draft being removed (before `clear`), covering both the `DELETED` and `ALREADY_ABSENT` branches instead of racing the pre-deletion draft state.
+
+### Strict UTF-8 package decoding (bug fix)
+
+- `decodeStrictUtf8` relied on the two-argument `CharsetDecoder.decode(in, out, endOfInput)` throwing on malformed input, but that API never throws — malformed input is signaled only via the returned `CoderResult`, which was ignored. Malformed UTF-8 (e.g., a lone `0x80` continuation byte) was silently truncated and accepted, making `FailureReason.INVALID_UTF8` dead code.
+- The decoder now checks both `decode` and `flush` results plus leftover input and rejects any malformed or unconsumed bytes with `ParseException("$what is not valid UTF-8")`, so the validator reports `INVALID_UTF8` and exposes no capabilities.
+- Added a negative test that patches a valid package string in place with a lone continuation byte and asserts `INVALID_UTF8` with `validationVersion == 0`; the golden Gemma 4 E2B package test still passes.
+
+### Validation performed
+
+- `compileDebugKotlin`, `compileDebugUnitTestKotlin`, `testDebugUnitTest` (all suites, incl. the 2.4 GB golden package test), `assembleDebug`, and `lintDebug`: passed.
+- `git diff --check`: passed.
+- `versionCode` bumped `10005` → `10006` with `versionName` unchanged at `1.0.0-beta-stable`.

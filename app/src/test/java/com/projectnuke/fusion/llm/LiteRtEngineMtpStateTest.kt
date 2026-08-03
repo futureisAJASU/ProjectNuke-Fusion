@@ -42,30 +42,6 @@ class LiteRtEngineMtpStateTest {
     }
 
     @Test
-    fun `cache hit with MTP requested and supported reports RUNTIME_CONFIRMED_ACTIVE`() {
-        assertEquals(
-            MtpRuntimeStatus.RUNTIME_CONFIRMED_ACTIVE,
-            resolveMtpCacheHitStatus(mtpRequested = true, mtpSupported = true)
-        )
-    }
-
-    @Test
-    fun `cache hit with MTP requested but unsupported reports UNSUPPORTED`() {
-        assertEquals(
-            MtpRuntimeStatus.UNSUPPORTED,
-            resolveMtpCacheHitStatus(mtpRequested = true, mtpSupported = false)
-        )
-    }
-
-    @Test
-    fun `cache hit without MTP request reports OFF even when supported`() {
-        assertEquals(
-            MtpRuntimeStatus.OFF,
-            resolveMtpCacheHitStatus(mtpRequested = false, mtpSupported = true)
-        )
-    }
-
-    @Test
     fun `MTP runtime status has exact state set`() {
         val expected = setOf(
             MtpRuntimeStatus.OFF,

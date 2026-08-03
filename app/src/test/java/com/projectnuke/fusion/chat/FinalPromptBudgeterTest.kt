@@ -30,6 +30,47 @@ class FinalPromptBudgeterTest {
         }
         val result = FinalPromptBudgeter.fit(messages, FinalPromptBudget("2b", false, 512))
         assertTrue(result.isTooLarge)
+        assertTrue(result.messages.isEmpty())
+    }
+
+    @Test
+    fun `mandatory exceeding reserve-deducted available returns TooLarge without emitting messages`() {
+        val messages = buildList {
+            add(ChatMessage("system", "s".repeat(8_000)))
+            add(ChatMessage("user", "current"))
+        }
+        // maxOutputTokens=4096 -> reserve 16_384 -> available 0 on the 16k "2b" budget
+        val result = FinalPromptBudgeter.fit(messages, FinalPromptBudget("2b", false, 4096))
+        assertTrue(result.isTooLarge)
+        assertTrue(result.messages.isEmpty())
+    }
+
+    @Test
+    fun `mandatory fits limit but not reserve-deducted available returns TooLarge`() {
+        val messages = buildList {
+            add(ChatMessage("system", "s".repeat(5_000)))
+            add(ChatMessage("system", "s2".repeat(5_000)))
+            add(ChatMessage("system", "s3".repeat(5_000)))
+            add(ChatMessage("user", "current"))
+        }
+        // mandatory ~15_135 fits the 16_000 limit but not the 7_808 available (reserve 8_192)
+        val result = FinalPromptBudgeter.fit(messages, FinalPromptBudget("2b", false, 2048))
+        assertTrue(result.isTooLarge)
+        assertTrue(result.messages.isEmpty())
+    }
+
+    @Test
+    fun `assembler counts removed whole turns in contextsRemoved`() {
+        val messages = buildList {
+            add(ChatMessage("system", "policy"))
+            repeat(12) { add(ChatMessage("user", "u".repeat(2_000))); add(ChatMessage("assistant", "a".repeat(2_000))) }
+            add(ChatMessage("user", "current"))
+        }
+        val result = FinalPromptAssembler.assemble(FinalPromptRequest(messages, FinalPromptBudget("4b", false, 512)))
+        assertTrue(result is PromptAssemblyResult.Ready)
+        val ready = result as PromptAssemblyResult.Ready
+        assertTrue(ready.messages.size % 2 == 0)
+        assertEquals((messages.size - ready.messages.size) / 2, ready.contextsRemoved)
     }
 
     @Test

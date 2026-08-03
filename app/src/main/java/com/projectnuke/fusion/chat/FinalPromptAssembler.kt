@@ -24,11 +24,12 @@ internal object FinalPromptAssembler {
         if (fitted.isTooLarge) return PromptAssemblyResult.TooLarge
         val limit = FinalPromptBudgeter.computeLimit(request.budget)
         val cost = fitted.messages.sumOf { it.content.length + 32 }
+        val removedMessages = request.messages.size - fitted.messages.size
         return PromptAssemblyResult.Ready(
             messages = fitted.messages,
             inputCost = cost,
             configuredLimit = limit,
-            contextsRemoved = request.messages.size - fitted.messages.map { it.content }.size,
+            contextsRemoved = (removedMessages + 1) / 2,
         )
     }
 

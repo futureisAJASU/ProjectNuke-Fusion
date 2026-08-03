@@ -52,7 +52,7 @@ import com.projectnuke.fusion.modelzoo.FusionModelProfiles
 import com.projectnuke.fusion.modelzoo.FusionModelSpec
 import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.util.FusionMemoryManager
-import com.projectnuke.fusion.util.resolveEffectiveMtpSetting
+import com.projectnuke.fusion.util.MtpPolicyProduction
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -511,7 +511,10 @@ private suspend fun runAbTests(
                         modelName = target.model.spec.displayName,
                         modelId = target.model.spec.id,
                         settings = target.settings.copy(
-                            speculativeDecodingEnabled = resolveEffectiveMtpSetting(target.model.spec.displayName, target.settings)
+                            speculativeDecodingEnabled = MtpPolicyProduction.resolveEffectiveMtpSetting(
+                                modelPath = target.model.path,
+                                settings = target.settings
+                            )
                         ),
                         reasoningEnabled = target.reasoningEnabled,
                         memoryEnabled = isSavedMemoryContextEnabled(prefs),
@@ -545,7 +548,10 @@ private suspend fun runSingleAbTarget(
 ): AbResult {
     if (!File(target.model.path).exists()) error("model file missing")
     val resolvedSettings = target.settings.copy(
-        speculativeDecodingEnabled = resolveEffectiveMtpSetting(target.model.spec.displayName, target.settings)
+        speculativeDecodingEnabled = MtpPolicyProduction.resolveEffectiveMtpSetting(
+            modelPath = target.model.path,
+            settings = target.settings
+        )
     )
     val memoryText = buildSavedMemoryContext(
         context = context,

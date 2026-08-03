@@ -52,3 +52,12 @@ Fusion의 핵심 채팅 기능을 실제 일상 사용에 가까운 조건에서
 - MTP runtime state is exact: `OFF`, `REQUESTED`, `ACTIVE`, `UNSUPPORTED`, `FALLBACK_DISABLED`, `FAILED`. The speculative-decoding flag is applied before engine initialization, a fallback engine is never cached under an MTP key, and `AUTO` uses a GPU+MTP → GPU → CPU+MTP → CPU fallback ladder.
 - MTP support is derived from validated package capabilities (`hasDrafter`), and chat, benchmark, and A/B test screens share one `resolveEffectiveMtpSetting` policy.
 - MTP behavior is covered by production tests using an injectable engine factory and flag adapter.
+
+## 1.0.0-beta-stable R4 (versionCode 10006)
+
+- 대화 내용이 모델 컨텍스트 한도를 초과하면 전송·재시도·스타일 재생성·외부 API 호출 모두에서 요청 전에 차단하고 안내 메시지를 표시합니다. 이제 과도한 입력이 조용히 엔진으로 전달되지 않습니다.
+- 프롬프트 예산은 출력 토큰 예약분을 먼저 공제한 뒤 필수 입력(시스템·현재 질문)을 검사하며, 최소 입력조차 맞지 않으면 생성 처럼 잘린 내용 대신 바로 오류로 처리합니다.
+- 대화 삭제 후 부산물 정리가 구성 요소별 성공 여부를 확인하며 실패한 부분만 다시 시도합니다. 상세한 정리가 일부 실패했는데도 완료로 처리되는 경우를 줄였습니다.
+- 삭제 시점에 실제 제거되는 작성 중 첨부 경로를 정확히 가로채 정리 기록에 포함합니다.
+- 손상된 UTF-8 문자열을 포함한 모델 파일을 이전에는 조용히 잘라 통과시켰던 문제를 수정하고, 이제 즉시 무효 처리하여 안내합니다.
+- versionCode를 `10006`으로 올렸습니다.

@@ -47,9 +47,8 @@ import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.util.FusionMemoryManager
+import com.projectnuke.fusion.util.MtpPolicyProduction
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
-import com.projectnuke.fusion.util.isMtpCapableModelName
-import com.projectnuke.fusion.util.resolveEffectiveMtpSetting
 import com.projectnuke.fusion.util.toKoreanMtpStatus
 import java.io.File
 import java.util.Locale
@@ -149,7 +148,7 @@ fun FusionBenchmarkScreen(
             Text("모델: $selectedModel", color = Color(0xFFF5F5F5))
             Text("경로: ${resolvedModelPath ?: "없음"}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
             Text("가속기: ${settings.accelerator.name}", color = Color(0xFFF5F5F5))
-            Text("MTP 가속: ${initialBenchmarkMtpStatusLabel(settings, selectedModel)}", color = Color(0xFFF5F5F5))
+            Text("MTP 가속: ${initialBenchmarkMtpStatusLabel(context, settings, selectedModel)}", color = Color(0xFFF5F5F5))
             Text("maxTokens=${settings.maxTokens} / temp=${settings.temperature} / topK=${settings.topK} / topP=${settings.topP}", color = Color(0xFF9E9E9E), fontSize = 12.sp)
             safeMaxTokensCap?.let {
                 Text("벤치마크 안전 제한: maxTokens=$it", color = Color(0xFF9E9E9E), fontSize = 12.sp)
@@ -320,13 +319,16 @@ private suspend fun runBenchmark(
             val decodeMs = firstTokenMs?.let { totalMs - it }?.takeIf { it > 0 }
             val decodeTps = decodeMs?.let { estimatedTokens * 1000.0 / it }
             val mtpStatus = engine.lastMtpStatus
+            val runtimeSelection = engine.lastRuntimeSelection
             val effective = buildEffectiveRuntimeSettings(
                 modelName = snapshot.modelName,
                 modelPath = snapshot.modelPath,
                 settings = snapshot.settings,
                 reasoningEnabled = snapshot.reasoningEnabled,
                 webSearchEnabled = snapshot.webSearchEnabled,
-                mtpStatus = mtpStatus
+                mtpStatus = mtpStatus,
+                actualBackend = runtimeSelection?.actualTextBackend,
+                actualVisionBackend = runtimeSelection?.actualVisionBackend
             )
 
             val resultText = buildString {
@@ -349,7 +351,7 @@ private suspend fun runBenchmark(
                 appendLine("정확한 비교를 위해 MTP 꺼짐/켜짐을 번갈아 3회 이상 측정해 주세요.")
             }.trim()
 
-            onResult(resultText)
+onResult(resultText)
             onStatus("측정 결과를 저장하는 중입니다.")
             saveBenchmarkResult(
                 context = context,
@@ -363,7 +365,8 @@ private suspend fun runBenchmark(
                 totalTokensPerSecond = totalTps.toFloat(),
                 decodeTokensPerSecond = decodeTps?.toFloat(),
                 success = true,
-                errorMessage = null
+                errorMessage = null,
+                actualBackend = runtimeSelection?.actualTextBackend
             )
             Toast.makeText(context, "벤치마크 기록을 저장했습니다.", Toast.LENGTH_SHORT).show()
             Log.i("FusionBenchmark", "Benchmark success totalMs=$totalMs tokens=$estimatedTokens totalTps=$totalTps decodeTps=$decodeTps mtp=${mtpStatus.name}")
@@ -386,7 +389,7 @@ private suspend fun runBenchmark(
         onStatus(null)
         val userMessage = benchmarkUserErrorMessage(e, snapshot)
         Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
-        runCatching {
+runCatching {
             saveBenchmarkResult(
                 context = context,
                 benchmarkDao = benchmarkDao,
@@ -399,7 +402,8 @@ private suspend fun runBenchmark(
                 totalTokensPerSecond = 0f,
                 decodeTokensPerSecond = null,
                 success = false,
-                errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot)
+                errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot),
+                actualBackend = engine.lastRuntimeSelection?.actualTextBackend
             )
         }.onFailure { saveError ->
             Log.e("FusionBenchmark", "Failed to save benchmark result", saveError)
@@ -423,7 +427,8 @@ private suspend fun saveBenchmarkResult(
     totalTokensPerSecond: Float,
     decodeTokensPerSecond: Float?,
     success: Boolean,
-    errorMessage: String?
+    errorMessage: String?,
+    actualBackend: String?,
 ) {
     benchmarkDao.insert(
         BenchmarkResultEntity(
@@ -431,7 +436,7 @@ private suspend fun saveBenchmarkResult(
             modelName = snapshot.modelName,
             modelPath = snapshot.modelPath,
             accelerator = snapshot.settings.accelerator.name,
-            actualBackend = snapshot.settings.accelerator.name,
+            actualBackend = actualBackend,
             mtpEnabled = snapshot.settings.speculativeDecodingEnabled == true,
             mtpStatus = mtpStatus.toKoreanMtpStatus(),
             maxTokens = snapshot.settings.maxTokens,
@@ -485,13 +490,24 @@ private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.Share
     val rawSettings = loadBenchmarkSettingsFromPrefs(prefs)
     val safeCap = benchmarkSafeMaxTokensCap(context)
     val recommendedMaxTokens = FusionMemoryManager.recommendedBenchmarkMaxTokens(context, rawSettings.maxTokens)
+    val resolvedModelPath = resolveBenchmarkModelPath(context, modelName, selectedPath)
     val effectiveSettings = if (recommendedMaxTokens != rawSettings.maxTokens) {
         rawSettings.copy(
             maxTokens = recommendedMaxTokens,
-            speculativeDecodingEnabled = resolveEffectiveMtpSetting(modelName, rawSettings)
+            speculativeDecodingEnabled = resolvedModelPath?.let { path ->
+                MtpPolicyProduction.resolveEffectiveMtpSetting(
+                    modelPath = path,
+                    settings = rawSettings
+                )
+            } ?: false
         )
     } else {
-        rawSettings.copy(speculativeDecodingEnabled = resolveEffectiveMtpSetting(modelName, rawSettings))
+        rawSettings.copy(speculativeDecodingEnabled = resolvedModelPath?.let { path ->
+            MtpPolicyProduction.resolveEffectiveMtpSetting(
+                modelPath = path,
+                settings = rawSettings
+            )
+        } ?: false)
     }
     return BenchmarkSnapshot(
         modelName = modelName,
@@ -578,10 +594,18 @@ private fun resolveBenchmarkModelPath(context: Context, modelName: String, selec
     return if (file.exists()) file.absolutePath else null
 }
 
-private fun initialBenchmarkMtpStatusLabel(settings: GenerationSettings, modelName: String): String {
-    val requested = resolveEffectiveMtpSetting(modelName, settings)
+private fun initialBenchmarkMtpStatusLabel(context: Context, settings: GenerationSettings, modelName: String): String {
+    val selectedPath = context.getSharedPreferences("fusion_chat_settings", Context.MODE_PRIVATE)
+        .getString("selected_model_path", null)
+    val resolvedModelPath = resolveBenchmarkModelPath(context, modelName, selectedPath)
+    val requested = resolvedModelPath?.let { path ->
+        MtpPolicyProduction.resolveEffectiveMtpSetting(
+            modelPath = path,
+            settings = settings
+        )
+    } ?: false
     if (!requested) return "꺼짐"
-    val supported = isMtpCapableModelName(modelName)
+    val supported = resolvedModelPath?.let { MtpPolicyProduction.isMtpSupported(it) } ?: false
     return if (supported) "요청됨" else "미지원"
 }
 

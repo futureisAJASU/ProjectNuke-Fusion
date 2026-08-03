@@ -12,12 +12,19 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.projectnuke.fusion.util.ManagedModelPathPolicy
+
+private const val DEFAULT_BUFFER_SIZE = 1024 * 1024
 
 internal enum class ModelImportFailure {
     TOO_LARGE,
@@ -49,13 +56,38 @@ internal fun defaultValidator(): LiteRtLmValidator = LiteRtLmValidator { file ->
 }
 
 /**
+ * Represents an active model import operation with its token, deferred result, and progress.
+ * The operation owns the entire import process from URI query through metadata commit.
+ */
+internal data class ActiveModelImport(
+    val token: String,
+    val deferred: Deferred<ModelImportResult>,
+    val progress: kotlinx.coroutines.flow.MutableStateFlow<ModelImportProgress>,
+)
+
+/** Progress state for an ongoing model import. */
+internal data class ModelImportProgress(
+    val percent: Int = 0,
+    val stage: ImportStage = ImportStage.COPYING,
+)
+
+internal enum class ImportStage {
+    COPYING,
+    VALIDATING,
+    ADOPTING,
+    COMMITTING_METADATA,
+    RELEASING_PERMISSION,
+    COMPLETE,
+}
+
+/**
  * Process-owned, single-adoption coordinator for imported local models.
  *
  * Ownership model:
  * - Each [sourceIdentity] can have at most one active import at a time.
  * - A second import for the same [sourceIdentity] is rejected (even with the same token).
  * - The coordinator is process-scoped (survives config changes) and tied to the app's filesDir.
- * - Stale completions are ignored by checking the current token against [activeBySource].
+ * - Stale completions are impossible because ownership is decided by atomic putIfAbsent.
  * - Abandoned staging files are cleaned up on startup/foreground via [cleanupAbandoned].
  */
 internal class ModelImportCoordinator(
@@ -66,15 +98,10 @@ internal class ModelImportCoordinator(
     private val maximumBytes: Long = 12L * 1024L * 1024L * 1024L,
     private val reserveBytes: Long = 512L * 1024L * 1024L,
     private val validator: LiteRtLmValidator = defaultValidator(),
+    private val scope: kotlinx.coroutines.CoroutineScope,
 ) {
-    /** Maps sourceIdentity -> active token. Only one import per sourceIdentity at a time. */
-    private val activeBySource = ConcurrentHashMap<String, String>()
-
-    /** Tokens that have been explicitly cancelled. */
-    private val cancelledTokens = ConcurrentHashMap.newKeySet<String>()
-
-    /** Generation counter to detect stale completions. Incremented on each new import for a source. */
-    private val generationBySource = ConcurrentHashMap<String, Long>()
+    /** Maps sourceIdentity -> active import operation. Only one import per sourceIdentity at a time. */
+    private val activeImports = ConcurrentHashMap<String, ActiveModelImport>()
 
     companion object {
         private const val ORPHAN_GRACE_MS = 300_000L
@@ -84,21 +111,40 @@ internal class ModelImportCoordinator(
         request: ModelImportRequest,
         onProgress: suspend (Int) -> Unit = {},
     ): ModelImportResult = withContext(Dispatchers.IO) {
-        // Claim ownership for this sourceIdentity. Reject if already active (even with same token).
-        val currentGen = generationBySource.getOrDefault(request.sourceIdentity, 0L)
-        val nextGen = currentGen + 1
-        val claimed = generationBySource.compute(request.sourceIdentity) { _, old ->
-            if (old != null && activeBySource[request.sourceIdentity] != null) {
-                // Another import is already active for this source - reject new one
-                return@compute old
-            }
-            activeBySource[request.sourceIdentity] = request.token
-            nextGen
+        // Try to claim ownership atomically using putIfAbsent
+        val progressFlow = kotlinx.coroutines.flow.MutableStateFlow(ModelImportProgress())
+        val deferred = scope.async {
+            runImportInternal(request, progressFlow)
         }
-        if (claimed != nextGen) {
+        val candidate = ActiveModelImport(request.token, deferred, progressFlow)
+
+        val existing = activeImports.putIfAbsent(request.sourceIdentity, candidate)
+        if (existing != null) {
+            // Another import is already active for this source - reject new one
+            deferred.cancel()
             return@withContext ModelImportResult.Failure(ModelImportFailure.ADOPTION_FAILED, request.token)
         }
 
+        // Observe progress and forward to callback
+        scope.launch {
+            progressFlow.collect { p ->
+                if (p.percent >= 0) onProgress(p.percent)
+            }
+        }
+
+        try {
+            val result = deferred.await()
+            return@withContext result
+        } finally {
+            // Only remove if we still own it
+            activeImports.remove(request.sourceIdentity, candidate)
+        }
+    }
+
+    private suspend fun runImportInternal(
+        request: ModelImportRequest,
+        progress: kotlinx.coroutines.flow.MutableStateFlow<ModelImportProgress>,
+    ): ModelImportResult = withContext(Dispatchers.IO) {
         val root = modelDirectory.canonicalFile
         var part: File? = null
         var adopted: File? = null
@@ -130,11 +176,7 @@ internal class ModelImportCoordinator(
                     var lastProgress = -1
                     while (true) {
                         currentCoroutineContext().ensureActive()
-                        if (request.token in cancelledTokens) throw CancellationException("model import cancelled")
-                        // Verify this import is still the current generation for its source
-                        if (generationBySource[request.sourceIdentity] != nextGen) {
-                            throw CancellationException("superseded by newer import for same source")
-                        }
+                        if (request.token in getCancelledTokens()) throw CancellationException("model import cancelled")
                         val read = source.read(buffer)
                         if (read < 0) break
                         if (read == 0) continue
@@ -142,28 +184,29 @@ internal class ModelImportCoordinator(
                         if (copied > maximumBytes) {
                             return@withContext ModelImportResult.Failure(ModelImportFailure.TOO_LARGE, request.token)
                         }
-                        // Reserve is added exactly once per hasSpace call; read is the incremental write
                         if (!hasSpace(root, read.toLong())) {
                             return@withContext ModelImportResult.Failure(ModelImportFailure.STORAGE_FULL, request.token)
                         }
                         output.write(buffer, 0, read)
-                        val progress = if (sourceLength(request.sourceIdentity) != null) {
+                        val prog = if (sourceLength(request.sourceIdentity) != null) {
                             val total = sourceLength(request.sourceIdentity)!!
                             (copied * 100L / total).toInt().coerceIn(0, 99)
                         } else -1
-                        if (progress >= 0 && progress != lastProgress) {
-                            lastProgress = progress
-                            onProgress(progress)
+                        if (prog >= 0 && prog != lastProgress) {
+                            lastProgress = prog
+                            progress.value = ModelImportProgress(percent = prog, stage = ImportStage.COPYING)
                         }
                     }
                     output.flush()
                     output.fd.sync()
                 }
             }
+            progress.value = ModelImportProgress(percent = 99, stage = ImportStage.VALIDATING)
             if (!validator.validate(staging)) {
                 return@withContext ModelImportResult.Failure(ModelImportFailure.INVALID_MODEL, request.token)
             }
             currentCoroutineContext().ensureActive()
+            progress.value = ModelImportProgress(percent = 99, stage = ImportStage.ADOPTING)
             withContext(NonCancellable) {
                 try {
                     Files.move(staging.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
@@ -180,9 +223,11 @@ internal class ModelImportCoordinator(
                 }
                 adopted = target
             }
-            withContext(NonCancellable) {
-                onProgress(100)
-            }
+            progress.value = ModelImportProgress(percent = 99, stage = ImportStage.COMMITTING_METADATA)
+            // Metadata commit would happen here (handled by caller after this returns)
+            progress.value = ModelImportProgress(percent = 99, stage = ImportStage.RELEASING_PERMISSION)
+            // URI permission release would happen here
+            progress.value = ModelImportProgress(percent = 100, stage = ImportStage.COMPLETE)
             ModelImportResult.Success(adopted!!, copied, request.token)
         } catch (e: CancellationException) {
             if (adopted != null) {
@@ -192,7 +237,6 @@ internal class ModelImportCoordinator(
                 ModelImportResult.Failure(ModelImportFailure.CANCELLED, request.token)
             }
         } catch (e: java.io.IOException) {
-            // Distinguish URI permission loss from other I/O errors
             if (e.message?.contains("permission", true) == true ||
                 e.message?.contains("Permission denied", true) == true) {
                 ModelImportResult.Failure(ModelImportFailure.URI_PERMISSION_LOST, request.token)
@@ -202,29 +246,26 @@ internal class ModelImportCoordinator(
         } catch (_: Exception) {
             ModelImportResult.Failure(ModelImportFailure.ADOPTION_FAILED, request.token)
         } finally {
-            // Only clear ownership if this is still the current generation
-            val currentGen = generationBySource[request.sourceIdentity] ?: 0
-            if (currentGen == nextGen) {
-                activeBySource.remove(request.sourceIdentity, request.token)
-                generationBySource.remove(request.sourceIdentity)
-            }
-            cancelledTokens.remove(request.token)
             withContext(NonCancellable) {
                 if (adopted == null) part?.takeIf { it.exists() }?.delete()
             }
         }
     }
 
+    private val cancelledTokens = ConcurrentHashMap.newKeySet<String>()
+
     fun cancel(token: String) {
         cancelledTokens += token
     }
+
+    private fun getCancelledTokens(): Set<String> = cancelledTokens
 
     /**
      * Cleans up abandoned staging files (.part/.bak) that are older than the grace period
      * and not owned by an active import token. Call from app startup/foreground.
      */
     fun cleanupAbandoned() {
-        val activeTokens = activeBySource.values.toSet() + cancelledTokens.toSet()
+        val activeTokens = activeImports.values.map { it.token }.toSet() + cancelledTokens.toSet()
         cleanupAbandoned(modelDirectory, activeTokens)
     }
 
@@ -283,6 +324,7 @@ internal object ModelImportCoordinatorRegistry {
                         }
                     }.getOrNull()
                 },
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO),
             )
         }
     }

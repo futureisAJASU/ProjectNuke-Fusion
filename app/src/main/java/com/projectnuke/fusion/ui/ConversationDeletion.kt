@@ -17,9 +17,7 @@ internal suspend fun deleteConversationProduction(
 ): ConversationDeletionResult {
     val appContext = context.applicationContext
     var deletedMessageIds: Set<Long> = emptySet()
-    val targetPendingPaths = chatViewModel.draft(conversationId)
-        .pendingAttachments
-        .mapTo(linkedSetOf()) { it.localPath }
+    val targetPendingPaths = linkedSetOf<String>()
     val deferred = chatViewModel.deleteConversation(
         conversationId = conversationId,
         exists = {
@@ -32,6 +30,9 @@ internal suspend fun deleteConversationProduction(
         },
         commitDelete = { dao.deleteConversation(conversationId) },
         settleTarget = {
+            chatViewModel.draft(conversationId).pendingAttachments.forEach { attachment ->
+                targetPendingPaths.add(attachment.localPath)
+            }
             chatViewModel.clear(conversationId)
             val draft = chatViewModel.draft(conversationId)
             if (draft.rawInput.isNotEmpty() || draft.pendingAttachments.isNotEmpty() ||

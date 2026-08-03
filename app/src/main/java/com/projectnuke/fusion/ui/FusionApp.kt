@@ -20,17 +20,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.projectnuke.fusion.ai.data.ObsoleteSecretCleanupDebtStore
+import com.projectnuke.fusion.ai.secure.AndroidKeystoreSecretStore
 import com.projectnuke.fusion.chat.ChatViewModel
+import com.projectnuke.fusion.util.AttachmentStorageManager
+import com.projectnuke.fusion.ui.CommittedDraftReconciliationDebtStore
+import com.projectnuke.fusion.ui.DraftReconciliationOwner
+import com.projectnuke.fusion.ui.DraftReconciliationResult
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import java.io.File
-import com.projectnuke.fusion.util.AttachmentStorageManager
 
 @Composable
 fun FusionApp() {
   val context = LocalContext.current
   val factory = remember(context) { ChatViewModel.factory(context) }
   val chatViewModel: ChatViewModel = viewModel(factory = factory)
+  val aiSecretStore = remember { AndroidKeystoreSecretStore(context) }
   LaunchedEffect(chatViewModel) {
     CommittedDraftReconciliationDebtStore.retry(
       owner = DraftReconciliationOwner { debt ->
@@ -48,6 +54,11 @@ fun FusionApp() {
       },
       unregisterPath = AttachmentStorageManager::unregisterPendingAttachment,
       file = File(context.filesDir, "committed_draft_reconciliation_debt.json"),
+    )
+    // Retry obsolete secret cleanup on startup
+    ObsoleteSecretCleanupDebtStore.retry(
+      secretStore = aiSecretStore,
+      file = File(context.filesDir, "obsolete_secret_cleanup_debt.json"),
     )
   }
   val currentConversationId by chatViewModel.currentConversationId.collectAsStateWithLifecycle()

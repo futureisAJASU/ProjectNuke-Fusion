@@ -27,7 +27,9 @@ fun buildEffectiveRuntimeSettings(
     settings: GenerationSettings,
     reasoningEnabled: Boolean,
     webSearchEnabled: Boolean,
-    mtpStatus: MtpRuntimeStatus
+    mtpStatus: MtpRuntimeStatus,
+    actualBackend: String? = null,
+    actualVisionBackend: String? = null
 ): EffectiveRuntimeSettings {
     val requestedBackend = settings.accelerator.name
     val revisionSource = listOf(
@@ -47,7 +49,7 @@ fun buildEffectiveRuntimeSettings(
         modelName = modelName,
         modelPath = modelPath,
         acceleratorRequested = requestedBackend,
-        actualBackend = requestedBackend,
+        actualBackend = actualBackend ?: requestedBackend,
         mtpEnabled = settings.speculativeDecodingEnabled == true,
         mtpStatus = mtpStatus,
         maxTokens = settings.maxTokens,

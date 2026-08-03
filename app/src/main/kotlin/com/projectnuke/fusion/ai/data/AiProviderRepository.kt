@@ -9,6 +9,7 @@ import com.projectnuke.fusion.ai.model.AiProviderConfig
 import com.projectnuke.fusion.ai.model.AiProviderType
 import com.projectnuke.fusion.ai.provider.AiProviderPresets
 import com.projectnuke.fusion.ai.secure.SecretStore
+import java.io.File
 import java.net.URI
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -69,10 +70,10 @@ internal object AiProviderValidator {
 }
 
 class AiProviderRepository(
-    context: Context,
+    private val appContext: Context,
     private val secretStore: SecretStore,
 ) : ExternalAiProviderSource {
-    private val prefs = context.applicationContext.getSharedPreferences(PrefsName, Context.MODE_PRIVATE)
+    private val prefs = appContext.applicationContext.getSharedPreferences(PrefsName, Context.MODE_PRIVATE)
 
     suspend fun getProviders(): List<AiProviderConfig> = withContext(Dispatchers.IO) {
         val stored = prefs.getString(KeyProviders, null)?.let(::parseProviders).orEmpty()
@@ -113,10 +114,10 @@ class AiProviderRepository(
         }
         val oldSecretId = previous?.apiKeySecretId
         if (oldSecretId != null && oldSecretId != newSecretId) {
-            runCatching { secretStore.deleteSecret(oldSecretId) }.onFailure { e ->
-                // Obsolete-secret cleanup debt: log but don't fail the save.
-                // The old secret will be cleaned up on next save or app restart.
-                Log.w("AiProviderRepository", "Failed to delete obsolete secret $oldSecretId", e)
+            val deleted = runCatching { secretStore.deleteSecret(oldSecretId) }.getOrDefault(false)
+            if (!deleted) {
+                // Record obsolete secret cleanup debt for retry on startup/foreground
+                ObsoleteSecretCleanupDebtStore.record(appContext, oldSecretId)
             }
         }
         if (prefs.getString(KeySelectedProvider, null) == null) {
@@ -143,10 +144,13 @@ class AiProviderRepository(
                 .putString(KeySelectedProvider, updated.firstOrNull()?.id).commit()
         }
         if (!committed) return false
-        val secretCleanupSuccess = if (existing.apiKeySecretId != null) {
-            runCatching { secretStore.deleteSecret(existing.apiKeySecretId) }.getOrDefault(false)
-        } else true
-        return secretCleanupSuccess
+        if (existing.apiKeySecretId != null) {
+            val deleted = runCatching { secretStore.deleteSecret(existing.apiKeySecretId!!) }.getOrDefault(false)
+            if (!deleted) {
+                ObsoleteSecretCleanupDebtStore.record(appContext, existing.apiKeySecretId!!)
+            }
+        }
+        return true
     }
 
     suspend fun getSelectedProvider(): AiProviderConfig? {
