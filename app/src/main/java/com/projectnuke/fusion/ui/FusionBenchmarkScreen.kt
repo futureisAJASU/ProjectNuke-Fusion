@@ -42,6 +42,7 @@ import com.projectnuke.fusion.llm.EngineSelectionRuntime
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.GenerationOutcome
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
+import com.google.ai.edge.litertlm.LogSeverity
 import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
 import com.projectnuke.fusion.llm.GenerationBenchmarkStats
@@ -254,24 +255,25 @@ internal data class BenchmarkSnapshot(
 )
 
 private suspend fun runBenchmark(
-    context: Context,
-    engine: LiteRtLlmEngine,
-    benchmarkDao: BenchmarkDao,
-    snapshot: BenchmarkSnapshot,
-    onStatus: (String?) -> Unit,
-    onResult: (String) -> Unit,
-    onFinished: () -> Unit
-) {
-    try {
-        FusionRuntimeLock.withExclusiveBenchmark(
-            onPrepareExclusiveMode = {
-                onStatus("모델 리소스를 정리하는 중입니다.")
-                Log.i("FusionEngine", "Requesting chat engine unload before benchmark")
-                FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
-                FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_prepare")
-            }
-        ) {
-            try {
+        context: Context,
+        engine: LiteRtLlmEngine,
+        benchmarkDao: BenchmarkDao,
+        snapshot: BenchmarkSnapshot,
+        onStatus: (String?) -> Unit,
+        onResult: (String) -> Unit,
+        onFinished: () -> Unit
+    ) {
+        engine.setNativeMinLogSeverity(LogSeverity.WARNING)
+        try {
+            FusionRuntimeLock.withExclusiveBenchmark(
+                onPrepareExclusiveMode = {
+                    onStatus("모델 리소스를 정리하는 중입니다.")
+                    Log.i("FusionEngine", "Requesting chat engine unload before benchmark")
+                    FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
+                    FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_prepare")
+                }
+            ) {
+                try {
                 Log.i(
                     "FusionBenchmark",
                     "Benchmark start model=${snapshot.modelName} path=${snapshot.modelPath} accelerator=${snapshot.settings.accelerator.name} mtp=${snapshot.settings.speculativeDecodingEnabled == true} maxTokens=${snapshot.settings.maxTokens} temp=${snapshot.settings.temperature} topK=${snapshot.settings.topK} topP=${snapshot.settings.topP}"
@@ -402,6 +404,7 @@ onResult(resultText)
             } finally {
                 FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_after_run")
             }
+            engine.setNativeMinLogSeverity(LogSeverity.ERROR)
         }
     } catch (e: ChatGenerationRunningException) {
         Log.i("FusionBenchmark", "Benchmark blocked because chat generation is running")

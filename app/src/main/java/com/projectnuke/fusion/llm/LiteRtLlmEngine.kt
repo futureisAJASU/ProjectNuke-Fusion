@@ -42,7 +42,14 @@ class LiteRtLlmEngine(
     private val failureMemoryStorage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage,
     private val mtpCapabilityProbe: (modelPath: String) -> Boolean? = { modelPath ->
         runCatching { Capabilities(modelPath).use { it.hasSpeculativeDecodingSupport() } }.getOrNull()
-    }
+    },
+    /**
+     * Native LiteRT-LM minimum log severity. Production keeps [LogSeverity.ERROR]
+     * to stay quiet; benchmark / debug mode may lower this to
+     * [LogSeverity.WARNING] to surface component-placement diagnostics without
+     * honoring unstable warning strings as permanent correctness state (Phase 9).
+     */
+    private val nativeMinLogSeverity: () -> LogSeverity = { LogSeverity.ERROR }
 ) : LlmEngine {
 
     private var loadedState: LoadedRuntimeState? = null
@@ -53,6 +60,16 @@ class LiteRtLlmEngine(
 
     val lastRuntimeSelection: EngineSelectionRuntime?
         get() = loadedState?.runtimeSelection
+
+    /**
+     * Updates the native LiteRT-LM minimum log severity at runtime. Used by
+     * benchmark / debug mode to lower the threshold to WARNING so internal
+     * component-placement (sampler) diagnostics surface; production mode keeps
+     * ERROR so warnings are never honored as permanent correctness state.
+     */
+    fun setNativeMinLogSeverity(severity: LogSeverity) {
+        Engine.setNativeMinLogSeverity(severity)
+    }
 
     override suspend fun generate(
         messages: List<ChatMessage>,
@@ -349,27 +366,49 @@ class LiteRtLlmEngine(
             mtpRequested = mtpRequested,
             mtpSupported = mtpSupported
         ).filter { candidate ->
-            if (!candidate.mtpEnabled) return@filter true
-            val skipReason = mtpFailureMemory.shouldSkipMtp(
-                modelPath = fingerprint.canonicalPath,
-                backendName = candidate.backend,
-                mtpEnabled = true,
-                validationVersion = fingerprint.validationVersion,
-                kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                enableVisionBackend = profile.enableVisionBackend
-            )
-            if (skipReason != null) {
-                mtpSkippedByMemory = true
-                recordedFallbackEvents += RuntimeFallbackEvent(
-                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
-                    attemptedMtpEnabled = true,
-                    reason = FallbackReason.MTP_SKIPPED_RECENT_FAILURE
+            if (candidate.mtpEnabled) {
+                val skipReason = mtpFailureMemory.shouldSkipMtp(
+                    modelPath = fingerprint.canonicalPath,
+                    backendName = candidate.backend,
+                    mtpEnabled = true,
+                    validationVersion = fingerprint.validationVersion,
+                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+                    enableVisionBackend = profile.enableVisionBackend
                 )
-                Log.i(
-                    "FusionLiteRT",
-                    "MTP skipped due to recent failure: $skipReason (backend=${candidate.backend})"
+                if (skipReason != null) {
+                    mtpSkippedByMemory = true
+                    recordedFallbackEvents += RuntimeFallbackEvent(
+                        attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                        attemptedMtpEnabled = true,
+                        reason = FallbackReason.MTP_SKIPPED_RECENT_FAILURE
+                    )
+                    Log.i(
+                        "FusionLiteRT",
+                        "MTP skipped due to recent failure: $skipReason (backend=${candidate.backend})"
+                    )
+                    return@filter false
+                }
+            } else {
+                // Check plain backend failure memory for AUTO fallback caching
+                val skipReason = mtpFailureMemory.shouldSkipBackend(
+                    modelPath = fingerprint.canonicalPath,
+                    backendName = candidate.backend,
+                    validationVersion = fingerprint.validationVersion,
+                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+                    enableVisionBackend = profile.enableVisionBackend
                 )
-                return@filter false
+                if (skipReason != null) {
+                    recordedFallbackEvents += RuntimeFallbackEvent(
+                        attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                        attemptedMtpEnabled = false,
+                        reason = FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE
+                    )
+                    Log.i(
+                        "FusionLiteRT",
+                        "Backend skipped due to recent failure: $skipReason (backend=${candidate.backend})"
+                    )
+                    return@filter false
+                }
             }
             true
         }
@@ -395,7 +434,11 @@ class LiteRtLlmEngine(
 
         unload()
 
-        Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
+        // Production default is ERROR (quiet). Benchmark/debug mode may
+        // override the constructor lambda to surface WARNING diagnostics;
+        // those warnings are observed only as flow-level diagnostics and
+        // never parsed for permanent correctness state (Phase 9).
+        Engine.setNativeMinLogSeverity(nativeMinLogSeverity())
 
         Log.i("FusionLiteRT", "MTP requested: $mtpRequested")
         Log.i("FusionLiteRT", "Backend: $preferredBackendName")
@@ -523,6 +566,24 @@ class LiteRtLlmEngine(
                 enableVisionBackend = profile.enableVisionBackend,
                 fallbackReason = fallbackReason ?: "MTP initialization failed"
             )
+        }
+
+        // Record plain backend failure for AUTO fallback caching
+        if (!selectedMtpEnabled && selectionResult != null && selectionResult.engine != null) {
+            // Find the first plain backend failure in fallback events
+            val plainBackendFailure = recordedFallbackEvents.firstOrNull { it.attemptedMtpEnabled != true && it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED }
+            if (plainBackendFailure != null && plainBackendFailure.attemptedTextBackend != null) {
+                val failedBackendName = plainBackendFailure.attemptedTextBackend!!.name
+                mtpFailureMemory.recordFailure(
+                    modelPath = fingerprint.canonicalPath,
+                    backendName = failedBackendName,
+                    mtpEnabled = false,
+                    validationVersion = fingerprint.validationVersion,
+                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+                    enableVisionBackend = profile.enableVisionBackend,
+                    fallbackReason = "Plain backend initialization failed"
+                )
+            }
         }
 
         val actualTextBackend = selectionResult?.backendName ?: preferredBackendName
@@ -986,10 +1047,13 @@ internal fun <T> selectFirstWorkingEngine(
                     attemptedMtpEnabled = true,
                     reason = FallbackReason.MTP_ENGINE_INIT_FAILED
                 )
-            } else if (candidate.backend == "GPU") {
-                // GPU plain candidate failed; the next CPU candidate (if any)
-                // records the text-backend fallback when it succeeds.
-                pendingGpuPlainFailure = true
+            } else {
+                // Record plain backend failure for AUTO fallback caching
+                fallbackEvents += RuntimeFallbackEvent(
+                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                    attemptedMtpEnabled = false,
+                    reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                )
             }
         }
     }
@@ -1141,6 +1205,38 @@ internal class MtpFailureMemory(
                 return record.fallbackReason
             } else {
                 // Cooldown expired, allow retry
+                failures.remove(key)
+                persist()
+            }
+        }
+        return null
+    }
+
+    /**
+     * Checks if a plain backend (non-MTP) attempt should be skipped due to recent failure.
+     * Returns the fallback reason if the backend should be skipped, null otherwise.
+     */
+    fun shouldSkipBackend(
+        modelPath: String,
+        backendName: String,
+        validationVersion: Int,
+        kvCacheCapacityTokens: Int,
+        enableVisionBackend: Boolean
+    ): String? = synchronized(lock) {
+        val key = FailureKey(
+            modelPath = modelPath,
+            backendName = backendName,
+            mtpEnabled = false,
+            validationVersion = validationVersion,
+            kvCacheCapacityTokens = kvCacheCapacityTokens,
+            enableVisionBackend = enableVisionBackend
+        )
+        val record = failures[key]
+        if (record != null) {
+            val elapsed = System.currentTimeMillis() - record.failedAt
+            if (elapsed < COOLDOWN_MS) {
+                return record.fallbackReason
+            } else {
                 failures.remove(key)
                 persist()
             }
