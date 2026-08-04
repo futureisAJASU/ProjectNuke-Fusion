@@ -72,6 +72,7 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     implementation("androidx.room:room-runtime:2.8.4")
     implementation("androidx.room:room-ktx:2.8.4")
+    androidTestImplementation("androidx.room:room-testing:2.8.4")
     ksp("androidx.room:room-compiler:2.8.4")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.14.0")
