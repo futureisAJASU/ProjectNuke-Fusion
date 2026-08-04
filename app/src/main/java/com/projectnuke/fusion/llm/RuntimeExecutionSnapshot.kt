@@ -88,3 +88,17 @@ data class RuntimeExecutionSnapshot(
     val fallbackEvents: List<RuntimeFallbackEvent>,
     val modelFingerprint: ModelFingerprintSummary
 )
+
+/**
+ * One immutable snapshot of a failed engine acquisition attempt. Captures
+ * the requested accelerator, the fallback events that occurred during
+ * candidate selection, and the model fingerprint. Unlike [RuntimeExecutionSnapshot],
+ * this does not require a successful engine selection and is attached to
+ * [GenerationOutcome.Failure] so callers never reread engine state after failure.
+ */
+data class RuntimeAttemptSnapshot(
+    val requestedAccelerator: AcceleratorMode,
+    val fallbackEvents: List<RuntimeFallbackEvent>,
+    val modelFingerprint: ModelFingerprintSummary,
+    val mtpRequested: Boolean
+)

@@ -1,5 +1,7 @@
 package com.projectnuke.fusion.llm
 
+import com.projectnuke.fusion.model.AcceleratorMode
+
 /**
  * Typed result for every LLM generation call. Failures must never be encoded
  * as assistant text. Only [Success] may be stored as a normal answer.
@@ -44,10 +46,13 @@ sealed interface GenerationOutcome {
      * Generation failed with a recoverable error. [kind] is a stable
      * machine-readable category; [message] is a user-safe localized
      * explanation never populated from raw server/native output.
+     * [attemptSnapshot] carries the immutable attempt snapshot so callers
+     * never reread engine state after failure to reconstruct what happened.
      */
     data class Failure(
         val kind: FailureKind,
-        val message: String
+        val message: String,
+        val attemptSnapshot: RuntimeAttemptSnapshot? = null
     ) : GenerationOutcome
 }
 

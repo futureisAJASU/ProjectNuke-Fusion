@@ -27,6 +27,16 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
+/**
+ * Exception thrown when engine selection fails, carrying the attempt snapshot
+ * so callers can construct a [GenerationOutcome.Failure] with the full
+ * fallback context without rereading engine state.
+ */
+internal class EngineSelectionFailedException(
+    val attemptSnapshot: RuntimeAttemptSnapshot,
+    cause: Throwable? = null
+) : RuntimeException("Engine selection failed", cause)
+
 @OptIn(ExperimentalApi::class)
 class LiteRtLlmEngine(
     private val context: Context,
@@ -106,6 +116,12 @@ class LiteRtLlmEngine(
                 getOrCreateEngine(resolvedProfile)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: EngineSelectionFailedException) {
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.",
+                    attemptSnapshot = e.attemptSnapshot
+                )
             } catch (e: OutOfMemoryError) {
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
@@ -221,6 +237,12 @@ class LiteRtLlmEngine(
                 getOrCreateEngine(resolvedProfile)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: EngineSelectionFailedException) {
+                return@withContext GenerationOutcome.Failure(
+                    kind = FailureKind.MODEL_LOAD_FAILED,
+                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.",
+                    attemptSnapshot = e.attemptSnapshot
+                )
             } catch (e: OutOfMemoryError) {
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
@@ -543,7 +565,19 @@ class LiteRtLlmEngine(
             // and the next engine selection will re-settle before any init.
             settleSpeculativeDecodingFlag(false)
             lastMtpStatus = MtpRuntimeStatus.FAILED
-            throw (failure ?: IllegalStateException("LiteRT engine candidates exhausted"))
+            val attemptSnapshot = RuntimeAttemptSnapshot(
+                requestedAccelerator = profile.accelerator,
+                fallbackEvents = recordedFallbackEvents,
+                modelFingerprint = ModelFingerprintSummary(
+                    canonicalPath = fingerprint.canonicalPath,
+                    fileSize = fingerprint.fileSize,
+                    modifiedAt = fingerprint.modifiedAt,
+                    validationVersion = fingerprint.validationVersion,
+                    mtpSupported = fingerprint.mtpSupported
+                ),
+                mtpRequested = mtpRequested
+            )
+            throw EngineSelectionFailedException(attemptSnapshot, failure)
         }
 
         lastMtpStatus = resolveMtpRuntimeStatus(
