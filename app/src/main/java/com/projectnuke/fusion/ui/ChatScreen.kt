@@ -8643,15 +8643,15 @@ private fun buildModelBenchmarkSummary(
         worstDecodeTps = worst,
         averageDecodeTps = avg,
         averageTotalTps = averageTotal,
-        recentAccelerator = latest.actualBackend ?: latest.accelerator,
+        recentAccelerator = latest.selectedTextBackend ?: latest.accelerator,
         failedCount = failedCount,
         mtpRecommendation = mtpRecommendation
     )
 }
 
 private fun buildMtpRecommendation(success: List<BenchmarkResultEntity>): String {
-    val on = success.filter { it.mtpEnabled }
-    val off = success.filter { !it.mtpEnabled }
+    val on = success.filter { it.mtpRequested }
+    val off = success.filter { !it.mtpRequested }
     if (on.size < 3 || off.size < 3) return "측정 부족"
     val onMedian = on.mapNotNull { it.decodeTokensPerSecond?.takeIf { v -> v > 0f } ?: it.totalTokensPerSecond.takeIf { v -> v > 0f } }.sorted().let { arr ->
         if (arr.isEmpty()) return "측정 부족"

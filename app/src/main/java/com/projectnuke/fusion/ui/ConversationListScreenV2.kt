@@ -2227,7 +2227,7 @@ private suspend fun buildFusionDebugInfo(
         if (latestBenchmark != null) {
             appendLine("- Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(latestBenchmark.createdAt))}")
             appendLine("- Model: ${latestBenchmark.modelName}")
-            appendLine("- Accelerator: ${latestBenchmark.actualBackend ?: latestBenchmark.accelerator}")
+            appendLine("- Accelerator: ${latestBenchmark.selectedTextBackend ?: latestBenchmark.accelerator}")
             appendLine("- MTP: ${latestBenchmark.mtpStatus}")
             appendLine("- Total tok/s: ${latestBenchmark.totalTokensPerSecond}")
             appendLine("- Decode tok/s: ${latestBenchmark.decodeTokensPerSecond ?: "unknown"}")

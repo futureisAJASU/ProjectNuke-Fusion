@@ -13,7 +13,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MessageEntity::class,
         BenchmarkResultEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -69,6 +69,37 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Phase 7: benchmark_results gains the immutable runtime execution
+         * snapshot columns so persisted results carry the requested/applied
+         * runtime truth rather than a single nullable backend string.
+         *
+         * Migrated compatibly: [actualBackend] is renamed to
+         * [BenchmarkResultEntity.selectedTextBackend] and [mtpEnabled] to
+         * [BenchmarkResultEntity.mtpRequested] using SQLite RENAME COLUMN
+         * (bundled by androidx.sqlite). New columns all use NOT NULL DEFAULT
+         * so historical rows fill in safe placeholders. No destructive table
+         * replacement is performed.
+         */
+        private val Migration3To4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Rename ambiguous conceptual columns.
+                db.execSQL("ALTER TABLE benchmark_results RENAME COLUMN actualBackend TO selectedTextBackend")
+                db.execSQL("ALTER TABLE benchmark_results RENAME COLUMN mtpEnabled TO mtpRequested")
+                // Add the new runtime snapshot columns.
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN selectedVisionBackend TEXT")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN samplerBackend TEXT NOT NULL DEFAULT 'UNKNOWN'")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN fallbackEventCodes TEXT")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN initializedWithMtp INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeTtftSeconds REAL")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativePrefillTokensPerSecond REAL")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeDecodeTokensPerSecond REAL")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativePrefillTokenCount INTEGER")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeDecodeTokenCount INTEGER")
+                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeInitTimeSeconds REAL")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -76,7 +107,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "fusion.db"
                 )
-                    .addMigrations(Migration1To2, Migration2To3)
+                    .addMigrations(Migration1To2, Migration2To3, Migration3To4)
                     .build()
 
                 INSTANCE = instance

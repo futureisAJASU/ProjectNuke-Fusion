@@ -44,6 +44,8 @@ import com.projectnuke.fusion.llm.GenerationOutcome
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
+import com.projectnuke.fusion.llm.GenerationBenchmarkStats
+import com.projectnuke.fusion.llm.RuntimeComponentBackend
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
@@ -56,9 +58,9 @@ import com.projectnuke.fusion.util.toKoreanMtpStatus
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.launch
+internal const val FusionBenchmarkPrompt = "반도체 공정과 메모리 계층 구조를 1000자 정도로 설명해 주세요. 핵심 개념, 성능 병목, 전력 효율 관점까지 포함해 주세요."
 
-private const val FusionBenchmarkPrompt = "반도체 공정과 메모리 계층 구조를 1000자 정도로 설명해 주세요. 핵심 개념, 성능 병목, 전력 효율 관점까지 포함해 주세요."
-private const val FusionBenchmarkPromptLabel = "반도체 공정/메모리 계층 1000자 설명"
+internal const val FusionBenchmarkPromptLabel = "반도체 공정/메모리 계층 1000자 설명"
 
 @Composable
 fun FusionBenchmarkScreen(
@@ -241,7 +243,7 @@ fun FusionBenchmarkScreen(
     }
 }
 
-private data class BenchmarkSnapshot(
+internal data class BenchmarkSnapshot(
     val modelName: String,
     val modelPath: String?,
     val settings: GenerationSettings,
@@ -389,7 +391,9 @@ onResult(resultText)
                 decodeTokensPerSecond = decodeTps?.toFloat(),
                 success = true,
                 errorMessage = null,
-                actualBackend = runtimeSelection?.actualTextBackend
+                actualBackend = runtimeSelection?.actualTextBackend,
+                runtimeSnapshot = outcomeSnapshot,
+                nativeStats = nativeStats
             )
             Toast.makeText(context, "벤치마크 기록을 저장했습니다.", Toast.LENGTH_SHORT).show()
             Log.i("FusionBenchmark", "Benchmark success totalMs=$totalMs tokens=$estimatedTokens totalTps=$totalTps decodeTps=$decodeTps mtp=${mtpStatus.name} nativeTtft=${nativeStats?.timeToFirstTokenSeconds} nativeDecodeTps=${nativeStats?.decodeTokensPerSecond} nativePrefillTps=${nativeStats?.prefillTokensPerSecond}")
@@ -452,24 +456,13 @@ private suspend fun saveBenchmarkResult(
     success: Boolean,
     errorMessage: String?,
     actualBackend: String?,
+    runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
+    nativeStats: GenerationBenchmarkStats? = null
 ) {
     benchmarkDao.insert(
-        BenchmarkResultEntity(
-            createdAt = System.currentTimeMillis(),
-            modelName = snapshot.modelName,
-            modelPath = snapshot.modelPath,
-            accelerator = snapshot.settings.accelerator.name,
-            actualBackend = actualBackend,
-            mtpEnabled = snapshot.settings.speculativeDecodingEnabled == true,
-            mtpStatus = mtpStatus.toKoreanMtpStatus(),
-            maxTokens = snapshot.settings.maxTokens,
-            temperature = snapshot.settings.temperature,
-            topK = snapshot.settings.topK,
-            topP = snapshot.settings.topP,
-            reasoningEnabled = snapshot.reasoningEnabled,
-            webSearchEnabled = snapshot.webSearchEnabled,
-            promptLabel = FusionBenchmarkPromptLabel,
-            promptText = FusionBenchmarkPrompt,
+        buildBenchmarkResultEntityPayload(
+            snapshot = snapshot,
+            mtpStatus = mtpStatus,
             modelLoadingMs = modelLoadingMs,
             firstTokenLatencyMs = firstTokenLatencyMs,
             totalGenerationMs = totalGenerationMs,
@@ -478,10 +471,88 @@ private suspend fun saveBenchmarkResult(
             decodeTokensPerSecond = decodeTokensPerSecond,
             success = success,
             errorMessage = errorMessage,
+            actualBackend = actualBackend,
+            runtimeSnapshot = runtimeSnapshot,
+            nativeStats = nativeStats,
             appVersion = context.appVersionName(),
             deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
             androidVersion = "${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})"
         )
+    )
+}
+
+/**
+ * Builds a [BenchmarkResultEntity] from a runtime + native-stats snapshot.
+ * Pure: does not touch the DAO or Context, so unit tests can exercise the
+ * persistence round-trip without a Room runtime. The snapshot is the single
+ * source of truth; the legacy `actualBackendString` is used only when the
+ * snapshot is absent (preview / failure-before-init paths).
+ */
+internal fun buildBenchmarkResultEntityPayload(
+    snapshot: BenchmarkSnapshot,
+    mtpStatus: MtpRuntimeStatus,
+    modelLoadingMs: Long?,
+    firstTokenLatencyMs: Long?,
+    totalGenerationMs: Long,
+    estimatedOutputTokens: Int,
+    totalTokensPerSecond: Float,
+    decodeTokensPerSecond: Float?,
+    success: Boolean,
+    errorMessage: String?,
+    actualBackend: String?,
+    runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
+    nativeStats: GenerationBenchmarkStats? = null,
+    appVersion: String?,
+    deviceModel: String,
+    androidVersion: String,
+    createdAtMs: Long = System.currentTimeMillis()
+): BenchmarkResultEntity {
+    val selectedTextBackend = runtimeSnapshot?.selectedTextBackend?.name
+        ?: actualBackend
+    val selectedVisionBackend = runtimeSnapshot?.selectedVisionBackend?.name
+    val samplerBackend = runtimeSnapshot?.samplerBackend?.name ?: com.projectnuke.fusion.llm.RuntimeComponentBackend.UNKNOWN.name
+    val fallbackEventCodes = runtimeSnapshot?.fallbackEvents
+        ?.joinToString(",") { "${it.attemptedTextBackend?.name.orEmpty()}=${it.reason.name}" }
+        ?.takeIf { it.isNotBlank() && it != "=" } ?: null
+    val mtpRequestedFromSnapshot = runtimeSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)
+    val initializedWithMtp = runtimeSnapshot?.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
+    return BenchmarkResultEntity(
+        createdAt = createdAtMs,
+        modelName = snapshot.modelName,
+        modelPath = snapshot.modelPath,
+        accelerator = snapshot.settings.accelerator.name,
+        selectedTextBackend = selectedTextBackend,
+        selectedVisionBackend = selectedVisionBackend,
+        samplerBackend = samplerBackend,
+        mtpRequested = mtpRequestedFromSnapshot,
+        mtpStatus = mtpStatus.toKoreanMtpStatus(),
+        fallbackEventCodes = fallbackEventCodes,
+        initializedWithMtp = initializedWithMtp,
+        nativeTtftSeconds = nativeStats?.timeToFirstTokenSeconds,
+        nativePrefillTokensPerSecond = nativeStats?.prefillTokensPerSecond,
+        nativeDecodeTokensPerSecond = nativeStats?.decodeTokensPerSecond,
+        nativePrefillTokenCount = nativeStats?.prefillTokenCount,
+        nativeDecodeTokenCount = nativeStats?.decodeTokenCount,
+        nativeInitTimeSeconds = nativeStats?.initTimeSeconds,
+        maxTokens = snapshot.settings.maxTokens,
+        temperature = snapshot.settings.temperature,
+        topK = snapshot.settings.topK,
+        topP = snapshot.settings.topP,
+        reasoningEnabled = snapshot.reasoningEnabled,
+        webSearchEnabled = snapshot.webSearchEnabled,
+        promptLabel = FusionBenchmarkPromptLabel,
+        promptText = FusionBenchmarkPrompt,
+        modelLoadingMs = modelLoadingMs,
+        firstTokenLatencyMs = firstTokenLatencyMs,
+        totalGenerationMs = totalGenerationMs,
+        estimatedOutputTokens = estimatedOutputTokens,
+        totalTokensPerSecond = totalTokensPerSecond,
+        decodeTokensPerSecond = decodeTokensPerSecond,
+        success = success,
+        errorMessage = errorMessage,
+        appVersion = appVersion,
+        deviceModel = deviceModel,
+        androidVersion = androidVersion
     )
 }
 

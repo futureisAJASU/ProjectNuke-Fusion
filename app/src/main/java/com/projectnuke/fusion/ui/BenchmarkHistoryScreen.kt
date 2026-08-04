@@ -107,8 +107,8 @@ fun BenchmarkHistoryScreen(
             else -> true
         }
         val mtpOk = when (mtpFilter) {
-            "MTP 켬" -> result.mtpEnabled
-            "MTP 끔" -> !result.mtpEnabled
+            "MTP 켬" -> result.mtpRequested
+            "MTP 끔" -> !result.mtpRequested
             else -> true
         }
         val acceleratorOk = acceleratorFilter == "전체" || result.accelerator.equals(acceleratorFilter, ignoreCase = true)
@@ -342,8 +342,8 @@ private fun ComparisonTable(results: List<BenchmarkResultEntity>) {
                     Text("모델: ${result.modelName}", color = BenchmarkSubtle)
                     Text("모델 경로: ${result.modelPath ?: "없음"}", color = BenchmarkSubtle)
                     Text("설정 스냅샷: ${result.createdAt.formatDateTime()}", color = BenchmarkSubtle)
-                    Text("요청 가속기: ${result.accelerator} · 실제 백엔드: ${result.actualBackend ?: "확인 불가"}", color = BenchmarkSubtle)
-                    Text("MTP 토글: ${if (result.mtpEnabled) "켜짐" else "꺼짐"} · MTP 런타임 상태: ${result.mtpStatus}", color = BenchmarkSubtle)
+                    Text("요청 가속기: ${result.accelerator} · 실제 백엔드: ${result.selectedTextBackend ?: "확인 불가"}", color = BenchmarkSubtle)
+                    Text("MTP 토글: ${if (result.mtpRequested) "켜짐" else "꺼짐"} · MTP 런타임 상태: ${result.mtpStatus}", color = BenchmarkSubtle)
                     Text("모델 설정 재적용: 수행됨 · 재적용 시간: ${result.modelLoadingMs?.let { "${it}ms" } ?: "측정 불가"}", color = BenchmarkSubtle)
                     Text("maxTokens=${result.maxTokens} · temperature=${result.temperature} · topK=${result.topK} · topP=${result.topP}", color = BenchmarkSubtle)
                     Text("첫 토큰 시간: ${result.firstTokenLatencyMs?.let { "${it}ms" } ?: "측정 불가"}", color = BenchmarkSubtle)
@@ -418,7 +418,7 @@ private fun BenchmarkResultCard(
             Text(result.appliedSettingsLine(), color = BenchmarkText, fontSize = 12.sp)
             Text("모델 설정을 다시 적용했습니다.", color = BenchmarkSubtle, fontSize = 12.sp)
             Text("설정 스냅샷: ${result.createdAt.formatDateTime()} · 모델 경로: ${result.modelPath ?: "없음"}", color = BenchmarkSubtle, fontSize = 12.sp)
-            Text("요청 가속기: ${result.accelerator} · 실제 백엔드: ${result.actualBackend ?: "확인 불가"} · MTP 런타임 상태: ${result.mtpStatus}", color = BenchmarkSubtle, fontSize = 12.sp)
+            Text("요청 가속기: ${result.accelerator} · 실제 백엔드: ${result.selectedTextBackend ?: "확인 불가"} · MTP 런타임 상태: ${result.mtpStatus}", color = BenchmarkSubtle, fontSize = 12.sp)
             Text("maxTokens=${result.maxTokens} · temp=${result.temperature} · topK=${result.topK} · topP=${result.topP}", color = BenchmarkSubtle, fontSize = 12.sp)
             Text("총 ${result.totalGenerationMs}ms · 첫 토큰 ${result.firstTokenLatencyMs?.let { "${it}ms" } ?: "측정 불가"} · ${result.estimatedOutputTokens} tokens", color = BenchmarkSubtle, fontSize = 12.sp)
             Text("전체 기준 토큰 속도: ${result.totalTokensPerSecond.formatSpeed()}", color = BenchmarkSubtle)
@@ -456,8 +456,8 @@ private fun formatSpeedRange(minSpeed: Float?, maxSpeed: Float?): String {
 }
 
 private fun BenchmarkResultEntity.appliedSettingsLine(): String {
-    val mtpText = if (mtpEnabled) "MTP $mtpStatus" else "MTP 꺼짐"
-    return "적용된 설정: ${actualBackend ?: accelerator} · $mtpText · maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP"
+    val mtpText = if (mtpRequested) "MTP $mtpStatus" else "MTP 꺼짐"
+    return "적용된 설정: ${selectedTextBackend ?: accelerator} · $mtpText · maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP"
 }
 
 private fun Float?.formatSpeed(): String {
@@ -476,9 +476,17 @@ private fun BenchmarkResultEntity.toCopyText(): String {
         appendLine("Path: ${modelPath ?: "none"}")
         appendLine("Settings snapshot: ${createdAt.formatDateTime()}")
         appendLine("Requested accelerator: $accelerator")
-        appendLine("Actual backend: ${actualBackend ?: "unknown"}")
-        appendLine("MTP toggle: ${if (mtpEnabled) "on" else "off"}")
+        appendLine("Actual backend: ${selectedTextBackend ?: "unknown"}")
+        appendLine("MTP toggle: ${if (mtpRequested) "on" else "off"}")
         appendLine("MTP runtime status: $mtpStatus")
+        if (!fallbackEventCodes.isNullOrBlank()) appendLine("Fallback events: $fallbackEventCodes")
+        if (samplerBackend.isNotBlank() && samplerBackend != "UNKNOWN") appendLine("Sampler backend: $samplerBackend")
+        if (!selectedVisionBackend.isNullOrBlank()) appendLine("Selected vision backend: $selectedVisionBackend")
+        appendLine("Initialized with MTP: $initializedWithMtp")
+        if (nativeTtftSeconds != null) appendLine("Native tTFT: ${"%.3f".format(Locale.US, nativeTtftSeconds)}s")
+        if (nativePrefillTokensPerSecond != null) appendLine("Native prefill tok/s: ${"%.2f".format(Locale.US, nativePrefillTokensPerSecond)}")
+        if (nativeDecodeTokensPerSecond != null) appendLine("Native decode tok/s: ${"%.2f".format(Locale.US, nativeDecodeTokensPerSecond)}")
+        if (nativeInitTimeSeconds != null) appendLine("Native init seconds: ${"%.3f".format(Locale.US, nativeInitTimeSeconds)}")
         appendLine("Applied settings: ${appliedSettingsLine()}")
         appendLine("Engine reload: performed")
         appendLine("Engine reload time: ${modelLoadingMs?.let { "${it}ms" } ?: "unavailable"}")
