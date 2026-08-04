@@ -1049,12 +1049,19 @@ internal fun <T> selectFirstWorkingEngine(
                 )
             }
             // Both first attempt and vision retry failed for a GPU candidate.
-            // Record the MTP init failure only if the candidate had MTP enabled.
+            // Record the GPU backend failure so AUTO can fall back to CPU.
+            pendingGpuPlainFailure = true
             if (candidate.mtpEnabled) {
                 fallbackEvents += RuntimeFallbackEvent(
                     attemptedTextBackend = candidate.backend.toRuntimeBackend(),
                     attemptedMtpEnabled = true,
                     reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                )
+            } else {
+                fallbackEvents += RuntimeFallbackEvent(
+                    attemptedTextBackend = RuntimeBackend.GPU,
+                    attemptedMtpEnabled = false,
+                    reason = FallbackReason.BACKEND_ENGINE_INIT_FAILED
                 )
             }
             lastFailure = attempt.exceptionOrNull() ?: visionRetry.exceptionOrNull()
