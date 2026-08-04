@@ -179,6 +179,7 @@ import com.projectnuke.fusion.search.stripSearchSourcesMetadata
 import com.projectnuke.fusion.search.toStructuredContext
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
 import com.projectnuke.fusion.util.buildEffectiveSettingsLine
+import com.projectnuke.fusion.util.buildAppliedRuntimeLine
 import com.projectnuke.fusion.util.collectFusionSocInfo
 import com.projectnuke.fusion.util.fusionNpuCandidateLabel
 import com.projectnuke.fusion.util.fusionNpuNoteText
@@ -1282,7 +1283,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 }
                             }
                             val runtimeFields = outcomeRuntimeFields(outcome, engine)
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats)
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats, buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true))
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -1467,7 +1468,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 }
                             }
                             val runtimeFields = outcomeRuntimeFields(outcome, engine)
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats)
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats, buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true))
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -3317,7 +3318,8 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 totalGenerationMs = totalGenerationMs,
                                                 firstTokenLatencyMs = firstTokenLatencyMs,
                                                 settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = actualWebSearchUsed, mtpStatus = runtimeFields.mtpStatus, actualBackend = runtimeFields.actualBackend, actualVisionBackend = runtimeFields.actualVisionBackend)),
-                                                nativeStats = rawOutcome.stats
+                                                nativeStats = rawOutcome.stats,
+                                                appliedRuntimeLine = buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, requestSettings.speculativeDecodingEnabled == true)
                                             )
                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingMetricsLine = metricsLine, generationStatus = "답변 저장 중...") }
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
@@ -9967,7 +9969,8 @@ private fun buildFusionMetricsLine(
     totalGenerationMs: Long,
     firstTokenLatencyMs: Long? = null,
     settingsLine: String? = null,
-    nativeStats: GenerationBenchmarkStats? = null
+    nativeStats: GenerationBenchmarkStats? = null,
+    appliedRuntimeLine: String? = null
 ): String {
     val seconds = (totalGenerationMs / 1000.0).coerceAtLeast(0.1)
     val estimatedTokens = estimateOutputTokens(generatedText)
@@ -9976,10 +9979,13 @@ private fun buildFusionMetricsLine(
     val totalSecondsText = String.format(Locale.US, "%.1f", seconds)
     val tokensPerSecondText = String.format(Locale.US, "%.1f", tokensPerSecond)
 
+    // The first metrics line reports the *requested* accelerator label, not
+    // the applied runtime. The applied state is the immutable snapshot's job
+    // (see [buildAppliedRuntimeLine]), so these two lines never contradict.
     val mainLine = buildString {
         append(modelName)
         append(" · ")
-        append(acceleratorName)
+        append("요청 $acceleratorName")
         append(" · ")
         append("${totalSecondsText}s")
         append(" · ")
@@ -10006,6 +10012,7 @@ private fun buildFusionMetricsLine(
 
     return listOf(
         mainLine,
+        appliedRuntimeLine?.trim()?.takeIf { it.isNotBlank() },
         settingsLine?.trim()?.takeIf { it.isNotBlank() },
         nativeLine?.trim()?.takeIf { it.isNotBlank() }
     )
@@ -10372,8 +10379,13 @@ private fun buildAcceleratorLabel(
     acceleratorName: String,
     speculativeDecodingEnabled: Boolean
 ): String {
+    // Reports the *requested* accelerator + MTP state, not the applied
+    // runtime. Applications actually selected during candidate iteration are
+    // surfaced via the separate "적용: ..." line built from the immutable
+    // RuntimeExecutionSnapshot, so the first metrics line and the settings
+    // line can never contradict each other.
     return if (speculativeDecodingEnabled) {
-        "$acceleratorName+MTP"
+        "$acceleratorName · MTP on"
     } else {
         acceleratorName
     }

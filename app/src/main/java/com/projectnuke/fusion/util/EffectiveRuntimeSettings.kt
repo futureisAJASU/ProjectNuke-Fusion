@@ -78,3 +78,23 @@ fun MtpRuntimeStatus.toKoreanMtpStatus(): String {
 fun buildEffectiveSettingsLine(settings: EffectiveRuntimeSettings): String {
     return "settings rev ${settings.settingsRevision} · ${settings.actualBackend} · MTP ${settings.mtpStatus.toKoreanMtpStatus()} · max ${settings.maxTokens} · temp ${settings.temperature} · topK ${settings.topK} · topP ${settings.topP}"
 }
+
+/**
+ * Builds the explicit "적용: ..." line that distinguishes the *applied*
+ * runtime (selected backend and effective MTP status) from the *requested*
+ * accelerator label shown on the first metrics line. Reads the immutable
+ * RuntimeExecutionSnapshot fields so it can never contradict the
+ * [buildEffectiveSettingsLine] string (which is built from the same effective
+ * settings), and never re-reads mutable engine state.
+ *
+ * Returns null when there is no observable applied state (e.g. preview engines
+ * or a generation that did not reach Engine init).
+ */
+fun buildAppliedRuntimeLine(
+    actualBackend: String?,
+    mtpStatus: MtpRuntimeStatus,
+    mtpRequested: Boolean
+): String? {
+    if (actualBackend == null) return null
+    return "적용: $actualBackend · MTP ${mtpStatus.toKoreanMtpStatus()}"
+}
