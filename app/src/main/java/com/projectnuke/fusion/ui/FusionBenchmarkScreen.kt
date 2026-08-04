@@ -46,6 +46,8 @@ import com.google.ai.edge.litertlm.LogSeverity
 import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
 import com.projectnuke.fusion.llm.GenerationBenchmarkStats
+import com.projectnuke.fusion.llm.RuntimeAttemptSnapshot
+import com.projectnuke.fusion.llm.inferredMtpStatus
 import com.projectnuke.fusion.llm.RuntimeComponentBackend
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
@@ -307,14 +309,20 @@ try {
 
             val totalMs = SystemClock.elapsedRealtime() - start
             when (outcome) {
-                is GenerationOutcome.Cancelled, GenerationOutcome.Empty, is GenerationOutcome.Failure -> {
+                is GenerationOutcome.Cancelled, GenerationOutcome.Empty -> {
                     val reason = when (outcome) {
-                        is GenerationOutcome.Failure -> "generation failed: ${outcome.kind}"
                         is GenerationOutcome.Cancelled -> "generation cancelled"
                         GenerationOutcome.Empty -> "generation empty"
                         is GenerationOutcome.Success -> ""
+                        is GenerationOutcome.Failure -> "generation failed: ${outcome.kind}"
                     }
-                    throw IllegalStateException("Benchmark LiteRT generation failed: $reason")
+                    // Capture attempt snapshot for failed runs before throwing
+                    val attemptSnapshot = (outcome as? GenerationOutcome.Failure)?.attemptSnapshot
+                    throw BenchmarkFailedException(reason, attemptSnapshot)
+                }
+                is GenerationOutcome.Failure -> {
+                    val attemptSnapshot = outcome.attemptSnapshot
+                    throw BenchmarkFailedException("generation failed: ${outcome.kind}", attemptSnapshot)
                 }
                 is GenerationOutcome.Success -> {
                     /* continue with success path below */
@@ -407,12 +415,34 @@ onResult(resultText)
                  engine.setNativeMinLogSeverity(LogSeverity.ERROR)
              }
          }
-     } catch (e: ChatGenerationRunningException) {
-        Log.i("FusionBenchmark", "Benchmark blocked because chat generation is running")
+} catch (e: BenchmarkFailedException) {
+        Log.e("FusionBenchmark", "Benchmark generation failed: ${e.reason}", e)
+        Log.e("FusionEngine", "모델 설정을 적용할 수 없습니다.", e)
+        DeveloperLogStore.record(context, "benchmark", "벤치마크 실패", e::class.java.simpleName)
         onStatus(null)
-        Toast.makeText(context, "현재 응답을 생성하는 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()
-    } catch (e: kotlinx.coroutines.CancellationException) {
-        throw e
+        val userMessage = benchmarkUserErrorMessage(e, snapshot)
+        Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
+        runCatching {
+            saveBenchmarkResult(
+                context = context,
+                benchmarkDao = benchmarkDao,
+                snapshot = snapshot,
+                mtpStatus = e.attemptSnapshot?.inferredMtpStatus() ?: engine.lastMtpStatus,
+                modelLoadingMs = null,
+                firstTokenLatencyMs = null,
+                totalGenerationMs = 0L,
+                estimatedOutputTokens = 0,
+                totalTokensPerSecond = 0f,
+                decodeTokensPerSecond = null,
+                success = false,
+                errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot),
+                actualBackend = null,
+                attemptSnapshot = e.attemptSnapshot
+            )
+        }.onFailure { saveError ->
+            Log.e("FusionBenchmark", "Failed to save benchmark result", saveError)
+            Toast.makeText(context, "벤치마크 기록을 저장할 수 없습니다.", Toast.LENGTH_SHORT).show()
+        }
     } catch (e: Exception) {
         Log.e("FusionBenchmark", "Benchmark generation failed", e)
         Log.e("FusionEngine", "모델 설정을 적용할 수 없습니다.", e)
@@ -420,7 +450,7 @@ onResult(resultText)
         onStatus(null)
         val userMessage = benchmarkUserErrorMessage(e, snapshot)
         Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
-runCatching {
+        runCatching {
             saveBenchmarkResult(
                 context = context,
                 benchmarkDao = benchmarkDao,
@@ -461,6 +491,7 @@ private suspend fun saveBenchmarkResult(
     errorMessage: String?,
     actualBackend: String?,
     runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
+    attemptSnapshot: com.projectnuke.fusion.llm.RuntimeAttemptSnapshot? = null,
     nativeStats: GenerationBenchmarkStats? = null
 ) {
     benchmarkDao.insert(
@@ -477,6 +508,7 @@ private suspend fun saveBenchmarkResult(
             errorMessage = errorMessage,
             actualBackend = actualBackend,
             runtimeSnapshot = runtimeSnapshot,
+            attemptSnapshot = attemptSnapshot,
             nativeStats = nativeStats,
             appVersion = context.appVersionName(),
             deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
@@ -505,20 +537,47 @@ internal fun buildBenchmarkResultEntityPayload(
     errorMessage: String?,
     actualBackend: String?,
     runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
+    attemptSnapshot: com.projectnuke.fusion.llm.RuntimeAttemptSnapshot? = null,
     nativeStats: GenerationBenchmarkStats? = null,
     appVersion: String?,
     deviceModel: String,
     androidVersion: String,
     createdAtMs: Long = System.currentTimeMillis()
 ): BenchmarkResultEntity {
-    val selectedTextBackend = runtimeSnapshot?.selectedTextBackend?.name
-        ?: actualBackend
-    val selectedVisionBackend = runtimeSnapshot?.selectedVisionBackend?.name
-    val samplerBackend = runtimeSnapshot?.samplerBackend?.name ?: com.projectnuke.fusion.llm.RuntimeComponentBackend.UNKNOWN.name
-    val fallbackEventCodes = runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
-        ?.takeIf { it.isNotBlank() }
-    val mtpRequestedFromSnapshot = runtimeSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)
-    val initializedWithMtp = runtimeSnapshot?.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
+    val selectedTextBackend = if (success) {
+        runtimeSnapshot?.selectedTextBackend?.name ?: actualBackend
+    } else {
+        // For failed runs with attemptSnapshot, there's no selected backend
+        // For legacy failed runs without attemptSnapshot, fall back to actualBackend
+        if (attemptSnapshot != null) null else actualBackend
+    }
+    val selectedVisionBackend = if (success) {
+        runtimeSnapshot?.selectedVisionBackend?.name
+    } else {
+        null
+    }
+    val samplerBackend = if (success) {
+        runtimeSnapshot?.samplerBackend?.name ?: com.projectnuke.fusion.llm.RuntimeComponentBackend.UNKNOWN.name
+    } else {
+        com.projectnuke.fusion.llm.RuntimeComponentBackend.UNKNOWN.name
+    }
+    val fallbackEventCodes = if (success) {
+        runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
+            ?.takeIf { it.isNotBlank() }
+    } else {
+        attemptSnapshot?.let { FallbackCauseFormatter.formatEvents(it.fallbackEvents) }
+            ?.takeIf { it.isNotBlank() }
+    }
+    val mtpRequestedFromSnapshot = if (success) {
+        runtimeSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)
+    } else {
+        attemptSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)
+    }
+    val initializedWithMtp = if (success) {
+        runtimeSnapshot?.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
+    } else {
+        false
+    }
     return BenchmarkResultEntity(
         createdAt = createdAtMs,
         modelName = snapshot.modelName,
@@ -723,3 +782,12 @@ private fun Context.appVersionName(): String? {
         packageInfo.versionName
     }.getOrNull()
 }
+
+/**
+ * Exception that wraps a benchmark failure with its attempt snapshot
+ * so the snapshot can be preserved through the catch block to persistence.
+ */
+internal class BenchmarkFailedException(
+    val reason: String,
+    val attemptSnapshot: RuntimeAttemptSnapshot? = null
+) : RuntimeException("Benchmark failed: $reason")

@@ -102,3 +102,19 @@ data class RuntimeAttemptSnapshot(
     val modelFingerprint: ModelFingerprintSummary,
     val mtpRequested: Boolean
 )
+
+/**
+ * Infers the MTP runtime status from the fallback events in a failed attempt.
+ * Returns FAILED if all candidates exhausted, FALLBACK_DISABLED if MTP was
+ * attempted but fell back, UNSUPPORTED if MTP capability was rejected,
+ * OFF if MTP was not requested.
+ */
+fun RuntimeAttemptSnapshot.inferredMtpStatus(): MtpRuntimeStatus = when {
+    !mtpRequested -> MtpRuntimeStatus.OFF
+    fallbackEvents.any { it.reason == FallbackReason.MTP_UNSUPPORTED } -> MtpRuntimeStatus.UNSUPPORTED
+    fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE } -> MtpRuntimeStatus.FALLBACK_DISABLED
+    fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED } -> MtpRuntimeStatus.FALLBACK_DISABLED
+    fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_EXHAUSTED } -> MtpRuntimeStatus.FAILED
+    fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE } -> MtpRuntimeStatus.FAILED
+    else -> MtpRuntimeStatus.FAILED
+}

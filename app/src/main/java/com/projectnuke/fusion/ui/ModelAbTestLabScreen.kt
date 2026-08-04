@@ -44,6 +44,7 @@ import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.GenerationOutcome
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
+import com.projectnuke.fusion.llm.RuntimeAttemptSnapshot
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
@@ -100,6 +101,8 @@ private data class AbResult(
     val errorMessage: String? = null,
     /** Phase 8: immutable runtime snapshot captured from the Success outcome. */
     val runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
+    /** Phase 4: immutable attempt snapshot captured from the Failure outcome. */
+    val attemptSnapshot: com.projectnuke.fusion.llm.RuntimeAttemptSnapshot? = null,
     /** Native benchmark stats captured from the Success outcome, when reported. */
     val nativeStats: com.projectnuke.fusion.llm.GenerationBenchmarkStats? = null
 ) {
@@ -505,14 +508,14 @@ private suspend fun runAbTests(
                 DeveloperLogStore.record(
                     context,
                     "ab_test",
-                    "A/B 대상 성공",
-                    "target=$label, model=${target.model.spec.displayName}, totalMs=${result.totalGenerationMs}"
+                    "A/B 대상 완료",
+                    "target=$label, model=${target.model.spec.displayName}, success=${result.succeeded}, totalMs=${result.totalGenerationMs}"
                 )
             }.onFailure { error ->
                 if (error is kotlinx.coroutines.CancellationException) {
                     throw error
                 }
-                Log.e("FusionAbTest", "Target $label failed", error)
+                Log.e("FusionAbTest", "Target $label failed unexpectedly", error)
                 val failedResult = AbResult(
                         targetLabel = label,
                         modelName = target.model.spec.displayName,
@@ -536,7 +539,7 @@ private suspend fun runAbTests(
                     )
                 completedResults += failedResult
                 onResult(failedResult)
-                DeveloperLogStore.record(context, "ab_test", "A/B 대상 실패", "target=$label, model=${target.model.spec.displayName}, error=${error::class.java.simpleName}")
+                DeveloperLogStore.record(context, "ab_test", "A/B 대상 예외", "target=$label, model=${target.model.spec.displayName}, error=${error::class.java.simpleName}")
             }
         }
     }
@@ -553,7 +556,24 @@ private suspend fun runSingleAbTarget(
     label: String,
     target: AbTarget
 ): AbResult {
-    if (!File(target.model.path).exists()) error("model file missing")
+    if (!File(target.model.path).exists()) {
+        return AbResult(
+            targetLabel = label,
+            modelName = target.model.spec.displayName,
+            modelId = target.model.spec.id,
+            settings = target.settings,
+            reasoningEnabled = target.reasoningEnabled,
+            memoryEnabled = isSavedMemoryContextEnabled(prefs),
+            answer = null,
+            firstTokenLatencyMs = null,
+            totalGenerationMs = 0L,
+            estimatedTokens = 0,
+            totalTokensPerSecond = 0.0,
+            decodeTokensPerSecond = null,
+            createdAt = System.currentTimeMillis(),
+            errorMessage = "모델 파일을 찾을 수 없습니다."
+        )
+    }
     val resolvedSettings = target.settings.copy(
         speculativeDecodingEnabled = MtpPolicyProduction.resolveEffectiveMtpSetting(
             modelPath = target.model.path,
@@ -586,35 +606,112 @@ private suspend fun runSingleAbTarget(
         }
     )
     val totalMs = SystemClock.elapsedRealtime() - startedAt
-    val runtimeSnapshot = (outcome as? GenerationOutcome.Success)?.snapshot
-    val nativeStats = (outcome as? GenerationOutcome.Success)?.stats
-    val answer = when (outcome) {
-        is GenerationOutcome.Success -> sanitizeAbAnswer(outcome.text)
-        is GenerationOutcome.Cancelled -> error("generation cancelled")
-        GenerationOutcome.Empty -> error("empty model response")
-        is GenerationOutcome.Failure -> error(if (outcome.message.isNotBlank()) outcome.message else "model generation failed")
+    return when (outcome) {
+        is GenerationOutcome.Success -> {
+            val runtimeSnapshot = outcome.snapshot
+            val nativeStats = outcome.stats
+            val answer = sanitizeAbAnswer(outcome.text)
+            if (answer.isBlank()) {
+                AbResult(
+                    targetLabel = label,
+                    modelName = target.model.spec.displayName,
+                    modelId = target.model.spec.id,
+                    settings = resolvedSettings,
+                    reasoningEnabled = target.reasoningEnabled,
+                    memoryEnabled = isSavedMemoryContextEnabled(prefs),
+                    answer = null,
+                    firstTokenLatencyMs = firstTokenLatencyMs,
+                    totalGenerationMs = totalMs,
+                    estimatedTokens = 0,
+                    totalTokensPerSecond = 0.0,
+                    decodeTokensPerSecond = null,
+                    createdAt = System.currentTimeMillis(),
+                    errorMessage = "빈 응답을 받았습니다.",
+                    runtimeSnapshot = runtimeSnapshot,
+                    nativeStats = nativeStats
+                )
+            } else {
+                val estimatedTokens = estimateAbTokens(answer)
+                val totalTps = if (totalMs > 0) estimatedTokens * 1000.0 / totalMs else 0.0
+                val decodeMs = firstTokenLatencyMs?.let { totalMs - it }?.takeIf { it > 0 }
+                AbResult(
+                    targetLabel = label,
+                    modelName = target.model.spec.displayName,
+                    modelId = target.model.spec.id,
+                    settings = resolvedSettings,
+                    reasoningEnabled = target.reasoningEnabled,
+                    memoryEnabled = isSavedMemoryContextEnabled(prefs),
+                    answer = answer,
+                    firstTokenLatencyMs = firstTokenLatencyMs,
+                    totalGenerationMs = totalMs,
+                    estimatedTokens = estimatedTokens,
+                    totalTokensPerSecond = totalTps,
+                    decodeTokensPerSecond = decodeMs?.let { estimatedTokens * 1000.0 / it },
+                    createdAt = System.currentTimeMillis(),
+                    runtimeSnapshot = runtimeSnapshot,
+                    nativeStats = nativeStats
+                )
+            }
+        }
+        is GenerationOutcome.Cancelled -> {
+            AbResult(
+                targetLabel = label,
+                modelName = target.model.spec.displayName,
+                modelId = target.model.spec.id,
+                settings = resolvedSettings,
+                reasoningEnabled = target.reasoningEnabled,
+                memoryEnabled = isSavedMemoryContextEnabled(prefs),
+                answer = null,
+                firstTokenLatencyMs = firstTokenLatencyMs,
+                totalGenerationMs = totalMs,
+                estimatedTokens = 0,
+                totalTokensPerSecond = 0.0,
+                decodeTokensPerSecond = null,
+                createdAt = System.currentTimeMillis(),
+                errorMessage = "생성이 취소되었습니다.",
+                attemptSnapshot = null
+            )
+        }
+        GenerationOutcome.Empty -> {
+            AbResult(
+                targetLabel = label,
+                modelName = target.model.spec.displayName,
+                modelId = target.model.spec.id,
+                settings = resolvedSettings,
+                reasoningEnabled = target.reasoningEnabled,
+                memoryEnabled = isSavedMemoryContextEnabled(prefs),
+                answer = null,
+                firstTokenLatencyMs = firstTokenLatencyMs,
+                totalGenerationMs = totalMs,
+                estimatedTokens = 0,
+                totalTokensPerSecond = 0.0,
+                decodeTokensPerSecond = null,
+                createdAt = System.currentTimeMillis(),
+                errorMessage = "빈 모델 응답을 받았습니다.",
+                attemptSnapshot = null
+            )
+        }
+        is GenerationOutcome.Failure -> {
+            val attemptSnapshot = outcome.attemptSnapshot
+            AbResult(
+                targetLabel = label,
+                modelName = target.model.spec.displayName,
+                modelId = target.model.spec.id,
+                settings = resolvedSettings,
+                reasoningEnabled = target.reasoningEnabled,
+                memoryEnabled = isSavedMemoryContextEnabled(prefs),
+                answer = null,
+                firstTokenLatencyMs = firstTokenLatencyMs,
+                totalGenerationMs = totalMs,
+                estimatedTokens = 0,
+                totalTokensPerSecond = 0.0,
+                decodeTokensPerSecond = null,
+                createdAt = System.currentTimeMillis(),
+                errorMessage = outcome.message,
+                attemptSnapshot = attemptSnapshot
+            )
+        }
     }
-    if (answer.isBlank()) error("empty model response")
-    val estimatedTokens = estimateAbTokens(answer)
-    val totalTps = if (totalMs > 0) estimatedTokens * 1000.0 / totalMs else 0.0
-    val decodeMs = firstTokenLatencyMs?.let { totalMs - it }?.takeIf { it > 0 }
-    return AbResult(
-        targetLabel = label,
-        modelName = target.model.spec.displayName,
-        modelId = target.model.spec.id,
-        settings = resolvedSettings,
-        reasoningEnabled = target.reasoningEnabled,
-        memoryEnabled = isSavedMemoryContextEnabled(prefs),
-        answer = answer,
-        firstTokenLatencyMs = firstTokenLatencyMs,
-        totalGenerationMs = totalMs,
-        estimatedTokens = estimatedTokens,
-        totalTokensPerSecond = totalTps,
-        decodeTokensPerSecond = decodeMs?.let { estimatedTokens * 1000.0 / it },
-        createdAt = System.currentTimeMillis(),
-        runtimeSnapshot = runtimeSnapshot,
-        nativeStats = nativeStats
-    )
 }
 
 private fun loadLocalAbModels(context: Context, selectedModel: String, selectedPath: String?): List<AbModelOption> {
@@ -696,6 +793,11 @@ private fun AbResult.copyText(): String = buildString {
     appendLine("모델: $modelName")
     appendLine("요청: ${settingsSummary()}")
     appliedRuntimeLine()?.let { appendLine(it) }
+    attemptSnapshot?.let { snap ->
+        val backend = snap.modelFingerprint.canonicalPath
+        val events = FallbackCauseFormatter.formatAttemptFallbackSummary(snap)
+        if (events.isNotBlank()) appendLine("폴백: $events")
+    }
     appendLine("시간: ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(createdAt))}")
     if (succeeded) {
         appendLine("첫 토큰 시간: ${firstTokenLatencyMs?.let { "${it}ms" } ?: "측정 불가"}")
@@ -712,8 +814,14 @@ private fun AbResult.copyText(): String = buildString {
 
 private fun AbResult.toStoredResult(): StoredAbTestResult {
     val snapshot = runtimeSnapshot
-    val fallbackCodes = runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
-        ?.takeIf { it.isNotBlank() }
+    val attemptSnap = attemptSnapshot
+    val fallbackCodes = if (succeeded) {
+        runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
+            ?.takeIf { it.isNotBlank() }
+    } else {
+        attemptSnapshot?.let { FallbackCauseFormatter.format(it) }
+            ?.takeIf { it.isNotBlank() }
+    }
     return StoredAbTestResult(
         targetLabel = targetLabel,
         modelName = modelName,
@@ -741,9 +849,12 @@ private fun AbResult.toStoredResult(): StoredAbTestResult {
         nativeTtftSeconds = nativeStats?.timeToFirstTokenSeconds,
         nativePrefillTokensPerSecond = nativeStats?.prefillTokensPerSecond,
         nativeDecodeTokensPerSecond = nativeStats?.decodeTokensPerSecond,
-        modelFingerprintPath = snapshot?.modelFingerprint?.canonicalPath,
-        modelFingerprintSize = snapshot?.modelFingerprint?.fileSize,
+        modelFingerprintPath = snapshot?.modelFingerprint?.canonicalPath
+            ?: attemptSnap?.modelFingerprint?.canonicalPath,
+        modelFingerprintSize = snapshot?.modelFingerprint?.fileSize
+            ?: attemptSnap?.modelFingerprint?.fileSize,
         modelFingerprintModifiedAt = snapshot?.modelFingerprint?.modifiedAt
+            ?: attemptSnap?.modelFingerprint?.modifiedAt
     )
 }
 
