@@ -25,9 +25,9 @@ class LiteRtLlmEngineMtpTest {
             configureFlag = alwaysFlag(),
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 if (backendName == "GPU" && mtpEnabled) {
-                    Result.success("gpu-mtp-engine")
+                    EngineCandidateAttempt.Success("gpu-mtp-engine")
                 } else {
-                    Result.failure(IllegalStateException("not reached"))
+                    EngineCandidateAttempt.InitializationFailed(IllegalStateException("not reached"))
                 }
             }
         )
@@ -49,9 +49,9 @@ class LiteRtLlmEngineMtpTest {
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 attempts += "$backendName-mtp=$mtpEnabled"
                 if (backendName == "GPU" && !mtpEnabled) {
-                    Result.success("gpu-plain-engine")
+                    EngineCandidateAttempt.Success("gpu-plain-engine")
                 } else {
-                    Result.failure(IllegalStateException("init failed"))
+                    EngineCandidateAttempt.InitializationFailed(IllegalStateException("init failed"))
                 }
             }
         )
@@ -73,7 +73,7 @@ class LiteRtLlmEngineMtpTest {
             configureFlag = { enabled -> flagCalls += enabled; !enabled },
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 attempts += (backendName to mtpEnabled)
-                Result.success("$backendName-mtp=$mtpEnabled")
+                EngineCandidateAttempt.Success("$backendName-mtp=$mtpEnabled")
             }
         )
         val result = selection.selection
@@ -97,9 +97,9 @@ class LiteRtLlmEngineMtpTest {
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 attempts += (backendName to mtpEnabled)
                 if (mtpEnabled && backendName == "CPU") {
-                    Result.success("cpu-mtp-engine")
+                    EngineCandidateAttempt.Success("cpu-mtp-engine")
                 } else {
-                    Result.failure(IllegalStateException("init failed"))
+                    EngineCandidateAttempt.InitializationFailed(IllegalStateException("init failed"))
                 }
             }
         )
@@ -120,7 +120,7 @@ class LiteRtLlmEngineMtpTest {
             ladder = mtpLadder,
             enableVisionBackend = false,
             configureFlag = { false },
-            tryCreate = { _, _, _ -> Result.success("unreachable") }
+            tryCreate = { _, _, _ -> EngineCandidateAttempt.Success("unreachable") }
         )
         assertNull(selection.selection)
         assertNotNull(selection.failure)
@@ -137,9 +137,9 @@ class LiteRtLlmEngineMtpTest {
             tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
                 if (visionBackendIsCpu) {
                     cpuVisionRetry = true
-                    Result.success("gpu-engine-cpu-vision")
+                    EngineCandidateAttempt.Success("gpu-engine-cpu-vision")
                 } else {
-                    Result.failure(IllegalStateException("gpu vision init failed"))
+                    EngineCandidateAttempt.InitializationFailed(IllegalStateException("gpu vision init failed"))
                 }
             }
         )
@@ -157,7 +157,7 @@ class LiteRtLlmEngineMtpTest {
             ladder = mtpLadder,
             enableVisionBackend = false,
             configureFlag = alwaysFlag(),
-            tryCreate = { _, _, _ -> Result.failure(failure) }
+            tryCreate = { _, _, _ -> EngineCandidateAttempt.InitializationFailed(failure) }
         )
         assertNull(selection.selection)
         assertEquals(failure, selection.failure)
@@ -170,10 +170,10 @@ class LiteRtLlmEngineMtpTest {
             ladder = mtpLadder,
             enableVisionBackend = false,
             configureFlag = { enabled -> events += "flag:$enabled"; true },
-            tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
-                events += "create:$backendName-$mtpEnabled"
-                Result.failure(IllegalStateException("fail"))
-            }
+tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
+                 events += "create:$backendName-$mtpEnabled"
+                 EngineCandidateAttempt.InitializationFailed(IllegalStateException("fail"))
+             }
         )
         assertEquals(
             listOf(

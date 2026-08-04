@@ -156,6 +156,28 @@ class LiteRtMtpFailureMemoryTest {
     }
 
     @Test
+    fun `concurrent candidate failures for same fingerprint survive process recreation`() {
+        val storage = FakeStorage()
+        val first = MtpFailureMemory(storage)
+
+        // Record GPU+MTP failure
+        record(first, backend = "GPU", mtpEnabled = true, reason = "MTP init failed")
+        // Record GPU plain failure
+        record(first, backend = "GPU", mtpEnabled = false, reason = "Backend init failed")
+        // Record CPU plain failure
+        record(first, backend = "CPU", mtpEnabled = false, reason = "Backend init failed")
+
+        assertEquals(3, first.persistedEntryCount())
+
+        // Reload from storage — all three failures must survive
+        val reloaded = MtpFailureMemory(storage)
+        assertEquals(3, reloaded.persistedEntryCount())
+        assertTrue(shouldSkip(reloaded, backend = "GPU", mtpEnabled = true) != null)
+        assertTrue(shouldSkip(reloaded, backend = "GPU", mtpEnabled = false) != null)
+        assertTrue(shouldSkip(reloaded, backend = "CPU", mtpEnabled = false) != null)
+    }
+
+    @Test
     fun `clearForModel removes only that model and persists the removal`() {
         val storage = FakeStorage()
         val memory = MtpFailureMemory(storage)

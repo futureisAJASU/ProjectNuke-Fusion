@@ -25,13 +25,13 @@ class LiteRtConcurrentFallbackEventTest {
             ),
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { backendName, mtpEnabled, _ ->
-                if (backendName == "CPU" && !mtpEnabled) Result.success("cpu")
-                else Result.failure(IllegalStateException("fail"))
-            }
-        )
-        assertNotNull(outcome.selection)
-        val snapshot = RuntimeExecutionSnapshot(
+tryCreate = { backendName, mtpEnabled, _ ->
+                 if (backendName == "CPU" && !mtpEnabled) EngineCandidateAttempt.Success("cpu")
+                 else EngineCandidateAttempt.InitializationFailed(IllegalStateException("fail"))
+             }
+         )
+         assertNotNull(outcome.selection)
+         val snapshot = RuntimeExecutionSnapshot(
             requestedAccelerator = AcceleratorMode.AUTO,
             selectedTextBackend = RuntimeBackend.CPU,
             selectedVisionBackend = null,
@@ -53,10 +53,10 @@ class LiteRtConcurrentFallbackEventTest {
             ladder = listOf(EngineCandidate("GPU", false)),
             enableVisionBackend = true,
             configureFlag = { true },
-            tryCreate = { backendName, _, visionBackendIsCpu ->
-                if (visionBackendIsCpu) Result.success("gpu-text-cpu-vision")
-                else Result.failure(IllegalStateException("gpu vision init failed"))
-            }
+tryCreate = { backendName, _, visionBackendIsCpu ->
+                 if (visionBackendIsCpu) EngineCandidateAttempt.Success("gpu-text-cpu-vision")
+                 else EngineCandidateAttempt.InitializationFailed(IllegalStateException("gpu vision init failed"))
+             }
         )
         assertNotNull(outcome.selection)
         assertEquals("CPU", outcome.selection!!.visionBackend)
@@ -79,15 +79,15 @@ class LiteRtConcurrentFallbackEventTest {
             ),
             enableVisionBackend = true,
             configureFlag = { true },
-            tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
-                if (backendName == "GPU" && mtpEnabled) {
-                    Result.failure(IllegalStateException("gpu mtp init failed"))
-                } else if (visionBackendIsCpu) {
-                    Result.success("gpu-text-cpu-vision")
-                } else {
-                    Result.failure(IllegalStateException("gpu vision init failed"))
-                }
-            }
+tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
+                 if (backendName == "GPU" && mtpEnabled) {
+                     EngineCandidateAttempt.InitializationFailed(IllegalStateException("gpu mtp init failed"))
+                 } else if (visionBackendIsCpu) {
+                     EngineCandidateAttempt.Success("gpu-text-cpu-vision")
+                 } else {
+                     EngineCandidateAttempt.InitializationFailed(IllegalStateException("gpu vision init failed"))
+                 }
+             }
         )
         assertNotNull(outcome.selection)
         val reasons = outcome.fallbackEvents.map { it.reason }.toSet()
@@ -110,12 +110,12 @@ class LiteRtConcurrentFallbackEventTest {
             ),
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { backendName, mtpEnabled, _ ->
-                if (backendName == "CPU" && !mtpEnabled) Result.success("cpu")
-                else Result.failure(IllegalStateException("fail"))
-            }
-        )
-        // The legacy single-string fallbackReason surfaces only the first event
+tryCreate = { backendName, mtpEnabled, _ ->
+                 if (backendName == "CPU" && !mtpEnabled) EngineCandidateAttempt.Success("cpu")
+                 else EngineCandidateAttempt.InitializationFailed(IllegalStateException("fail"))
+             }
+         )
+         // The legacy single-string fallbackReason surfaces only the first event
         // (in the engine's runtimeSelection), losing the second. The snapshot's
         // fallbackEvents list is therefore the only truthful record. Assert that
         // the event list is longer than one entry while the legacy field would
@@ -129,10 +129,10 @@ class LiteRtConcurrentFallbackEventTest {
             ladder = listOf(EngineCandidate("GPU", false)),
             enableVisionBackend = true,
             configureFlag = { true },
-            tryCreate = { _, _, visionBackendIsCpu ->
-                if (visionBackendIsCpu) Result.success("ok")
-                else Result.failure(IllegalStateException("vision fail"))
-            }
+tryCreate = { _, _, visionBackendIsCpu ->
+                 if (visionBackendIsCpu) EngineCandidateAttempt.Success("ok")
+                 else EngineCandidateAttempt.InitializationFailed(IllegalStateException("vision fail"))
+             }
         )
         assertNotNull(outcome.selection)
         // Single vision-only event, no MTP event because no candidate requested MTP.

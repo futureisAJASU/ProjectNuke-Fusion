@@ -494,23 +494,9 @@ class LiteRtLlmEngine(
                     when (mtpCapabilityProbe(profile.modelPath)) {
                         true -> mtpCapabilityResult = true
                         false -> {
-                            // Official native capability check says the runtime
-                            // has no speculative-decoding support: treat the
-                            // candidate as failed so the ladder falls back and
-                            // the failure is remembered per backend. A positive
-                            // capability result is NOT runtime-activity evidence;
-                            // only the MTP flag being applied during a successful
-                            // Engine init justifies INITIALIZED_WITH_MTP_REQUEST.
                             mtpCapabilityResult = false
                             lastMtpAttemptBackend = backendName
-                            recordedFallbackEvents += RuntimeFallbackEvent(
-                                attemptedTextBackend = backendName.toRuntimeBackend(),
-                                attemptedMtpEnabled = true,
-                                reason = FallbackReason.MTP_UNSUPPORTED
-                            )
-                            return@selectFirstWorkingEngine Result.failure(
-                                IllegalStateException("MTP capability probe: no speculative decoding support")
-                            )
+                            EngineCandidateAttempt.CapabilityRejected(backendName, mtpEnabled)
                         }
                         null -> Unit // capability unavailable; proceed optimistically
                     }
@@ -527,7 +513,11 @@ class LiteRtLlmEngine(
                     maxNumTokens = maxNumTokens
                 )
                 if (mtpEnabled && result.isFailure) lastMtpAttemptBackend = backendName
-                result
+                if (result.isSuccess) {
+                    EngineCandidateAttempt.Success(result.getOrThrow())
+                } else {
+                    EngineCandidateAttempt.InitializationFailed(result.exceptionOrNull() ?: IllegalStateException("Engine creation failed"))
+                }
             }
         )
         val selectionResult = selection.selection
@@ -946,6 +936,12 @@ internal fun isAppOutputLimitReached(options: ConversationOptions, accumulatedOu
 
 private object AppOutputLimitReachedException : RuntimeException("app-level output limit reached")
 
+sealed interface EngineCandidateAttempt<out T> {
+    data class Success<T>(val engine: T) : EngineCandidateAttempt<T>
+    data class CapabilityRejected(val backendName: String, val mtpEnabled: Boolean) : EngineCandidateAttempt<Nothing>
+    data class InitializationFailed(val throwable: Throwable) : EngineCandidateAttempt<Nothing>
+}
+
 internal data class EngineCandidate(
     val backend: String,
     val mtpEnabled: Boolean,
@@ -975,19 +971,13 @@ internal fun <T> selectFirstWorkingEngine(
     ladder: List<EngineCandidate>,
     enableVisionBackend: Boolean,
     configureFlag: (Boolean) -> Boolean,
-    tryCreate: (backendName: String, mtpEnabled: Boolean, visionBackendIsCpu: Boolean) -> Result<T>
+    tryCreate: (backendName: String, mtpEnabled: Boolean, visionBackendIsCpu: Boolean) -> EngineCandidateAttempt<T>
 ): EngineSelectionOutcome<T> {
     var mtpFlagAppliedForMtp = false
     var lastFailure: Throwable? = null
     val fallbackEvents = mutableListOf<RuntimeFallbackEvent>()
     var pendingGpuPlainFailure = false
     for (candidate in ladder) {
-        // Mandatory settlement: never initialize an engine while the
-        // speculative-decoding flag is in an unknown state. A failed settle
-        // skips the candidate entirely instead of proceeding on faith. Record
-        // a typed event so callers never parse English exception text. The
-        // spec-decoding flag can be requested on or off; the failure is
-        // specific to that direction.
         val flagApplied = configureFlag(candidate.mtpEnabled)
         if (!flagApplied) {
             fallbackEvents += RuntimeFallbackEvent(
@@ -1003,83 +993,94 @@ internal fun <T> selectFirstWorkingEngine(
             mtpFlagAppliedForMtp = true
         }
         val attempt = tryCreate(candidate.backend, candidate.mtpEnabled, false)
-        if (attempt.isSuccess) {
-            if (pendingGpuPlainFailure && candidate.backend == "CPU" && !candidate.mtpEnabled) {
-                fallbackEvents += RuntimeFallbackEvent(
-                    attemptedTextBackend = RuntimeBackend.GPU,
-                    attemptedMtpEnabled = false,
-                    selectedReplacementBackend = RuntimeBackend.CPU,
-                    reason = FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED
-                )
-            }
-            return EngineSelectionOutcome(
-                selection = EngineSelectionResult(
-                    engine = attempt.getOrThrow(),
-                    selectedMtpEnabled = candidate.mtpEnabled,
-                    mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
-                    backendName = candidate.backend,
-                    visionBackend = if (enableVisionBackend) candidate.backend else null
-                ),
-                failure = null,
-                fallbackEvents = fallbackEvents
-            )
-        }
-        if (enableVisionBackend && candidate.backend == "GPU") {
-            val visionRetry = tryCreate(candidate.backend, candidate.mtpEnabled, true)
-            if (visionRetry.isSuccess) {
-                // GPU text backend succeeded but GPU vision backend failed:
-                // specifically record the vision fallback.
-                fallbackEvents += RuntimeFallbackEvent(
-                    attemptedTextBackend = RuntimeBackend.GPU,
-                    attemptedVisionBackend = RuntimeBackend.GPU,
-                    attemptedMtpEnabled = candidate.mtpEnabled,
-                    selectedReplacementBackend = RuntimeBackend.CPU,
-                    reason = FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED
-                )
+        when (attempt) {
+            is EngineCandidateAttempt.Success -> {
+                if (pendingGpuPlainFailure && candidate.backend == "CPU" && !candidate.mtpEnabled) {
+                    fallbackEvents += RuntimeFallbackEvent(
+                        attemptedTextBackend = RuntimeBackend.GPU,
+                        attemptedMtpEnabled = false,
+                        selectedReplacementBackend = RuntimeBackend.CPU,
+                        reason = FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED
+                    )
+                }
                 return EngineSelectionOutcome(
                     selection = EngineSelectionResult(
-                        engine = visionRetry.getOrThrow(),
+                        engine = attempt.engine,
                         selectedMtpEnabled = candidate.mtpEnabled,
                         mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                         backendName = candidate.backend,
-                        visionBackend = "CPU"
+                        visionBackend = if (enableVisionBackend) candidate.backend else null
                     ),
                     failure = null,
                     fallbackEvents = fallbackEvents
                 )
             }
-            // Both first attempt and vision retry failed for a GPU candidate.
-            // Record the GPU backend failure so AUTO can fall back to CPU.
-            pendingGpuPlainFailure = true
-            if (candidate.mtpEnabled) {
+            is EngineCandidateAttempt.CapabilityRejected -> {
+                // Capability rejection (e.g. MTP unsupported) must not
+                // trigger a vision-backend retry for the same candidate.
+                // Record MTP_UNSUPPORTED and move to the next candidate.
                 fallbackEvents += RuntimeFallbackEvent(
-                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
-                    attemptedMtpEnabled = true,
-                    reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                    attemptedTextBackend = attempt.backendName.toRuntimeBackend(),
+                    attemptedMtpEnabled = attempt.mtpEnabled,
+                    reason = FallbackReason.MTP_UNSUPPORTED
                 )
-            } else {
-                fallbackEvents += RuntimeFallbackEvent(
-                    attemptedTextBackend = RuntimeBackend.GPU,
-                    attemptedMtpEnabled = false,
-                    reason = FallbackReason.BACKEND_ENGINE_INIT_FAILED
-                )
+                lastFailure = IllegalStateException("MTP capability probe: no speculative decoding support")
             }
-            lastFailure = attempt.exceptionOrNull() ?: visionRetry.exceptionOrNull()
-        } else {
-            lastFailure = attempt.exceptionOrNull()
-            if (candidate.mtpEnabled) {
-                fallbackEvents += RuntimeFallbackEvent(
-                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
-                    attemptedMtpEnabled = true,
-                    reason = FallbackReason.MTP_ENGINE_INIT_FAILED
-                )
-            } else {
-                pendingGpuPlainFailure = candidate.backend == "GPU"
-                fallbackEvents += RuntimeFallbackEvent(
-                    attemptedTextBackend = candidate.backend.toRuntimeBackend(),
-                    attemptedMtpEnabled = false,
-                    reason = FallbackReason.BACKEND_ENGINE_INIT_FAILED
-                )
+            is EngineCandidateAttempt.InitializationFailed -> {
+                lastFailure = attempt.throwable
+                if (enableVisionBackend && candidate.backend == "GPU") {
+                    val visionRetry = tryCreate(candidate.backend, candidate.mtpEnabled, true)
+                    if (visionRetry is EngineCandidateAttempt.Success) {
+                        fallbackEvents += RuntimeFallbackEvent(
+                            attemptedTextBackend = RuntimeBackend.GPU,
+                            attemptedVisionBackend = RuntimeBackend.GPU,
+                            attemptedMtpEnabled = candidate.mtpEnabled,
+                            selectedReplacementBackend = RuntimeBackend.CPU,
+                            reason = FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED
+                        )
+                        return EngineSelectionOutcome(
+                            selection = EngineSelectionResult(
+                                engine = visionRetry.engine,
+                                selectedMtpEnabled = candidate.mtpEnabled,
+                                mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
+                                backendName = candidate.backend,
+                                visionBackend = "CPU"
+                            ),
+                            failure = null,
+                            fallbackEvents = fallbackEvents
+                        )
+                    }
+                    // Both first attempt and vision retry failed for a GPU candidate.
+                    pendingGpuPlainFailure = true
+                    if (candidate.mtpEnabled) {
+                        fallbackEvents += RuntimeFallbackEvent(
+                            attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                            attemptedMtpEnabled = true,
+                            reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                        )
+                    } else {
+                        fallbackEvents += RuntimeFallbackEvent(
+                            attemptedTextBackend = RuntimeBackend.GPU,
+                            attemptedMtpEnabled = false,
+                            reason = FallbackReason.BACKEND_ENGINE_INIT_FAILED
+                        )
+                    }
+                } else {
+                    if (candidate.mtpEnabled) {
+                        fallbackEvents += RuntimeFallbackEvent(
+                            attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                            attemptedMtpEnabled = true,
+                            reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                        )
+                    } else {
+                        pendingGpuPlainFailure = candidate.backend == "GPU"
+                        fallbackEvents += RuntimeFallbackEvent(
+                            attemptedTextBackend = candidate.backend.toRuntimeBackend(),
+                            attemptedMtpEnabled = false,
+                            reason = FallbackReason.BACKEND_ENGINE_INIT_FAILED
+                        )
+                    }
+                }
             }
         }
     }
@@ -1143,23 +1144,40 @@ object NoopMtpFailureMemoryStorage : MtpFailureMemoryStorage {
 }
 
 /**
+ * Groups failure memory entries by the model's immutable identity.
+ * When a model is replaced at the same path (different file size,
+ * modified time, validator version, or capability fingerprint),
+ * all entries belonging to the old fingerprint are invalidated.
+ */
+internal data class FailureModelFingerprint(
+    val canonicalPath: String,
+    val fileSize: Long,
+    val modifiedAt: Long,
+    val validationVersion: Int,
+    val mtpSupported: Boolean,
+) {
+    fun matches(other: FailureModelFingerprint): Boolean =
+        canonicalPath == other.canonicalPath &&
+            fileSize == other.fileSize &&
+            modifiedAt == other.modifiedAt &&
+            validationVersion == other.validationVersion &&
+            mtpSupported == other.mtpSupported
+}
+
+/**
  * Tracks MTP initialization failures to prevent repeated failed rebuilds.
- * Keyed by canonical model identity, actual backend, package capability
+ * Keyed by model fingerprint, actual backend, package capability
  * version, and engine settings. Entries are persisted through [storage].
  */
 internal class MtpFailureMemory(
     private val storage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage
 ) {
     private data class FailureKey(
-        val modelPath: String,
+        val modelFingerprint: FailureModelFingerprint,
         val backendName: String,
         val mtpEnabled: Boolean,
-        val validationVersion: Int,
         val kvCacheCapacityTokens: Int,
-        val enableVisionBackend: Boolean,
-        val fileSize: Long,
-        val modifiedAt: Long,
-        val mtpSupported: Boolean
+        val enableVisionBackend: Boolean
     )
 
     private data class FailureRecord(
@@ -1176,30 +1194,32 @@ internal class MtpFailureMemory(
         private const val KEY_SEPARATOR = "\u001f"
 
         private fun serializeKey(key: FailureKey): String = listOf(
-            key.modelPath,
+            key.modelFingerprint.canonicalPath,
+            key.modelFingerprint.fileSize.toString(),
+            key.modelFingerprint.modifiedAt.toString(),
+            key.modelFingerprint.validationVersion.toString(),
+            key.modelFingerprint.mtpSupported.toString(),
             key.backendName,
             key.mtpEnabled.toString(),
-            key.validationVersion.toString(),
             key.kvCacheCapacityTokens.toString(),
-            key.enableVisionBackend.toString(),
-            key.fileSize.toString(),
-            key.modifiedAt.toString(),
-            key.mtpSupported.toString()
+            key.enableVisionBackend.toString()
         ).joinToString(KEY_SEPARATOR)
 
         private fun deserializeKey(serialized: String): FailureKey? {
             val parts = serialized.split(KEY_SEPARATOR)
             if (parts.size != 9) return null
             return FailureKey(
-                modelPath = parts[0],
-                backendName = parts[1],
-                mtpEnabled = parts[2].toBooleanStrictOrNull() ?: return null,
-                validationVersion = parts[3].toIntOrNull() ?: return null,
-                kvCacheCapacityTokens = parts[4].toIntOrNull() ?: return null,
-                enableVisionBackend = parts[5].toBooleanStrictOrNull() ?: return null,
-                fileSize = parts[6].toLongOrNull() ?: return null,
-                modifiedAt = parts[7].toLongOrNull() ?: return null,
-                mtpSupported = parts[8].toBooleanStrictOrNull() ?: return null
+                modelFingerprint = FailureModelFingerprint(
+                    canonicalPath = parts[0],
+                    fileSize = parts[1].toLongOrNull() ?: return null,
+                    modifiedAt = parts[2].toLongOrNull() ?: return null,
+                    validationVersion = parts[3].toIntOrNull() ?: return null,
+                    mtpSupported = parts[4].toBooleanStrictOrNull() ?: return null
+                ),
+                backendName = parts[5],
+                mtpEnabled = parts[6].toBooleanStrictOrNull() ?: return null,
+                kvCacheCapacityTokens = parts[7].toIntOrNull() ?: return null,
+                enableVisionBackend = parts[8].toBooleanStrictOrNull() ?: return null
             )
         }
     }
@@ -1229,15 +1249,17 @@ internal class MtpFailureMemory(
         mtpSupported: Boolean
     ): String? = synchronized(lock) {
         val key = FailureKey(
-            modelPath = modelPath,
+            modelFingerprint = FailureModelFingerprint(
+                canonicalPath = modelPath,
+                fileSize = fileSize,
+                modifiedAt = modifiedAt,
+                validationVersion = validationVersion,
+                mtpSupported = mtpSupported
+            ),
             backendName = backendName,
             mtpEnabled = mtpEnabled,
-            validationVersion = validationVersion,
             kvCacheCapacityTokens = kvCacheCapacityTokens,
-            enableVisionBackend = enableVisionBackend,
-            fileSize = fileSize,
-            modifiedAt = modifiedAt,
-            mtpSupported = mtpSupported
+            enableVisionBackend = enableVisionBackend
         )
         val record = failures[key]
         if (record != null) {
@@ -1268,15 +1290,17 @@ internal class MtpFailureMemory(
         mtpSupported: Boolean
     ): String? = synchronized(lock) {
         val key = FailureKey(
-            modelPath = modelPath,
+            modelFingerprint = FailureModelFingerprint(
+                canonicalPath = modelPath,
+                fileSize = fileSize,
+                modifiedAt = modifiedAt,
+                validationVersion = validationVersion,
+                mtpSupported = mtpSupported
+            ),
             backendName = backendName,
             mtpEnabled = false,
-            validationVersion = validationVersion,
             kvCacheCapacityTokens = kvCacheCapacityTokens,
-            enableVisionBackend = enableVisionBackend,
-            fileSize = fileSize,
-            modifiedAt = modifiedAt,
-            mtpSupported = mtpSupported
+            enableVisionBackend = enableVisionBackend
         )
         val record = failures[key]
         if (record != null) {
@@ -1306,21 +1330,24 @@ internal class MtpFailureMemory(
         mtpSupported: Boolean,
         fallbackReason: String
     ) = synchronized(lock) {
-        val key = FailureKey(
-            modelPath = modelPath,
-            backendName = backendName,
-            mtpEnabled = mtpEnabled,
-            validationVersion = validationVersion,
-            kvCacheCapacityTokens = kvCacheCapacityTokens,
-            enableVisionBackend = enableVisionBackend,
+        val fingerprint = FailureModelFingerprint(
+            canonicalPath = modelPath,
             fileSize = fileSize,
             modifiedAt = modifiedAt,
+            validationVersion = validationVersion,
             mtpSupported = mtpSupported
+        )
+        val key = FailureKey(
+            modelFingerprint = fingerprint,
+            backendName = backendName,
+            mtpEnabled = mtpEnabled,
+            kvCacheCapacityTokens = kvCacheCapacityTokens,
+            enableVisionBackend = enableVisionBackend
         )
         // Invalidate stale entries for the same model path when the
         // fingerprint changed (e.g. model replaced at same path).
         failures.keys
-            .filter { it.modelPath == modelPath && it != key }
+            .filter { it.modelFingerprint.canonicalPath == fingerprint.canonicalPath && !it.modelFingerprint.matches(fingerprint) }
             .forEach { failures.remove(it) }
         failures[key] = FailureRecord(
             failedAt = System.currentTimeMillis(),
@@ -1339,7 +1366,7 @@ internal class MtpFailureMemory(
      * Clears failure memory for a specific model (e.g., when model file changes).
      */
     fun clearForModel(modelPath: String) = synchronized(lock) {
-        failures.keys.filter { it.modelPath == modelPath }.forEach { failures.remove(it) }
+        failures.keys.filter { it.modelFingerprint.canonicalPath == modelPath }.forEach { failures.remove(it) }
         persist()
     }
 

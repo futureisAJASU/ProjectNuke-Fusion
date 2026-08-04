@@ -39,9 +39,9 @@ class LiteRtEngineFallbackEventsTest {
             ladder = listOf(EngineCandidate("GPU", true)),
             enableVisionBackend = false,
             configureFlag = alwaysFlag(),
-            tryCreate = { _, _, _ ->
-                Result.failure(IllegalStateException("MTP init failed"))
-            }
+tryCreate = { _, _, _ ->
+                 EngineCandidateAttempt.InitializationFailed(IllegalStateException("MTP init failed"))
+             }
         )
         assertNull(outcome.selection)
         val ev = outcome.fallbackEvents.single()
@@ -56,7 +56,7 @@ class LiteRtEngineFallbackEventsTest {
             ladder = listOf(EngineCandidate("GPU", true), EngineCandidate("GPU", false)),
             enableVisionBackend = false,
             configureFlag = { enabled -> enabled.not() },
-            tryCreate = { _, _, _ -> Result.success("never") }
+            tryCreate = { _, _, _ -> EngineCandidateAttempt.Success("never") }
         )
         assertNotNull(outcome.selection)
         val ev = outcome.fallbackEvents.single()
@@ -69,7 +69,7 @@ class LiteRtEngineFallbackEventsTest {
             ladder = listOf(EngineCandidate("GPU", false)),
             enableVisionBackend = false,
             configureFlag = { false },
-            tryCreate = { _, _, _ -> Result.success("never reached") }
+            tryCreate = { _, _, _ -> EngineCandidateAttempt.Success("never reached") }
         )
         // A failed settle skips the candidate entirely; the single GPU-plain
         // candidate fails its disable-settle, so the selection is null and the
@@ -85,10 +85,10 @@ class LiteRtEngineFallbackEventsTest {
             ladder = listOf(EngineCandidate("GPU", true), EngineCandidate("GPU", false)),
             enableVisionBackend = false,
             configureFlag = alwaysFlag(),
-            tryCreate = { backendName, mtpEnabled, _ ->
-                if (backendName == "GPU" && mtpEnabled) Result.failure(IllegalStateException("init failed"))
-                else Result.success("gpu-plain")
-            }
+tryCreate = { backendName, mtpEnabled, _ ->
+                 if (backendName == "GPU" && mtpEnabled) EngineCandidateAttempt.InitializationFailed(IllegalStateException("init failed"))
+                 else EngineCandidateAttempt.Success("gpu-plain")
+             }
         )
         assertNotNull(outcome.selection)
         assertEquals(
@@ -106,10 +106,10 @@ class LiteRtEngineFallbackEventsTest {
             ),
             enableVisionBackend = false,
             configureFlag = alwaysFlag(),
-            tryCreate = { backendName, _, _ ->
-                if (backendName == "GPU") Result.failure(IllegalStateException("gpu fail"))
-                else Result.success("cpu-engine")
-            }
+tryCreate = { backendName, _, _ ->
+                 if (backendName == "GPU") EngineCandidateAttempt.InitializationFailed(IllegalStateException("gpu fail"))
+                 else EngineCandidateAttempt.Success("cpu-engine")
+             }
         )
         assertNotNull(outcome.selection)
         assertEquals("cpu-engine", outcome.selection!!.engine)
@@ -126,10 +126,10 @@ class LiteRtEngineFallbackEventsTest {
             ladder = listOf(EngineCandidate("GPU", false)),
             enableVisionBackend = true,
             configureFlag = alwaysFlag(),
-            tryCreate = { backendName, _, visionBackendIsCpu ->
-                if (visionBackendIsCpu) Result.success("gpu-cpu-vision")
-                else Result.failure(IllegalStateException("gpu vision fail"))
-            }
+tryCreate = { backendName, _, visionBackendIsCpu ->
+                 if (visionBackendIsCpu) EngineCandidateAttempt.Success("gpu-cpu-vision")
+                 else EngineCandidateAttempt.InitializationFailed(IllegalStateException("gpu vision fail"))
+             }
         )
         assertNotNull(outcome.selection)
         val ev = outcome.fallbackEvents.single {
@@ -145,7 +145,7 @@ class LiteRtEngineFallbackEventsTest {
             ladder = listOf(EngineCandidate("GPU", false), EngineCandidate("CPU", false)),
             enableVisionBackend = false,
             configureFlag = alwaysFlag(),
-            tryCreate = { _, _, _ -> Result.failure(IllegalStateException("all fail")) }
+            tryCreate = { _, _, _ -> EngineCandidateAttempt.InitializationFailed(IllegalStateException("all fail")) }
         )
         assertNull(outcome.selection)
         assertNotNull(outcome.failure)

@@ -63,13 +63,13 @@ class LiteRtFallbackStatusTest {
             ),
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { backendName, mtpEnabled, _ ->
-                if (backendName == "CPU" && !mtpEnabled) {
-                    Result.success("cpu-plain")
-                } else {
-                    Result.failure(IllegalStateException("$backendName-$mtpEnabled init failed"))
-                }
-            }
+tryCreate = { backendName, mtpEnabled, _ ->
+                 if (backendName == "CPU" && !mtpEnabled) {
+                     EngineCandidateAttempt.Success("cpu-plain")
+                 } else {
+                     EngineCandidateAttempt.InitializationFailed(IllegalStateException("$backendName-$mtpEnabled init failed"))
+                 }
+             }
         )
         assertNotNull(outcome.selection)
         assertEquals("cpu-plain", outcome.selection!!.engine)
@@ -99,7 +99,7 @@ class LiteRtFallbackStatusTest {
             ladder = listOf(EngineCandidate("GPU", false), EngineCandidate("CPU", false)),
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { _, _, _ -> Result.failure(failure) }
+            tryCreate = { _, _, _ -> EngineCandidateAttempt.InitializationFailed(failure) }
         )
         assertNull(outcome.selection)
         assertEquals(failure, outcome.failure)
