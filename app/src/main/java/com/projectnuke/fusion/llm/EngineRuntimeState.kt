@@ -44,7 +44,8 @@ internal data class EngineRuntimeKey(
     val accelerator: AcceleratorMode,
     val kvCacheCapacityTokens: Int,
     val enableVisionBackend: Boolean,
-    val mtpEnabled: Boolean
+    val mtpEnabled: Boolean,
+    val selectedBackend: String
 )
 
 /**

@@ -263,27 +263,27 @@ private suspend fun runBenchmark(
         onResult: (String) -> Unit,
         onFinished: () -> Unit
     ) {
-        engine.setNativeMinLogSeverity(LogSeverity.WARNING)
-        try {
-            FusionRuntimeLock.withExclusiveBenchmark(
-                onPrepareExclusiveMode = {
-                    onStatus("모델 리소스를 정리하는 중입니다.")
-                    Log.i("FusionEngine", "Requesting chat engine unload before benchmark")
-                    FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
-                    FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_prepare")
-                }
-            ) {
-                try {
-                Log.i(
-                    "FusionBenchmark",
-                    "Benchmark start model=${snapshot.modelName} path=${snapshot.modelPath} accelerator=${snapshot.settings.accelerator.name} mtp=${snapshot.settings.speculativeDecodingEnabled == true} maxTokens=${snapshot.settings.maxTokens} temp=${snapshot.settings.temperature} topK=${snapshot.settings.topK} topP=${snapshot.settings.topP}"
-                )
-                Log.i("FusionEngine", "Benchmark marks engine stale and reloads runtime settings")
-                onStatus("모델 설정을 다시 적용하는 중입니다.")
-                val reloadStartMs = SystemClock.elapsedRealtime()
-                FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_reload")
-                val engineReloadMs = SystemClock.elapsedRealtime() - reloadStartMs
-                onStatus("모델을 불러오는 중입니다.")
+try {
+             FusionRuntimeLock.withExclusiveBenchmark(
+                 onPrepareExclusiveMode = {
+                     onStatus("모델 리소스를 정리하는 중입니다.")
+                     Log.i("FusionEngine", "Requesting chat engine unload before benchmark")
+                     FusionRuntimeLock.requestChatEngineUnloadForBenchmark()
+                     FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_prepare")
+                 }
+             ) {
+                 engine.setNativeMinLogSeverity(LogSeverity.WARNING)
+                 try {
+                 Log.i(
+                     "FusionBenchmark",
+                     "Benchmark start model=${snapshot.modelName} path=${snapshot.modelPath} accelerator=${snapshot.settings.accelerator.name} mtp=${snapshot.settings.speculativeDecodingEnabled == true} maxTokens=${snapshot.settings.maxTokens} temp=${snapshot.settings.temperature} topK=${snapshot.settings.topK} topP=${snapshot.settings.topP}"
+                 )
+                 Log.i("FusionEngine", "Benchmark marks engine stale and reloads runtime settings")
+                 onStatus("모델 설정을 다시 적용하는 중입니다.")
+                 val reloadStartMs = SystemClock.elapsedRealtime()
+                 FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_reload")
+                 val engineReloadMs = SystemClock.elapsedRealtime() - reloadStartMs
+                 onStatus("모델을 불러오는 중입니다.")
 
             val start = SystemClock.elapsedRealtime()
             var firstTokenMs: Long? = null
@@ -401,12 +401,12 @@ onResult(resultText)
             Log.i("FusionBenchmark", "Benchmark success totalMs=$totalMs tokens=$estimatedTokens totalTps=$totalTps decodeTps=$decodeTps mtp=${mtpStatus.name} nativeTtft=${nativeStats?.timeToFirstTokenSeconds} nativeDecodeTps=${nativeStats?.decodeTokensPerSecond} nativePrefillTps=${nativeStats?.prefillTokensPerSecond}")
             DeveloperLogStore.record(context, "benchmark", "벤치마크 성공", "model=${snapshot.modelName}, decodeTps=${decodeTps?.toFloat()}")
                 onStatus("벤치마크가 완료되었습니다.")
-            } finally {
-                FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_after_run")
-            }
-            engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-        }
-    } catch (e: ChatGenerationRunningException) {
+} finally {
+                 FusionRuntimeManager.unloadSharedEngineAfterExclusive("benchmark_after_run")
+                 engine.setNativeMinLogSeverity(LogSeverity.ERROR)
+             }
+         }
+     } catch (e: ChatGenerationRunningException) {
         Log.i("FusionBenchmark", "Benchmark blocked because chat generation is running")
         onStatus(null)
         Toast.makeText(context, "현재 응답을 생성하는 중입니다. 완료 후 다시 시도해 주세요.", Toast.LENGTH_SHORT).show()

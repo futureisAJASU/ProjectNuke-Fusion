@@ -11,15 +11,22 @@ class LiteRtMtpFailureMemoryTest {
     private class FakeStorage : MtpFailureMemoryStorage {
         val map = mutableMapOf<String, String>()
         var clearCount = 0
+        var saveCount = 0
+        var saveSuccess = true
         override fun load(): Map<String, String> = map.toMap()
-        override fun save(entries: Map<String, String>) {
-            map.clear()
-            map.putAll(entries)
+        override fun save(entries: Map<String, String>): Boolean {
+            saveCount++
+            if (saveSuccess) {
+                map.clear()
+                map.putAll(entries)
+            }
+            return saveSuccess
         }
 
-        override fun clear() {
+        override fun clear(): Boolean {
             clearCount++
             map.clear()
+            return true
         }
     }
 
@@ -28,7 +35,10 @@ class LiteRtMtpFailureMemoryTest {
         modelPath: String = "/data/models/gemma.litertlm",
         backend: String = "GPU",
         mtpEnabled: Boolean = true,
-        reason: String = "MTP initialization failed, fell back to non-MTP"
+        reason: String = "MTP initialization failed, fell back to non-MTP",
+        fileSize: Long = 100L,
+        modifiedAt: Long = 1000L,
+        mtpSupported: Boolean = true
     ) = memory.recordFailure(
         modelPath = modelPath,
         backendName = backend,
@@ -36,6 +46,9 @@ class LiteRtMtpFailureMemoryTest {
         validationVersion = 2,
         kvCacheCapacityTokens = 4096,
         enableVisionBackend = false,
+        fileSize = fileSize,
+        modifiedAt = modifiedAt,
+        mtpSupported = mtpSupported,
         fallbackReason = reason
     )
 
@@ -50,7 +63,10 @@ class LiteRtMtpFailureMemoryTest {
         mtpEnabled = mtpEnabled,
         validationVersion = 2,
         kvCacheCapacityTokens = 4096,
-        enableVisionBackend = false
+        enableVisionBackend = false,
+        fileSize = 100L,
+        modifiedAt = 1000L,
+        mtpSupported = true
     )
 
     @Test
@@ -90,8 +106,52 @@ class LiteRtMtpFailureMemoryTest {
                 mtpEnabled = true,
                 validationVersion = 2,
                 kvCacheCapacityTokens = 8192,
-                enableVisionBackend = false
+                enableVisionBackend = false,
+                fileSize = 100L,
+                modifiedAt = 1000L,
+                mtpSupported = true
             )
+        )
+    }
+
+    @Test
+    fun `failure is keyed by file identity so same-path replacement invalidates stale entries`() {
+        val storage = FakeStorage()
+        val first = MtpFailureMemory(storage)
+        record(first, modelPath = "/data/models/gemma.litertlm")
+        val reloaded = MtpFailureMemory(storage)
+        assertTrue(shouldSkip(reloaded) != null)
+
+        // Simulate model replacement at the same path (different file size / modified time).
+        record(first, modelPath = "/data/models/gemma.litertlm", fileSize = 200L, modifiedAt = 2000L)
+        val reloadedAfterReplacement = MtpFailureMemory(storage)
+        // Old entry (size=100, modified=1000) should no longer match the new fingerprint.
+        assertNull(
+            reloadedAfterReplacement.shouldSkipMtp(
+                modelPath = "/data/models/gemma.litertlm",
+                backendName = "GPU",
+                mtpEnabled = true,
+                validationVersion = 2,
+                kvCacheCapacityTokens = 4096,
+                enableVisionBackend = false,
+                fileSize = 100L,
+                modifiedAt = 1000L,
+                mtpSupported = true
+            )
+        )
+        // New entry (size=200, modified=2000) should still match.
+        assertTrue(
+            reloadedAfterReplacement.shouldSkipMtp(
+                modelPath = "/data/models/gemma.litertlm",
+                backendName = "GPU",
+                mtpEnabled = true,
+                validationVersion = 2,
+                kvCacheCapacityTokens = 4096,
+                enableVisionBackend = false,
+                fileSize = 200L,
+                modifiedAt = 2000L,
+                mtpSupported = true
+            ) != null
         )
     }
 
@@ -117,7 +177,17 @@ class LiteRtMtpFailureMemoryTest {
         memory.clearAll()
         assertEquals(0, memory.persistedEntryCount())
         assertEquals(1, storage.clearCount)
-        assertNull(MtpFailureMemory(storage).shouldSkipMtp("/data/models/gemma.litertlm", "GPU", true, 2, 4096, false))
+        assertNull(MtpFailureMemory(storage).shouldSkipMtp(
+            modelPath = "/data/models/gemma.litertlm",
+            backendName = "GPU",
+            mtpEnabled = true,
+            validationVersion = 2,
+            kvCacheCapacityTokens = 4096,
+            enableVisionBackend = false,
+            fileSize = 100L,
+            modifiedAt = 1000L,
+            mtpSupported = true
+        ))
     }
 
     @Test

@@ -66,6 +66,7 @@ class LiteRtLlmEngine(
      * benchmark / debug mode to lower the threshold to WARNING so internal
      * component-placement (sampler) diagnostics surface; production mode keeps
      * ERROR so warnings are never honored as permanent correctness state.
+     * Must only be called while the caller owns the exclusive runtime section.
      */
     fun setNativeMinLogSeverity(severity: LogSeverity) {
         Engine.setNativeMinLogSeverity(severity)
@@ -373,7 +374,10 @@ class LiteRtLlmEngine(
                     mtpEnabled = true,
                     validationVersion = fingerprint.validationVersion,
                     kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                    enableVisionBackend = profile.enableVisionBackend
+                    enableVisionBackend = profile.enableVisionBackend,
+                    fileSize = fingerprint.fileSize,
+                    modifiedAt = fingerprint.modifiedAt,
+                    mtpSupported = fingerprint.mtpSupported
                 )
                 if (skipReason != null) {
                     mtpSkippedByMemory = true
@@ -395,7 +399,10 @@ class LiteRtLlmEngine(
                     backendName = candidate.backend,
                     validationVersion = fingerprint.validationVersion,
                     kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                    enableVisionBackend = profile.enableVisionBackend
+                    enableVisionBackend = profile.enableVisionBackend,
+                    fileSize = fingerprint.fileSize,
+                    modifiedAt = fingerprint.modifiedAt,
+                    mtpSupported = fingerprint.mtpSupported
                 )
                 if (skipReason != null) {
                     recordedFallbackEvents += RuntimeFallbackEvent(
@@ -412,13 +419,29 @@ class LiteRtLlmEngine(
             }
             true
         }
-        val preferredBackendName = ladder.first().backend
+        val preferredBackendName = ladder.firstOrNull()?.backend ?: run {
+            // All candidates were skipped by failure memory.
+            // Reuse a matching loaded fallback engine when valid,
+            // otherwise throw a typed cooldown result.
+            val cooldownKey = loadedState?.key
+            if (cooldownKey != null && cooldownKey.accelerator == profile.accelerator) {
+                Log.i("FusionLiteRT", "All candidates skipped; reusing cooldown engine")
+                lastMtpStatus = loadedState!!.mtpStatus
+                return loadedState!!.engine
+            }
+            recordedFallbackEvents += RuntimeFallbackEvent(
+                reason = FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE
+            )
+            lastMtpStatus = MtpRuntimeStatus.FAILED
+            throw IllegalStateException("All engine candidates skipped due to recent failures")
+        }
         val requestedKey = EngineRuntimeKey(
             fingerprint = fingerprint,
             accelerator = profile.accelerator,
             kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
             enableVisionBackend = profile.enableVisionBackend,
-            mtpEnabled = ladder.first().mtpEnabled
+            mtpEnabled = ladder.firstOrNull()?.mtpEnabled ?: false,
+            selectedBackend = preferredBackendName
         )
 
         val currentState = loadedState
@@ -434,11 +457,11 @@ class LiteRtLlmEngine(
 
         unload()
 
-        // Production default is ERROR (quiet). Benchmark/debug mode may
-        // override the constructor lambda to surface WARNING diagnostics;
-        // those warnings are observed only as flow-level diagnostics and
-        // never parsed for permanent correctness state (Phase 9).
-        Engine.setNativeMinLogSeverity(nativeMinLogSeverity())
+        // Only reset severity when no runtime owner is active.
+        // Benchmark/debug mode owns severity inside its exclusive section.
+        if (!FusionRuntimeLock.isBenchmarkRunning) {
+            Engine.setNativeMinLogSeverity(nativeMinLogSeverity())
+        }
 
         Log.i("FusionLiteRT", "MTP requested: $mtpRequested")
         Log.i("FusionLiteRT", "Backend: $preferredBackendName")
@@ -564,24 +587,31 @@ class LiteRtLlmEngine(
                 validationVersion = fingerprint.validationVersion,
                 kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
                 enableVisionBackend = profile.enableVisionBackend,
+                fileSize = fingerprint.fileSize,
+                modifiedAt = fingerprint.modifiedAt,
+                mtpSupported = fingerprint.mtpSupported,
                 fallbackReason = fallbackReason ?: "MTP initialization failed"
             )
         }
 
-        // Record plain backend failure for AUTO fallback caching
-        if (!selectedMtpEnabled && selectionResult != null && selectionResult.engine != null) {
-            // Find the first plain backend failure in fallback events
-            val plainBackendFailure = recordedFallbackEvents.firstOrNull { it.attemptedMtpEnabled != true && it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED }
-            if (plainBackendFailure != null && plainBackendFailure.attemptedTextBackend != null) {
-                val failedBackendName = plainBackendFailure.attemptedTextBackend!!.name
+        // Record plain backend failures from the selection process into
+        // failure memory so AUTO can skip known-bad non-MTP backends.
+        for (ev in recordedFallbackEvents) {
+            if (ev.reason == FallbackReason.BACKEND_ENGINE_INIT_FAILED &&
+                ev.attemptedTextBackend != null &&
+                !ev.attemptedMtpEnabled!!
+            ) {
                 mtpFailureMemory.recordFailure(
                     modelPath = fingerprint.canonicalPath,
-                    backendName = failedBackendName,
+                    backendName = ev.attemptedTextBackend!!.name,
                     mtpEnabled = false,
                     validationVersion = fingerprint.validationVersion,
                     kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
                     enableVisionBackend = profile.enableVisionBackend,
-                    fallbackReason = "Plain backend initialization failed"
+                    fileSize = fingerprint.fileSize,
+                    modifiedAt = fingerprint.modifiedAt,
+                    mtpSupported = fingerprint.mtpSupported,
+                    fallbackReason = "Backend initialization failed"
                 )
             }
         }
@@ -601,7 +631,7 @@ class LiteRtLlmEngine(
         // state), so a later fallback is reused until the memory skip kicks in.
         loadedState = LoadedRuntimeState(
             engine = resolvedEngine,
-            key = requestedKey.copy(mtpEnabled = selectedMtpEnabled),
+            key = requestedKey.copy(mtpEnabled = selectedMtpEnabled, selectedBackend = actualTextBackend),
             mtpStatus = lastMtpStatus,
             runtimeSelection = runtimeSelection,
             actualTextBackend = actualTextBackend,
@@ -1006,16 +1036,6 @@ internal fun <T> selectFirstWorkingEngine(
                     selectedReplacementBackend = RuntimeBackend.CPU,
                     reason = FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED
                 )
-                // If the candidate was an MTP candidate and the first tryCreate
-                // failed (MTP init failed), record the MTP init failure too so
-                // the MTP and vision fallbacks coexist in the typed event list.
-                if (candidate.mtpEnabled) {
-                    fallbackEvents += RuntimeFallbackEvent(
-                        attemptedTextBackend = candidate.backend.toRuntimeBackend(),
-                        attemptedMtpEnabled = true,
-                        reason = FallbackReason.MTP_ENGINE_INIT_FAILED
-                    )
-                }
                 return EngineSelectionOutcome(
                     selection = EngineSelectionResult(
                         engine = visionRetry.getOrThrow(),
@@ -1028,9 +1048,8 @@ internal fun <T> selectFirstWorkingEngine(
                     fallbackEvents = fallbackEvents
                 )
             }
-            // Both first attempt and vision retry failed for an MTP candidate:
-            // record the MTP init failure event here (the generic else branch
-            // is unreachable for GPU candidates with vision enabled).
+            // Both first attempt and vision retry failed for a GPU candidate.
+            // Record the MTP init failure only if the candidate had MTP enabled.
             if (candidate.mtpEnabled) {
                 fallbackEvents += RuntimeFallbackEvent(
                     attemptedTextBackend = candidate.backend.toRuntimeBackend(),
@@ -1048,11 +1067,11 @@ internal fun <T> selectFirstWorkingEngine(
                     reason = FallbackReason.MTP_ENGINE_INIT_FAILED
                 )
             } else {
-                // Record plain backend failure for AUTO fallback caching
+                pendingGpuPlainFailure = candidate.backend == "GPU"
                 fallbackEvents += RuntimeFallbackEvent(
                     attemptedTextBackend = candidate.backend.toRuntimeBackend(),
                     attemptedMtpEnabled = false,
-                    reason = FallbackReason.MTP_ENGINE_INIT_FAILED
+                    reason = FallbackReason.BACKEND_ENGINE_INIT_FAILED
                 )
             }
         }
@@ -1106,14 +1125,14 @@ internal fun buildEngineCandidateLadder(
  */
 interface MtpFailureMemoryStorage {
     fun load(): Map<String, String>
-    fun save(entries: Map<String, String>)
-    fun clear()
+    fun save(entries: Map<String, String>): Boolean
+    fun clear(): Boolean
 }
 
 object NoopMtpFailureMemoryStorage : MtpFailureMemoryStorage {
     override fun load(): Map<String, String> = emptyMap()
-    override fun save(entries: Map<String, String>) {}
-    override fun clear() {}
+    override fun save(entries: Map<String, String>): Boolean = true
+    override fun clear(): Boolean = true
 }
 
 /**
@@ -1130,7 +1149,10 @@ internal class MtpFailureMemory(
         val mtpEnabled: Boolean,
         val validationVersion: Int,
         val kvCacheCapacityTokens: Int,
-        val enableVisionBackend: Boolean
+        val enableVisionBackend: Boolean,
+        val fileSize: Long,
+        val modifiedAt: Long,
+        val mtpSupported: Boolean
     )
 
     private data class FailureRecord(
@@ -1152,19 +1174,25 @@ internal class MtpFailureMemory(
             key.mtpEnabled.toString(),
             key.validationVersion.toString(),
             key.kvCacheCapacityTokens.toString(),
-            key.enableVisionBackend.toString()
+            key.enableVisionBackend.toString(),
+            key.fileSize.toString(),
+            key.modifiedAt.toString(),
+            key.mtpSupported.toString()
         ).joinToString(KEY_SEPARATOR)
 
         private fun deserializeKey(serialized: String): FailureKey? {
             val parts = serialized.split(KEY_SEPARATOR)
-            if (parts.size != 6) return null
+            if (parts.size != 9) return null
             return FailureKey(
                 modelPath = parts[0],
                 backendName = parts[1],
                 mtpEnabled = parts[2].toBooleanStrictOrNull() ?: return null,
                 validationVersion = parts[3].toIntOrNull() ?: return null,
                 kvCacheCapacityTokens = parts[4].toIntOrNull() ?: return null,
-                enableVisionBackend = parts[5].toBooleanStrictOrNull() ?: return null
+                enableVisionBackend = parts[5].toBooleanStrictOrNull() ?: return null,
+                fileSize = parts[6].toLongOrNull() ?: return null,
+                modifiedAt = parts[7].toLongOrNull() ?: return null,
+                mtpSupported = parts[8].toBooleanStrictOrNull() ?: return null
             )
         }
     }
@@ -1188,7 +1216,10 @@ internal class MtpFailureMemory(
         mtpEnabled: Boolean,
         validationVersion: Int,
         kvCacheCapacityTokens: Int,
-        enableVisionBackend: Boolean
+        enableVisionBackend: Boolean,
+        fileSize: Long,
+        modifiedAt: Long,
+        mtpSupported: Boolean
     ): String? = synchronized(lock) {
         val key = FailureKey(
             modelPath = modelPath,
@@ -1196,7 +1227,10 @@ internal class MtpFailureMemory(
             mtpEnabled = mtpEnabled,
             validationVersion = validationVersion,
             kvCacheCapacityTokens = kvCacheCapacityTokens,
-            enableVisionBackend = enableVisionBackend
+            enableVisionBackend = enableVisionBackend,
+            fileSize = fileSize,
+            modifiedAt = modifiedAt,
+            mtpSupported = mtpSupported
         )
         val record = failures[key]
         if (record != null) {
@@ -1221,7 +1255,10 @@ internal class MtpFailureMemory(
         backendName: String,
         validationVersion: Int,
         kvCacheCapacityTokens: Int,
-        enableVisionBackend: Boolean
+        enableVisionBackend: Boolean,
+        fileSize: Long,
+        modifiedAt: Long,
+        mtpSupported: Boolean
     ): String? = synchronized(lock) {
         val key = FailureKey(
             modelPath = modelPath,
@@ -1229,7 +1266,10 @@ internal class MtpFailureMemory(
             mtpEnabled = false,
             validationVersion = validationVersion,
             kvCacheCapacityTokens = kvCacheCapacityTokens,
-            enableVisionBackend = enableVisionBackend
+            enableVisionBackend = enableVisionBackend,
+            fileSize = fileSize,
+            modifiedAt = modifiedAt,
+            mtpSupported = mtpSupported
         )
         val record = failures[key]
         if (record != null) {
@@ -1254,6 +1294,9 @@ internal class MtpFailureMemory(
         validationVersion: Int,
         kvCacheCapacityTokens: Int,
         enableVisionBackend: Boolean,
+        fileSize: Long,
+        modifiedAt: Long,
+        mtpSupported: Boolean,
         fallbackReason: String
     ) = synchronized(lock) {
         val key = FailureKey(
@@ -1262,8 +1305,16 @@ internal class MtpFailureMemory(
             mtpEnabled = mtpEnabled,
             validationVersion = validationVersion,
             kvCacheCapacityTokens = kvCacheCapacityTokens,
-            enableVisionBackend = enableVisionBackend
+            enableVisionBackend = enableVisionBackend,
+            fileSize = fileSize,
+            modifiedAt = modifiedAt,
+            mtpSupported = mtpSupported
         )
+        // Invalidate stale entries for the same model path when the
+        // fingerprint changed (e.g. model replaced at same path).
+        failures.keys
+            .filter { it.modelPath == modelPath && it != key }
+            .forEach { failures.remove(it) }
         failures[key] = FailureRecord(
             failedAt = System.currentTimeMillis(),
             fallbackReason = fallbackReason

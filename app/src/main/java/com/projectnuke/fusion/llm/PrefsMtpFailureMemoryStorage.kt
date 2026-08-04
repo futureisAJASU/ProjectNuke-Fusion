@@ -19,14 +19,11 @@ internal class PrefsMtpFailureMemoryStorage(context: Context) : MtpFailureMemory
         }
         .toMap()
 
-    override fun save(entries: Map<String, String>) {
+    override fun save(entries: Map<String, String>): Boolean =
         prefs.edit().apply {
             clear()
             entries.forEach { (key, value) -> putString(key, value) }
-        }.apply()
-    }
+        }.commit()
 
-    override fun clear() {
-        prefs.edit().clear().apply()
-    }
+    override fun clear(): Boolean = prefs.edit().clear().commit()
 }

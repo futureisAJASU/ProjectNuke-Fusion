@@ -43,13 +43,15 @@ class LiteRtEngineMtpStateTest {
         accelerator: AcceleratorMode = AcceleratorMode.GPU,
         kvCacheCapacityTokens: Int = 4096,
         mtpEnabled: Boolean = false,
-        enableVisionBackend: Boolean = false
+        enableVisionBackend: Boolean = false,
+        selectedBackend: String = "GPU"
     ) = EngineRuntimeKey(
         fingerprint = fingerprint,
         accelerator = accelerator,
         kvCacheCapacityTokens = kvCacheCapacityTokens,
         enableVisionBackend = enableVisionBackend,
-        mtpEnabled = mtpEnabled
+        mtpEnabled = mtpEnabled,
+        selectedBackend = selectedBackend
     )
 
     @Test

@@ -87,12 +87,15 @@ class RuntimeExecutionSnapshotTest {
         val expected = setOf(
             FallbackReason.MTP_UNSUPPORTED,
             FallbackReason.MTP_SKIPPED_RECENT_FAILURE,
+            FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE,
+            FallbackReason.BACKEND_ENGINE_INIT_FAILED,
             FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED,
             FallbackReason.SPECULATIVE_DISABLE_FLAG_SETTLEMENT_FAILED,
             FallbackReason.MTP_ENGINE_INIT_FAILED,
             FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED,
             FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED,
-            FallbackReason.ALL_CANDIDATES_EXHAUSTED
+            FallbackReason.ALL_CANDIDATES_EXHAUSTED,
+            FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE
         )
         assertEquals(expected, FallbackReason.entries.toSet())
     }
