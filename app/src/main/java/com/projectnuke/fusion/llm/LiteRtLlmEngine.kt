@@ -1170,7 +1170,8 @@ internal data class FailureModelFingerprint(
  * version, and engine settings. Entries are persisted through [storage].
  */
 internal class MtpFailureMemory(
-    private val storage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage
+    private val storage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage,
+    private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
     private data class FailureKey(
         val modelFingerprint: FailureModelFingerprint,
@@ -1189,7 +1190,7 @@ internal class MtpFailureMemory(
     private val lock = Any()
 
     companion object {
-        private const val COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
+        const val COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
         private const val MAX_ENTRIES = 32
         private const val KEY_SEPARATOR = "\u001f"
 
@@ -1263,7 +1264,7 @@ internal class MtpFailureMemory(
         )
         val record = failures[key]
         if (record != null) {
-            val elapsed = System.currentTimeMillis() - record.failedAt
+            val elapsed = clock() - record.failedAt
             if (elapsed < COOLDOWN_MS) {
                 return record.fallbackReason
             } else {
@@ -1304,7 +1305,7 @@ internal class MtpFailureMemory(
         )
         val record = failures[key]
         if (record != null) {
-            val elapsed = System.currentTimeMillis() - record.failedAt
+            val elapsed = clock() - record.failedAt
             if (elapsed < COOLDOWN_MS) {
                 return record.fallbackReason
             } else {
@@ -1350,7 +1351,7 @@ internal class MtpFailureMemory(
             .filter { it.modelFingerprint.canonicalPath == fingerprint.canonicalPath && !it.modelFingerprint.matches(fingerprint) }
             .forEach { failures.remove(it) }
         failures[key] = FailureRecord(
-            failedAt = System.currentTimeMillis(),
+            failedAt = clock(),
             fallbackReason = fallbackReason
         )
         persist()

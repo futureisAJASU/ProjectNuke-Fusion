@@ -38,7 +38,8 @@ class LiteRtMtpFailureMemoryTest {
         reason: String = "MTP initialization failed, fell back to non-MTP",
         fileSize: Long = 100L,
         modifiedAt: Long = 1000L,
-        mtpSupported: Boolean = true
+        mtpSupported: Boolean = true,
+        clock: () -> Long = { System.currentTimeMillis() }
     ) = memory.recordFailure(
         modelPath = modelPath,
         backendName = backend,
@@ -56,7 +57,8 @@ class LiteRtMtpFailureMemoryTest {
         memory: MtpFailureMemory,
         modelPath: String = "/data/models/gemma.litertlm",
         backend: String = "GPU",
-        mtpEnabled: Boolean = true
+        mtpEnabled: Boolean = true,
+        clock: () -> Long = { System.currentTimeMillis() }
     ) = memory.shouldSkipMtp(
         modelPath = modelPath,
         backendName = backend,
@@ -221,5 +223,61 @@ class LiteRtMtpFailureMemoryTest {
         storage.map["a\u001fb\u001ftrue\u001f1\u001fc\u001f2"] = "12345" // valid key, value has one field only
         val memory = MtpFailureMemory(storage)
         assertNull(shouldSkip(memory, modelPath = "x", backend = "b"))
+    }
+
+    @Test
+    fun `clock controls cooldown deterministically before after`() {
+        var now = 0L
+        val clock = { now }
+        val storage = FakeStorage()
+        val memory = MtpFailureMemory(storage, clock = clock)
+
+        record(memory, clock = clock)
+        // At t=0, within cooldown: should skip
+        assertTrue(shouldSkip(memory, clock = clock) != null)
+
+        // Advance clock past cooldown
+        now = MtpFailureMemory.COOLDOWN_MS + 1
+        // After cooldown: should not skip
+        assertNull(shouldSkip(memory, clock = clock))
+    }
+
+    @Test
+    fun `wall-clock rollback does not prematurely expire cooldown`() {
+        var now = 1000L
+        val clock = { now }
+        val storage = FakeStorage()
+        val memory = MtpFailureMemory(storage, clock = clock)
+
+        record(memory, clock = clock)
+        // Within cooldown at t=1000
+        assertTrue(shouldSkip(memory, clock = clock) != null)
+
+        // Clock rolls back (e.g. NTP correction or device time change)
+        now = 0L
+        // Entry should still be within cooldown because elapsed time
+        // is computed from the recorded failure timestamp, not wall clock.
+        // With rollback, elapsed = clock() - failedAt = 0 - 1000 = negative,
+        // which is < COOLDOWN_MS, so the entry is still skipped.
+        assertTrue(shouldSkip(memory, clock = clock) != null)
+    }
+
+    @Test
+    fun `in-memory and durably persisted entries share the same cooldown`() {
+        var now = 0L
+        val clock = { now }
+        val storage = FakeStorage()
+        val memory = MtpFailureMemory(storage, clock = clock)
+
+        record(memory, clock = clock)
+        assertEquals(1, memory.persistedEntryCount())
+
+        // Reload from storage — the cooldown state persists.
+        val reloaded = MtpFailureMemory(storage, clock = clock)
+        assertTrue(shouldSkip(reloaded, clock = clock) != null)
+
+        // Advance past cooldown in the reloaded instance.
+        now = MtpFailureMemory.COOLDOWN_MS + 1
+        assertNull(shouldSkip(reloaded, clock = clock))
     }
 }
