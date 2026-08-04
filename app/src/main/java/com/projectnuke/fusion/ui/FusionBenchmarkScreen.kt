@@ -56,6 +56,7 @@ import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.MtpPolicyProduction
 import com.projectnuke.fusion.util.buildEffectiveRuntimeSettings
 import com.projectnuke.fusion.util.toKoreanMtpStatus
+import com.projectnuke.fusion.util.FallbackCauseFormatter
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.launch
@@ -514,9 +515,8 @@ internal fun buildBenchmarkResultEntityPayload(
         ?: actualBackend
     val selectedVisionBackend = runtimeSnapshot?.selectedVisionBackend?.name
     val samplerBackend = runtimeSnapshot?.samplerBackend?.name ?: com.projectnuke.fusion.llm.RuntimeComponentBackend.UNKNOWN.name
-    val fallbackEventCodes = runtimeSnapshot?.fallbackEvents
-        ?.joinToString(",") { "${it.attemptedTextBackend?.name.orEmpty()}=${it.reason.name}" }
-        ?.takeIf { it.isNotBlank() && it != "=" } ?: null
+    val fallbackEventCodes = runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
+        ?.takeIf { it.isNotBlank() }
     val mtpRequestedFromSnapshot = runtimeSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)
     val initializedWithMtp = runtimeSnapshot?.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
     return BenchmarkResultEntity(

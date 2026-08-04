@@ -150,9 +150,8 @@ class BenchmarkPersistenceRoundTripTest {
             androidVersion = ""
         )
         val codes = entity.fallbackEventCodes!!
-        assertTrue(codes.contains("MTP_ENGINE_INIT_FAILED"))
-        assertTrue(codes.contains("GPU_TEXT_ENGINE_FAILED_CPU_SELECTED"))
-        assertTrue(codes.contains("GPU=true=MTP_ENGINE_INIT_FAILED") || codes.contains("GPU=MTP_ENGINE_INIT_FAILED"))
+        assertTrue(codes.contains("MTP 엔진 초기화에 실패했습니다"))
+        assertTrue(codes.contains("GPU 텍스트 엔진 실패로 CPU를 사용합니다"))
     }
 
     @Test

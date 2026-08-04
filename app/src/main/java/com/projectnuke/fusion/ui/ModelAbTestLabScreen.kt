@@ -55,6 +55,7 @@ import com.projectnuke.fusion.modelzoo.FusionModelSpec
 import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.MtpPolicyProduction
+import com.projectnuke.fusion.util.FallbackCauseFormatter
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -711,9 +712,8 @@ private fun AbResult.copyText(): String = buildString {
 
 private fun AbResult.toStoredResult(): StoredAbTestResult {
     val snapshot = runtimeSnapshot
-    val fallbackCodes = snapshot?.fallbackEvents
-        ?.joinToString(",") { "${it.attemptedTextBackend?.name.orEmpty()}=${it.reason.name}" }
-        ?.takeIf { it.isNotBlank() && it != "=" }
+    val fallbackCodes = runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
+        ?.takeIf { it.isNotBlank() }
     return StoredAbTestResult(
         targetLabel = targetLabel,
         modelName = modelName,
