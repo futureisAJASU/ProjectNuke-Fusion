@@ -113,14 +113,14 @@ class LiteRtEngineMtpStateTest {
     @Test
     fun `KV capacity change reloads the engine`() {
         // Same settings map to the same KV capacity -> same engine identity.
-        val a = com.projectnuke.fusion.model.GenerationSettings(maxTokens = 4096, accelerator = AcceleratorMode.GPU, speculativeDecodingEnabled = true)
+        val a = com.projectnuke.fusion.model.GenerationSettings(maxTokens = 4096, kvCacheCapacityTokens = 4096, accelerator = AcceleratorMode.GPU, speculativeDecodingEnabled = true)
         val b = a.copy(maxTokens = 4096)
         assertEquals(
             profile(kvCacheCapacityTokens = a.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens).kvCacheCapacityTokens,
             profile(kvCacheCapacityTokens = b.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens).kvCacheCapacityTokens
         )
         // Changing KV capacity changes the engine identity -> engine reload.
-        val c = a.copy(maxTokens = 2048)
+        val c = a.copy(kvCacheCapacityTokens = 2048)
         assertNotEquals(
             a.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens,
             c.toRequestedEngineProfile("m", enableVisionBackend = false).kvCacheCapacityTokens

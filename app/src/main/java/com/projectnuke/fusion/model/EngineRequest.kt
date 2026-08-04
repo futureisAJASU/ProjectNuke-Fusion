@@ -54,7 +54,7 @@ fun GenerationSettings.toRequestedEngineProfile(
     modelPath = modelPath,
     accelerator = accelerator,
     mtpRequested = speculativeDecodingEnabled == true,
-    kvCacheCapacityTokens = maxTokens.coerceAtLeast(1),
+    kvCacheCapacityTokens = kvCacheCapacityTokens.coerceAtLeast(1),
     enableVisionBackend = enableVisionBackend,
 )
 
