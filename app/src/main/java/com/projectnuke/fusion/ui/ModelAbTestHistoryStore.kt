@@ -36,6 +36,17 @@ data class StoredAbTestResult(
     val estimatedTokens: Int,
     val totalTokensPerSecond: Double,
     val decodeTokensPerSecond: Double?,
+    /** Phase 8: runtime-truthful applied fields captured from the immutable snapshot. */
+    val selectedTextBackend: String? = null,
+    val selectedVisionBackend: String? = null,
+    val mtpRuntimeStatus: String? = null,
+    val fallbackEventCodes: String? = null,
+    val nativeTtftSeconds: Double? = null,
+    val nativePrefillTokensPerSecond: Double? = null,
+    val nativeDecodeTokensPerSecond: Double? = null,
+    val modelFingerprintPath: String? = null,
+    val modelFingerprintSize: Long? = null,
+    val modelFingerprintModifiedAt: Long? = null,
     val rating: AbResultRating = AbResultRating.NONE
 )
 
@@ -150,7 +161,7 @@ private fun StoredAbTestSession.toJson(): JSONObject {
 }
 
 private fun StoredAbTestResult.toJson(): JSONObject {
-    return JSONObject()
+    val obj = JSONObject()
         .put("targetLabel", targetLabel)
         .put("modelName", modelName)
         .put("modelId", modelId)
@@ -171,6 +182,17 @@ private fun StoredAbTestResult.toJson(): JSONObject {
         .put("totalTokensPerSecond", totalTokensPerSecond)
         .put("decodeTokensPerSecond", decodeTokensPerSecond)
         .put("rating", rating.name)
+    selectedTextBackend?.let { obj.put("selectedTextBackend", it) }
+    selectedVisionBackend?.let { obj.put("selectedVisionBackend", it) }
+    mtpRuntimeStatus?.let { obj.put("mtpRuntimeStatus", it) }
+    fallbackEventCodes?.let { obj.put("fallbackEventCodes", it) }
+    nativeTtftSeconds?.let { obj.put("nativeTtftSeconds", it) }
+    nativePrefillTokensPerSecond?.let { obj.put("nativePrefillTokensPerSecond", it) }
+    nativeDecodeTokensPerSecond?.let { obj.put("nativeDecodeTokensPerSecond", it) }
+    modelFingerprintPath?.let { obj.put("modelFingerprintPath", it) }
+    modelFingerprintSize?.let { obj.put("modelFingerprintSize", it) }
+    modelFingerprintModifiedAt?.let { obj.put("modelFingerprintModifiedAt", it) }
+    return obj
 }
 
 private fun JSONObject.toStoredSession(): StoredAbTestSession? {
@@ -208,6 +230,16 @@ private fun JSONObject.toStoredResult(): StoredAbTestResult? {
         estimatedTokens = optInt("estimatedTokens"),
         totalTokensPerSecond = optDouble("totalTokensPerSecond"),
         decodeTokensPerSecond = optDouble("decodeTokensPerSecond").takeIf { has("decodeTokensPerSecond") },
+        selectedTextBackend = optString("selectedTextBackend").takeIf { has("selectedTextBackend") && it.isNotBlank() },
+        selectedVisionBackend = optString("selectedVisionBackend").takeIf { has("selectedVisionBackend") && it.isNotBlank() },
+        mtpRuntimeStatus = optString("mtpRuntimeStatus").takeIf { has("mtpRuntimeStatus") && it.isNotBlank() },
+        fallbackEventCodes = optString("fallbackEventCodes").takeIf { has("fallbackEventCodes") && it.isNotBlank() },
+        nativeTtftSeconds = if (has("nativeTtftSeconds")) optDouble("nativeTtftSeconds") else null,
+        nativePrefillTokensPerSecond = if (has("nativePrefillTokensPerSecond")) optDouble("nativePrefillTokensPerSecond") else null,
+        nativeDecodeTokensPerSecond = if (has("nativeDecodeTokensPerSecond")) optDouble("nativeDecodeTokensPerSecond") else null,
+        modelFingerprintPath = optString("modelFingerprintPath").takeIf { has("modelFingerprintPath") && it.isNotBlank() },
+        modelFingerprintSize = if (has("modelFingerprintSize")) optLong("modelFingerprintSize") else null,
+        modelFingerprintModifiedAt = if (has("modelFingerprintModifiedAt")) optLong("modelFingerprintModifiedAt") else null,
         rating = runCatching { AbResultRating.valueOf(optString("rating", AbResultRating.NONE.name)) }
             .getOrDefault(AbResultRating.NONE)
     )

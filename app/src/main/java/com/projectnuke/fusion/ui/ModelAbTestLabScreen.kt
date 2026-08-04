@@ -96,7 +96,11 @@ private data class AbResult(
     val totalTokensPerSecond: Double,
     val decodeTokensPerSecond: Double?,
     val createdAt: Long,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    /** Phase 8: immutable runtime snapshot captured from the Success outcome. */
+    val runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
+    /** Native benchmark stats captured from the Success outcome, when reported. */
+    val nativeStats: com.projectnuke.fusion.llm.GenerationBenchmarkStats? = null
 ) {
     val succeeded: Boolean get() = errorMessage == null
 }
@@ -581,6 +585,8 @@ private suspend fun runSingleAbTarget(
         }
     )
     val totalMs = SystemClock.elapsedRealtime() - startedAt
+    val runtimeSnapshot = (outcome as? GenerationOutcome.Success)?.snapshot
+    val nativeStats = (outcome as? GenerationOutcome.Success)?.stats
     val answer = when (outcome) {
         is GenerationOutcome.Success -> sanitizeAbAnswer(outcome.text)
         is GenerationOutcome.Cancelled -> error("generation cancelled")
@@ -604,7 +610,9 @@ private suspend fun runSingleAbTarget(
         estimatedTokens = estimatedTokens,
         totalTokensPerSecond = totalTps,
         decodeTokensPerSecond = decodeMs?.let { estimatedTokens * 1000.0 / it },
-        createdAt = System.currentTimeMillis()
+        createdAt = System.currentTimeMillis(),
+        runtimeSnapshot = runtimeSnapshot,
+        nativeStats = nativeStats
     )
 }
 
@@ -666,11 +674,27 @@ private fun AbResult.settingsSummary(): String {
     return "가속기=${settings.accelerator.name} · maxTokens=${settings.maxTokens} · temp=${settings.temperature} · topK=${settings.topK} · topP=${settings.topP} · MTP=${if (settings.speculativeDecodingEnabled == true) "켜짐" else "꺼짐"} · Reasoning=${if (reasoningEnabled) "켜짐" else "꺼짐"}"
 }
 
+/**
+ * Phase 8: distinguish requested from applied runtime in the copied result
+ * text. Requested reads from [GenerationSettings] (what the user asked for);
+ * applied reads from [AbResult.runtimeSnapshot] (what the runtime did),
+ * so the persisted/copied result never claims GPU+MTP merely because it was
+ * requested.
+ */
+private fun AbResult.appliedRuntimeLine(): String? {
+    val snap = runtimeSnapshot ?: return null
+    val backend = snap.selectedTextBackend.name
+    val mtpState = snap.mtpStatus.name
+    return "적용: $backend · MTP $mtpState" +
+        (snap.selectedVisionBackend?.let { " · 비전 $it" } ?: "")
+}
+
 private fun AbResult.copyText(): String = buildString {
     appendLine("Fusion Model A/B Test")
     appendLine("대상: $targetLabel")
     appendLine("모델: $modelName")
-    appendLine(settingsSummary())
+    appendLine("요청: ${settingsSummary()}")
+    appliedRuntimeLine()?.let { appendLine(it) }
     appendLine("시간: ${SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(createdAt))}")
     if (succeeded) {
         appendLine("첫 토큰 시간: ${firstTokenLatencyMs?.let { "${it}ms" } ?: "측정 불가"}")
@@ -686,6 +710,10 @@ private fun AbResult.copyText(): String = buildString {
 }.trim()
 
 private fun AbResult.toStoredResult(): StoredAbTestResult {
+    val snapshot = runtimeSnapshot
+    val fallbackCodes = snapshot?.fallbackEvents
+        ?.joinToString(",") { "${it.attemptedTextBackend?.name.orEmpty()}=${it.reason.name}" }
+        ?.takeIf { it.isNotBlank() && it != "=" }
     return StoredAbTestResult(
         targetLabel = targetLabel,
         modelName = modelName,
@@ -705,7 +733,17 @@ private fun AbResult.toStoredResult(): StoredAbTestResult {
         totalGenerationTimeMs = totalGenerationMs,
         estimatedTokens = estimatedTokens,
         totalTokensPerSecond = totalTokensPerSecond,
-        decodeTokensPerSecond = decodeTokensPerSecond
+        decodeTokensPerSecond = decodeTokensPerSecond,
+        selectedTextBackend = snapshot?.selectedTextBackend?.name,
+        selectedVisionBackend = snapshot?.selectedVisionBackend?.name,
+        mtpRuntimeStatus = snapshot?.mtpStatus?.name,
+        fallbackEventCodes = fallbackCodes,
+        nativeTtftSeconds = nativeStats?.timeToFirstTokenSeconds,
+        nativePrefillTokensPerSecond = nativeStats?.prefillTokensPerSecond,
+        nativeDecodeTokensPerSecond = nativeStats?.decodeTokensPerSecond,
+        modelFingerprintPath = snapshot?.modelFingerprint?.canonicalPath,
+        modelFingerprintSize = snapshot?.modelFingerprint?.fileSize,
+        modelFingerprintModifiedAt = snapshot?.modelFingerprint?.modifiedAt
     )
 }
 
