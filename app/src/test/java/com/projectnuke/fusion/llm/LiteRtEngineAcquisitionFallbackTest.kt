@@ -59,7 +59,8 @@ class LiteRtEngineAcquisitionFallbackTest {
             flagReader = flagReader,
             failureMemoryStorage = failureMemoryStorage,
             mtpCapabilityProbe = mtpCapabilityProbe,
-            nativeMinLogSeverity = { com.google.ai.edge.litertlm.LogSeverity.ERROR }
+            nativeMinLogSeverity = { com.google.ai.edge.litertlm.LogSeverity.ERROR },
+            clock = clock
         )
     }
 

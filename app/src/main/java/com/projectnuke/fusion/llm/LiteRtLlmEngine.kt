@@ -59,11 +59,16 @@ class LiteRtLlmEngine(
      * [LogSeverity.WARNING] to surface component-placement diagnostics without
      * honoring unstable warning strings as permanent correctness state (Phase 9).
      */
-    private val nativeMinLogSeverity: () -> LogSeverity = { LogSeverity.ERROR }
+    private val nativeMinLogSeverity: () -> LogSeverity = { LogSeverity.ERROR },
+    /**
+     * Clock for deterministic cooldown timing in tests and for production timing.
+     * Injected to allow deterministic testing of failure memory cooldown boundaries.
+     */
+    private val clock: () -> Long = { System.currentTimeMillis() }
 ) : LlmEngine {
 
     private var loadedState: LoadedRuntimeState? = null
-    private val mtpFailureMemory = MtpFailureMemory(failureMemoryStorage)
+    private val mtpFailureMemory = MtpFailureMemory(failureMemoryStorage, clock)
     @Volatile
     var lastMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
         private set
@@ -1331,6 +1336,10 @@ internal class MtpFailureMemory(
 
     private val failures = mutableMapOf<FailureKey, FailureRecord>()
     private val lock = Any()
+    /** Last durability operation result: null=not attempted, true=success, false=failed */
+    @Volatile private var lastDurabilityResult: Boolean? = null
+    /** Last durability exception if any */
+    @Volatile private var lastDurabilityException: Throwable? = null
 
     companion object {
         const val COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
@@ -1519,18 +1528,52 @@ internal class MtpFailureMemory(
      */
     fun clearAll() = synchronized(lock) {
         failures.clear()
-        storage.clear()
+        val clearResult = storage.clear()
+        lastDurabilityResult = clearResult
+        if (!clearResult) {
+            lastDurabilityException = IllegalStateException("Failed to clear failure memory storage")
+        }
+    }
+
+    /**
+     * Returns the result of the last durability operation.
+     * null = no operation attempted yet
+     * true = last save/clear succeeded
+     * false = last save/clear failed
+     */
+    fun lastDurabilityResult(): Boolean? {
+        return lastDurabilityResult
+    }
+
+    /**
+     * Returns the exception from the last durability failure, if any.
+     */
+    fun lastDurabilityException(): Throwable? {
+        return lastDurabilityException
+    }
+
+    /**
+     * Returns true if the in-memory cooldown state is usable but the last
+     * durability persistence failed, meaning the cooldown will not survive
+     * process restart.
+     */
+    fun isDurabilityCompromised(): Boolean {
+        return lastDurabilityResult == false
     }
 
     internal fun persistedEntryCount(): Int = synchronized(lock) { storage.load().size }
 
     private fun persist() {
-        runCatching {
-            storage.save(
-                failures.entries.associate { (key, record) ->
-                    serializeKey(key) to "${record.failedAt}|${record.fallbackReason}"
-                }
-            )
+        val result = storage.save(
+            failures.entries.associate { (key, record) ->
+                serializeKey(key) to "${record.failedAt}|${record.fallbackReason}"
+            }
+        )
+        lastDurabilityResult = result
+        if (!result) {
+            lastDurabilityException = IllegalStateException("Failed to save failure memory to storage")
+        } else {
+            lastDurabilityException = null
         }
     }
 }

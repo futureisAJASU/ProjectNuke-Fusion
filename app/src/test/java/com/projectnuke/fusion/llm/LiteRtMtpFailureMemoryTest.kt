@@ -73,7 +73,7 @@ class LiteRtMtpFailureMemoryTest {
 
     @Test
     fun `recorded failure is skipped during cooldown`() {
-        val memory = MtpFailureMemory()
+        val memory = MtpFailureMemory(NoopMtpFailureMemoryStorage, clock = { 0L })
         record(memory)
         assertTrue(shouldSkip(memory) != null)
     }
@@ -81,20 +81,20 @@ class LiteRtMtpFailureMemoryTest {
     @Test
     fun `failure memory survives a new instance sharing the same storage`() {
         val storage = FakeStorage()
-        val first = MtpFailureMemory(storage)
+        val first = MtpFailureMemory(storage, clock = { 0L })
         record(first, reason = "MTP flag application failed")
         assertEquals(1, first.persistedEntryCount())
 
-        val reloaded = MtpFailureMemory(storage)
+        val reloaded = MtpFailureMemory(storage, clock = { 0L })
         assertEquals("MTP flag application failed", shouldSkip(reloaded))
     }
 
     @Test
     fun `failure is keyed by exact backend and MTP state`() {
         val storage = FakeStorage()
-        val first = MtpFailureMemory(storage)
+        val first = MtpFailureMemory(storage, clock = { 0L })
         record(first, backend = "GPU")
-        val reloaded = MtpFailureMemory(storage)
+        val reloaded = MtpFailureMemory(storage, clock = { 0L })
 
         // A GPU+MTP failure must never poison a CPU request or a plain GPU request.
         assertNull(shouldSkip(reloaded, backend = "CPU"))
@@ -119,14 +119,14 @@ class LiteRtMtpFailureMemoryTest {
     @Test
     fun `failure is keyed by file identity so same-path replacement invalidates stale entries`() {
         val storage = FakeStorage()
-        val first = MtpFailureMemory(storage)
+        val first = MtpFailureMemory(storage, clock = { 0L })
         record(first, modelPath = "/data/models/gemma.litertlm")
-        val reloaded = MtpFailureMemory(storage)
+        val reloaded = MtpFailureMemory(storage, clock = { 0L })
         assertTrue(shouldSkip(reloaded) != null)
 
         // Simulate model replacement at the same path (different file size / modified time).
         record(first, modelPath = "/data/models/gemma.litertlm", fileSize = 200L, modifiedAt = 2000L)
-        val reloadedAfterReplacement = MtpFailureMemory(storage)
+        val reloadedAfterReplacement = MtpFailureMemory(storage, clock = { 0L })
         // Old entry (size=100, modified=1000) should no longer match the new fingerprint.
         assertNull(
             reloadedAfterReplacement.shouldSkipMtp(
@@ -160,7 +160,7 @@ class LiteRtMtpFailureMemoryTest {
     @Test
     fun `concurrent candidate failures for same fingerprint survive process recreation`() {
         val storage = FakeStorage()
-        val first = MtpFailureMemory(storage)
+        val first = MtpFailureMemory(storage, clock = { 0L })
 
         // Record GPU+MTP failure
         record(first, backend = "GPU", mtpEnabled = true, reason = "MTP init failed")
@@ -172,7 +172,7 @@ class LiteRtMtpFailureMemoryTest {
         assertEquals(3, first.persistedEntryCount())
 
         // Reload from storage — all three failures must survive
-        val reloaded = MtpFailureMemory(storage)
+        val reloaded = MtpFailureMemory(storage, clock = { 0L })
         assertEquals(3, reloaded.persistedEntryCount())
         assertTrue(shouldSkip(reloaded, backend = "GPU", mtpEnabled = true) != null)
         assertTrue(shouldSkip(reloaded, backend = "GPU", mtpEnabled = false) != null)
@@ -182,13 +182,13 @@ class LiteRtMtpFailureMemoryTest {
     @Test
     fun `clearForModel removes only that model and persists the removal`() {
         val storage = FakeStorage()
-        val memory = MtpFailureMemory(storage)
+        val memory = MtpFailureMemory(storage, clock = { 0L })
         record(memory, modelPath = "/a/one.litertlm")
         record(memory, modelPath = "/b/two.litertlm")
         assertEquals(2, memory.persistedEntryCount())
 
         memory.clearForModel("/a/one.litertlm")
-        val reloaded = MtpFailureMemory(storage)
+        val reloaded = MtpFailureMemory(storage, clock = { 0L })
         assertNull(shouldSkip(reloaded, modelPath = "/a/one.litertlm"))
         assertTrue(shouldSkip(reloaded, modelPath = "/b/two.litertlm") != null)
     }
@@ -196,12 +196,12 @@ class LiteRtMtpFailureMemoryTest {
     @Test
     fun `clearAll wipes the storage`() {
         val storage = FakeStorage()
-        val memory = MtpFailureMemory(storage)
+        val memory = MtpFailureMemory(storage, clock = { 0L })
         record(memory)
         memory.clearAll()
         assertEquals(0, memory.persistedEntryCount())
         assertEquals(1, storage.clearCount)
-        assertNull(MtpFailureMemory(storage).shouldSkipMtp(
+        assertNull(MtpFailureMemory(storage, clock = { 0L }).shouldSkipMtp(
             modelPath = "/data/models/gemma.litertlm",
             backendName = "GPU",
             mtpEnabled = true,
@@ -221,7 +221,7 @@ class LiteRtMtpFailureMemoryTest {
         storage.map["a\u001fb\u001ftrue\u001f1\u001fc\u001f2"] = "not-a-timestamp|reason"
         storage.map["a\u001fb\u001fwat\u001f1\u001fc\u001f2"] = "12345|reason"
         storage.map["a\u001fb\u001ftrue\u001f1\u001fc\u001f2"] = "12345" // valid key, value has one field only
-        val memory = MtpFailureMemory(storage)
+        val memory = MtpFailureMemory(storage, clock = { 0L })
         assertNull(shouldSkip(memory, modelPath = "x", backend = "b"))
     }
 
@@ -279,5 +279,50 @@ class LiteRtMtpFailureMemoryTest {
         // Advance past cooldown in the reloaded instance.
         now = MtpFailureMemory.COOLDOWN_MS + 1
         assertNull(shouldSkip(reloaded, clock = clock))
+    }
+
+    @Test
+    fun `save failure is observable through durability status`() {
+        val storage = FakeStorage()
+        storage.saveSuccess = false
+        val memory = MtpFailureMemory(storage, clock = { 0L })
+
+        record(memory)
+        // Durability should report failure
+        assertEquals(false, memory.lastDurabilityResult())
+        assertTrue(memory.isDurabilityCompromised())
+        assertTrue(memory.lastDurabilityException() != null)
+
+        // In-memory state should still be usable
+        assertTrue(shouldSkip(memory) != null)
+
+        // Next successful save should clear the error
+        storage.saveSuccess = true
+        memory.clearForModel("/data/models/gemma.litertlm")
+        assertEquals(true, memory.lastDurabilityResult())
+        assertFalse(memory.isDurabilityCompromised())
+        assertNull(memory.lastDurabilityException())
+    }
+
+    @Test
+    fun `clear failure is observable through durability status`() {
+        val storage = FakeStorage()
+        val memory = MtpFailureMemory(storage, clock = { 0L })
+        record(memory)
+        assertEquals(1, memory.persistedEntryCount())
+
+        // Make clear fail
+        val failingStorage = object : MtpFailureMemoryStorage {
+            val map = mutableMapOf<String, String>()
+            override fun load(): Map<String, String> = map.toMap()
+            override fun save(entries: Map<String, String>): Boolean = true
+            override fun clear(): Boolean = false
+        }
+        val memory2 = MtpFailureMemory(failingStorage, clock = { 0L })
+        record(memory2)
+        memory2.clearAll()
+        assertEquals(false, memory2.lastDurabilityResult())
+        assertTrue(memory2.isDurabilityCompromised())
+        assertTrue(memory2.lastDurabilityException() != null)
     }
 }
