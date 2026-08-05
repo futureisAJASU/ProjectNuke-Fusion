@@ -16,7 +16,7 @@ android {
         applicationId = "com.projectnuke.fusion"
         minSdk = 32
         targetSdk = 36
-versionCode = 10007
+        versionCode = 10007
         versionName = "1.0.0-beta-stable"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -45,6 +45,10 @@ versionCode = 10007
                 (project.findProperty("litertlm.golden.path") ?: "").toString()
             )
         }
+    }
+    // Room schema export for migration testing
+    ksp {
+        arg("room.schemaLocation", "$projectDir/schemas")
     }
 }
 

@@ -14,7 +14,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         BenchmarkResultEntity::class
     ],
     version = 4,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun chatDao(): ChatDao
