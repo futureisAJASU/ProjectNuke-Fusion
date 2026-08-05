@@ -54,18 +54,28 @@ fun GenerationSettings.toRequestedEngineProfile(
     modelPath = modelPath,
     accelerator = accelerator,
     mtpRequested = speculativeDecodingEnabled == true,
-    kvCacheCapacityTokens = kvCacheCapacityTokens.coerceAtLeast(1),
+    kvCacheCapacityTokens = kvCacheCapacityTokens.coerceAtLeast(KvCacheCapacityPolicy.MIN_CAPACITY).coerceAtMost(KvCacheCapacityPolicy.MAX_CAPACITY),
     enableVisionBackend = enableVisionBackend,
 )
 
 /**
  * Backward-compatible migration: builds the per-turn options from a
  * [GenerationSettings] value.
+ * Validates that the requested output budget fits within the KV cache capacity.
  */
-fun GenerationSettings.toConversationOptions(): ConversationOptions = ConversationOptions(
-    maxOutputToken = maxTokens.coerceAtLeast(1),
-    temperature = temperature,
-    topK = topK,
-    topP = topP,
-    seed = null,
-)
+fun GenerationSettings.toConversationOptions(): ConversationOptions {
+    // Ensure output budget doesn't exceed what KV cache can hold
+    // Heuristic: assume prompt ≈ output budget, so 2 * output <= capacity
+    val validatedMaxOutput = KvCacheCapacityPolicy.validateOutputBudget(
+        requestedOutputTokens = maxTokens.coerceAtLeast(1),
+        kvCacheCapacityTokens = kvCacheCapacityTokens.coerceAtLeast(KvCacheCapacityPolicy.MIN_CAPACITY),
+        estimatedPromptTokens = maxTokens.coerceAtLeast(1) // heuristic: prompt ≈ output
+    )
+    return ConversationOptions(
+        maxOutputToken = validatedMaxOutput,
+        temperature = temperature,
+        topK = topK,
+        topP = topP,
+        seed = null,
+    )
+}

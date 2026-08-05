@@ -16,3 +16,50 @@ data class GenerationSettings(
     val reasoningBudgetTokens: Int = 512,
     val speculativeDecodingEnabled: Boolean? = null
 )
+
+/**
+ * Policy for KV cache capacity defaults and limits.
+ * Centralized so callers don't scatter hardcoded values.
+ */
+object KvCacheCapacityPolicy {
+    /** Default KV cache capacity in tokens (4K tokens ≈ ~16KB at 4 bytes/token for some models). */
+    const val DEFAULT_CAPACITY = 4096
+
+    /** Minimum KV cache capacity in tokens. */
+    const val MIN_CAPACITY = 1024
+
+    /** Maximum KV cache capacity in tokens (32K tokens). */
+    const val MAX_CAPACITY = 32768
+
+    /**
+     * Returns the default KV cache capacity for a model based on its recommended settings.
+     * Falls back to [DEFAULT_CAPACITY] if no model-specific recommendation exists.
+     */
+    fun defaultForModel(recommendedMaxTokens8Gb: Int): Int {
+        // KV cache should be at least large enough for prompt + output
+        // Use 2x the recommended output as a heuristic for prompt+output budget
+        return (recommendedMaxTokens8Gb * 2).coerceIn(MIN_CAPACITY, MAX_CAPACITY)
+    }
+
+    /**
+     * Validates that the requested output budget fits within the KV cache capacity.
+     * Returns the adjusted output budget if it exceeds capacity, or the original if it fits.
+     * The adjustment ensures: promptTokens + outputTokens <= kvCacheCapacity
+     * Since we don't know prompt tokens at settings-save time, we use a heuristic:
+     * assume prompt ≈ output budget for the check, so 2 * output <= capacity.
+     */
+    fun validateOutputBudget(
+        requestedOutputTokens: Int,
+        kvCacheCapacityTokens: Int,
+        estimatedPromptTokens: Int = 0
+    ): Int {
+        val maxOutputForCapacity = (kvCacheCapacityTokens - estimatedPromptTokens).coerceAtLeast(1)
+        return requestedOutputTokens.coerceAtMost(maxOutputForCapacity)
+    }
+
+    /**
+     * Returns the KV cache capacity to use for low-memory benchmark mode.
+     * Uses a reduced capacity to avoid OOM during benchmark runs.
+     */
+    fun lowMemoryBenchmarkCapacity(): Int = MIN_CAPACITY
+}

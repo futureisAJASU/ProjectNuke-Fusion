@@ -52,6 +52,7 @@ import com.projectnuke.fusion.llm.RuntimeComponentBackend
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.KvCacheCapacityPolicy
 import com.projectnuke.fusion.model.toConversationOptions
 import com.projectnuke.fusion.model.toRequestedEngineProfile
 import com.projectnuke.fusion.util.FusionMemoryManager
@@ -721,8 +722,15 @@ private fun sanitizeBenchmarkErrorMessage(
 }
 
 private fun loadBenchmarkSettingsFromPrefs(prefs: android.content.SharedPreferences): GenerationSettings {
+    val maxTokens = prefs.getInt("max_tokens", 4000).coerceIn(1, 32000)
+    val kvCacheCapacityTokens = if (prefs.contains("kv_cache_capacity_tokens")) {
+        prefs.getInt("kv_cache_capacity_tokens", 4096).coerceIn(KvCacheCapacityPolicy.MIN_CAPACITY, KvCacheCapacityPolicy.MAX_CAPACITY)
+    } else {
+        maxTokens.coerceAtLeast(4096)
+    }
     return GenerationSettings(
-        maxTokens = prefs.getInt("max_tokens", 4000).coerceIn(1, 32000),
+        maxTokens = maxTokens,
+        kvCacheCapacityTokens = kvCacheCapacityTokens,
         topK = prefs.getInt("top_k", 64).coerceIn(1, 100),
         topP = prefs.getFloat("top_p", 0.95f).coerceIn(0f, 1f),
         temperature = prefs.getFloat("temperature", 1.0f).coerceIn(0f, 2f),

@@ -135,6 +135,7 @@ import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.KvCacheCapacityPolicy
 import com.projectnuke.fusion.model.toConversationOptions
 import com.projectnuke.fusion.model.toRequestedEngineProfile
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
@@ -537,6 +538,7 @@ private const val ChatOptionConversationSummary = "대화 요약"
 private const val ChatOptionMemoryCandidateExtraction = "메모리 후보 추출"
 private const val FusionPrefsName = "fusion_chat_settings"
 private const val PrefMaxTokens = "max_tokens"
+private const val PrefKvCacheCapacityTokens = "kv_cache_capacity_tokens"
 private const val PrefTopK = "top_k"
 private const val PrefTopP = "top_p"
 private const val PrefTemperature = "temperature"
@@ -10345,8 +10347,20 @@ private fun loadSavedGenerationSettings(
         null
     }
 
+    // Migration: if kv_cache_capacity_tokens is not set, derive from legacy max_tokens
+    // Legacy behavior: max_tokens was used for both output and KV cache.
+    // New behavior: separate output max (maxTokens) from KV cache capacity.
+    val maxTokens = prefs.getInt(PrefMaxTokens, 4000).coerceIn(2000, 32000)
+    val kvCacheCapacityTokens = if (prefs.contains(PrefKvCacheCapacityTokens)) {
+        prefs.getInt(PrefKvCacheCapacityTokens, 4096).coerceIn(KvCacheCapacityPolicy.MIN_CAPACITY, KvCacheCapacityPolicy.MAX_CAPACITY)
+    } else {
+        // Legacy migration: use maxTokens as KV cache capacity (minimum 4096)
+        maxTokens.coerceAtLeast(4096)
+    }
+
     return GenerationSettings(
-        maxTokens = prefs.getInt(PrefMaxTokens, 4000).coerceIn(2000, 32000),
+        maxTokens = maxTokens,
+        kvCacheCapacityTokens = kvCacheCapacityTokens,
         topK = prefs.getInt(PrefTopK, 64).coerceIn(5, 100),
         topP = prefs.getFloat(PrefTopP, 0.95f).coerceIn(0f, 1f),
         temperature = prefs.getFloat(PrefTemperature, 1.0f).coerceIn(0f, 2f),
@@ -10366,6 +10380,7 @@ private fun saveFusionSettings(
 ) {
     prefs.edit()
         .putInt(PrefMaxTokens, settings.maxTokens)
+        .putInt(PrefKvCacheCapacityTokens, settings.kvCacheCapacityTokens)
         .putInt(PrefTopK, settings.topK)
         .putFloat(PrefTopP, settings.topP)
         .putFloat(PrefTemperature, settings.temperature)
