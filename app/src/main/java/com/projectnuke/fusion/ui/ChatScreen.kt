@@ -9962,13 +9962,9 @@ private fun outcomeRuntimeFields(
                     mtpStatus = snapshot.mtpStatus,
                     actualBackend = snapshot.selectedTextBackend.name,
                     actualVisionBackend = snapshot.selectedVisionBackend?.name,
-                    fallbackEventCodes = FallbackCauseFormatter.format(snapshot)
-                        ?.takeIf { it.isNotBlank() }
+                    fallbackEventCodes = FallbackCauseFormatter.formatCodes(snapshot)
                 )
             }
-            // Legacy success path with no snapshot: cannot reconstruct state
-            // from stale engine without violating the snapshot contract.
-            // Report a conservative "unknown" rather than rereading engine.
             return OutcomeRuntimeFields(
                 mtpStatus = com.projectnuke.fusion.llm.MtpRuntimeStatus.OFF,
                 actualBackend = null,
@@ -9987,8 +9983,7 @@ private fun outcomeRuntimeFields(
                     mtpStatus = failureSnapshot.mtpRuntimeStatus,
                     actualBackend = failureSnapshot.selectedTextBackend.name,
                     actualVisionBackend = failureSnapshot.selectedVisionBackend?.name,
-                    fallbackEventCodes = FallbackCauseFormatter.formatEvents(failureSnapshot.fallbackEventsFromAcquisition)
-                        ?.takeIf { it.isNotBlank() }
+                    fallbackEventCodes = FallbackCauseFormatter.formatCodes(failureSnapshot)
                 )
             }
             // 2) Acquisition failure: no engine was selected; the attempt
@@ -10001,13 +9996,11 @@ private fun outcomeRuntimeFields(
                     mtpStatus = attemptSnapshot.inferredMtpStatus(),
                     actualBackend = null,
                     actualVisionBackend = null,
-                    fallbackEventCodes = FallbackCauseFormatter.format(attemptSnapshot)
-                        ?.takeIf { it.isNotBlank() }
+                    fallbackEventCodes = FallbackCauseFormatter.formatCodes(attemptSnapshot)
                 )
             }
             // 3) Legacy failure path: no snapshots at all (e.g. MODEL_NOT_FOUND,
             //    IMAGE_NOT_FOUND where getOrCreateEngine was never reached).
-            //    Never reread engine state — report conservative unknowns.
             return OutcomeRuntimeFields(
                 mtpStatus = com.projectnuke.fusion.llm.MtpRuntimeStatus.OFF,
                 actualBackend = null,

@@ -58,6 +58,7 @@ import com.projectnuke.fusion.modelzoo.ModelAvailability
 import com.projectnuke.fusion.util.FusionMemoryManager
 import com.projectnuke.fusion.util.MtpPolicyProduction
 import com.projectnuke.fusion.util.FallbackCauseFormatter
+import com.projectnuke.fusion.util.toKoreanMtpStatus
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -800,9 +801,12 @@ private fun AbResult.appliedRuntimeLine(): String? {
     // Priority: success snapshot > failure snapshot (acquisition succeeded,
     // generation crashed; the running engine's state is in the failure
     // snapshot) > attempt snapshot (acquisition failed; no selected backend).
+    // Phase C3: MTP status is rendered as Korean via toKoreanMtpStatus;
+    // never expose raw enum names (INITIALIZED_WITH_MTP_REQUEST,
+    // FALLBACK_DISABLED) in user-facing displays.
     runtimeSnapshot?.let { snap ->
         val backend = snap.selectedTextBackend.name
-        val mtpState = snap.mtpStatus.name
+        val mtpState = snap.mtpStatus.toKoreanMtpStatus()
         val fallbackSummary = FallbackCauseFormatter.formatFallbackSummary(snap)
         var result = "적용: $backend · MTP $mtpState"
         if (fallbackSummary.isNotBlank()) {
@@ -812,7 +816,7 @@ private fun AbResult.appliedRuntimeLine(): String? {
     }
     failureSnapshot?.let { snap ->
         val backend = snap.selectedTextBackend.name
-        val mtpState = snap.mtpRuntimeStatus.name
+        val mtpState = snap.mtpRuntimeStatus.toKoreanMtpStatus()
         val fallbackSummary = FallbackCauseFormatter.formatEvents(snap.fallbackEventsFromAcquisition)
         var result = "적용: $backend · MTP $mtpState"
         if (fallbackSummary.isNotBlank()) {
@@ -852,21 +856,14 @@ private fun AbResult.toStoredResult(): StoredAbTestResult {
     val snapshot = runtimeSnapshot
     val attemptSnap = attemptSnapshot
     val failureSnap = failureSnapshot
-    // Machine-readable fallback event codes: prefer stable structured codes over
-    // the human-readable formatter output (see Repair Phase C). For now, this
-    // uses the formatter's pipe-separated text — Phase C2 will replace it with
-    // a JSON array. The point of Phase B is that *localized prose* (Korean/Chinese)
-    // is never stored as a code: `format()` is a stable pipe-delimited summary,
-    // not localized user-facing prose; `formatAttemptsFallbackSummary()` and
-    // `formatFallbackSummary()` are the localized-prose variants and are
-    // NOT used here.
+    // Machine-readable fallback event codes: a JSON array of stable
+    // FallbackReason.name values. Never store localized Korean prose (e.g.
+    // format/formatFallbackSummary output) in a code field — those are only
+    // for on-screen rendering. See Repair Phase C2.
     val fallbackCodes = when {
-        succeeded -> snapshot?.let { FallbackCauseFormatter.format(it) }
-            ?.takeIf { it.isNotBlank() }
-        failureSnap != null -> FallbackCauseFormatter.formatEvents(failureSnap.fallbackEventsFromAcquisition)
-            ?.takeIf { it.isNotBlank() }
-        attemptSnap != null -> FallbackCauseFormatter.formatEvents(attemptSnap.fallbackEvents)
-            ?.takeIf { it.isNotBlank() }
+        succeeded -> snapshot?.let { FallbackCauseFormatter.formatCodes(it) }
+        failureSnap != null -> FallbackCauseFormatter.formatCodes(failureSnap)
+        attemptSnap != null -> FallbackCauseFormatter.formatCodes(attemptSnap)
         else -> null
     }
     // Resolve model fingerprint fields from whichever snapshot captured them.

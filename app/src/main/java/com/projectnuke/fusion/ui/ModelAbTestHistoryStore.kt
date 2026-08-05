@@ -4,6 +4,7 @@ import android.content.Context
 import java.io.File
 import com.projectnuke.fusion.util.writeTextAtomically
 import com.projectnuke.fusion.util.FallbackCauseFormatter
+import com.projectnuke.fusion.util.toKoreanMtpStatus
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -277,13 +278,14 @@ fun StoredAbTestSession.toMarkdown(): String = buildString {
         // Applied runtime info (from immutable snapshot)
         val appliedParts = mutableListOf<String>()
         result.selectedTextBackend?.let { appliedParts.add("백엔드: $it") }
-        result.mtpRuntimeStatus?.let { appliedParts.add("MTP: $it") }
+        result.mtpRuntimeStatus?.let { appliedParts.add("MTP: ${mtpStatusKorean(it)}") }
         result.selectedVisionBackend?.let { appliedParts.add("비전: $it") }
         if (appliedParts.isNotEmpty()) {
             appendLine("- 적용: ${appliedParts.joinToString(" · ")}")
         }
-        if (!result.fallbackEventCodes.isNullOrBlank()) {
-            appendLine("- 폴백: ${result.fallbackEventCodes}")
+        val rendered = FallbackCauseFormatter.renderStoredCodesForDisplay(result.fallbackEventCodes)
+        if (rendered.isNotBlank()) {
+            appendLine("- 폴백: $rendered")
         }
         if (result.success) {
             appendLine()
@@ -327,3 +329,10 @@ fun formatAbHistoryTime(timestamp: Long): String {
 }
 
 private fun Double.formatAbSpeed(): String = String.format(java.util.Locale.US, "%.1f tok/s", this)
+
+/** Localizes a persisted MtpRuntimeStatus name into Korean for on-screen display. */
+private fun mtpStatusKorean(name: String): String {
+    val status = runCatching { com.projectnuke.fusion.llm.MtpRuntimeStatus.valueOf(name) }.getOrNull()
+        ?: return name
+    return status.toKoreanMtpStatus()
+}

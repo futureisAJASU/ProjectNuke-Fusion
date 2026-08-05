@@ -602,11 +602,9 @@ internal fun buildBenchmarkResultEntityPayload(
         com.projectnuke.fusion.llm.RuntimeComponentBackend.UNKNOWN.name
     }
     val fallbackEventCodes = if (success) {
-        runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
-            ?.takeIf { it.isNotBlank() }
+        runtimeSnapshot?.let { FallbackCauseFormatter.formatCodes(it) }
     } else {
-        attemptSnapshot?.let { FallbackCauseFormatter.formatEvents(it.fallbackEvents) }
-            ?.takeIf { it.isNotBlank() }
+        attemptSnapshot?.let { FallbackCauseFormatter.formatCodes(it) }
     }
     val mtpRequestedFromSnapshot = if (success) {
         runtimeSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)

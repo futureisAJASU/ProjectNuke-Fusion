@@ -115,7 +115,7 @@ class BenchmarkPersistenceRoundTripTest {
     }
 
     @Test
-    fun `fallback event codes are serialized as CSV of backend=reason code`() {
+    fun `fallback event codes are serialized as JSON array of stable enum names`() {
         val snap = snapshot(
             fallbackEvents = listOf(
                 RuntimeFallbackEvent(
@@ -150,8 +150,16 @@ class BenchmarkPersistenceRoundTripTest {
             androidVersion = ""
         )
         val codes = entity.fallbackEventCodes!!
-        assertTrue(codes.contains("MTP 엔진 초기화에 실패했습니다"))
-        assertTrue(codes.contains("GPU 텍스트 엔진 실패로 CPU를 사용합니다"))
+        // Repair Phase C2: fallbackEventCodes is a JSON array of stable
+        // FallbackReason.name strings (machine-readable), never localized
+        // Korean prose.
+        val arr = org.json.JSONArray(codes)
+        assertEquals(2, arr.length())
+        assertEquals(FallbackReason.MTP_ENGINE_INIT_FAILED.name, arr.optString(0))
+        assertEquals(FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED.name, arr.optString(1))
+        // Sanity: no localized Korean prose leaked into the code field.
+        assertFalse(codes.contains("엔진"))
+        assertFalse(codes.contains("텍스트"))
     }
 
     @Test
