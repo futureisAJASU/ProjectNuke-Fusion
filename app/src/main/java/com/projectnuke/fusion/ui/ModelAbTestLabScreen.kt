@@ -783,8 +783,12 @@ private fun AbResult.appliedRuntimeLine(): String? {
     val snap = runtimeSnapshot ?: return null
     val backend = snap.selectedTextBackend.name
     val mtpState = snap.mtpStatus.name
-    return "적용: $backend · MTP $mtpState" +
-        (snap.selectedVisionBackend?.let { " · 비전 $it" } ?: "")
+    val fallbackSummary = FallbackCauseFormatter.formatFallbackSummary(snap)
+    var result = "적용: $backend · MTP $mtpState"
+    if (fallbackSummary.isNotBlank()) {
+        result += " · 폴백: $fallbackSummary"
+    }
+    return result + (snap.selectedVisionBackend?.let { " · 비전 $it" } ?: "")
 }
 
 private fun AbResult.copyText(): String = buildString {

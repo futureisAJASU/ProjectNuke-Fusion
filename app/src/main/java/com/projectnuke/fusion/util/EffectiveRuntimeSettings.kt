@@ -1,6 +1,9 @@
 ﻿package com.projectnuke.fusion.util
 
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
+import com.projectnuke.fusion.llm.RuntimeAttemptSnapshot
+import com.projectnuke.fusion.llm.RuntimeBackend
+import com.projectnuke.fusion.llm.RuntimeExecutionSnapshot
 import com.projectnuke.fusion.model.GenerationSettings
 import kotlin.math.absoluteValue
 
@@ -93,8 +96,41 @@ fun buildEffectiveSettingsLine(settings: EffectiveRuntimeSettings): String {
 fun buildAppliedRuntimeLine(
     actualBackend: String?,
     mtpStatus: MtpRuntimeStatus,
-    mtpRequested: Boolean
+    mtpRequested: Boolean,
+    fallbackEventCodes: String? = null
 ): String? {
     if (actualBackend == null) return null
-    return "적용: $actualBackend · MTP ${mtpStatus.toKoreanMtpStatus()}"
+    var result = "적용: $actualBackend · MTP ${mtpStatus.toKoreanMtpStatus()}"
+    if (mtpRequested && fallbackEventCodes != null && fallbackEventCodes.isNotBlank()) {
+        result += " · 폴백: $fallbackEventCodes"
+    }
+    return result
+}
+
+/**
+ * Builds the applied runtime line with fallback summary from a successful execution snapshot.
+ */
+fun buildAppliedRuntimeLine(snapshot: RuntimeExecutionSnapshot): String? {
+    if (snapshot.selectedTextBackend == RuntimeBackend.UNKNOWN) return null
+    val fallbackSummary = FallbackCauseFormatter.formatFallbackSummary(snapshot)
+    var result = "적용: ${snapshot.selectedTextBackend.name} · MTP ${snapshot.mtpStatus.toKoreanMtpStatus()}"
+    if (snapshot.mtpRequested && fallbackSummary.isNotBlank()) {
+        result += " · 폴백: $fallbackSummary"
+    }
+    if (snapshot.selectedVisionBackend != null) {
+        result += " · 비전: ${snapshot.selectedVisionBackend.name}"
+    }
+    return result
+}
+
+/**
+ * Builds the applied runtime line with fallback summary from a failed attempt snapshot.
+ */
+fun buildAppliedRuntimeLine(snapshot: RuntimeAttemptSnapshot): String? {
+    val fallbackSummary = FallbackCauseFormatter.formatAttemptFallbackSummary(snapshot)
+    var result = "요청: ${snapshot.requestedAccelerator.name} · MTP ${if (snapshot.mtpRequested) "요청" else "꺼짐"}"
+    if (fallbackSummary.isNotBlank()) {
+        result += " · 폴백: $fallbackSummary"
+    }
+    return result
 }

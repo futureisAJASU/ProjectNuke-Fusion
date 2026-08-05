@@ -3,6 +3,7 @@ package com.projectnuke.fusion.ui
 import android.content.Context
 import java.io.File
 import com.projectnuke.fusion.util.writeTextAtomically
+import com.projectnuke.fusion.util.FallbackCauseFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -258,6 +259,17 @@ fun StoredAbTestSession.toMarkdown(): String = buildString {
         appendLine("- 설정: ${result.settingsSummary()}")
         appendLine("- 속도: 첫 토큰 ${result.firstTokenLatencyMs?.let { "${it}ms" } ?: "측정 불가"} · 총 ${result.totalGenerationTimeMs}ms · 전체 ${result.totalTokensPerSecond.formatAbSpeed()} · 디코딩 ${result.decodeTokensPerSecond?.formatAbSpeed() ?: "측정 불가"}")
         appendLine("- 상태: ${if (result.success) "성공" else "실패"}")
+        // Applied runtime info (from immutable snapshot)
+        val appliedParts = mutableListOf<String>()
+        result.selectedTextBackend?.let { appliedParts.add("백엔드: $it") }
+        result.mtpRuntimeStatus?.let { appliedParts.add("MTP: $it") }
+        result.selectedVisionBackend?.let { appliedParts.add("비전: $it") }
+        if (appliedParts.isNotEmpty()) {
+            appendLine("- 적용: ${appliedParts.joinToString(" · ")}")
+        }
+        if (!result.fallbackEventCodes.isNullOrBlank()) {
+            appendLine("- 폴백: ${result.fallbackEventCodes}")
+        }
         if (result.success) {
             appendLine()
             appendLine("답변:")
@@ -272,7 +284,11 @@ fun StoredAbTestSession.toMarkdown(): String = buildString {
 }.trim()
 
 fun StoredAbTestResult.settingsSummary(): String {
-    return "가속기=$accelerator · maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP · MTP=${if (mtpEnabled) "켜짐" else "꺼짐"} · Reasoning=${if (reasoningEnabled) "켜짐" else "꺼짐"} · 메모리=${if (memoryEnabled) "사용" else "사용 안 함"}"
+    var result = "가속기=$accelerator · maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP · MTP=${if (mtpEnabled) "켜짐" else "꺼짐"} · Reasoning=${if (reasoningEnabled) "켜짐" else "꺼짐"} · 메모리=${if (memoryEnabled) "사용" else "사용 안 함"}"
+    if (!fallbackEventCodes.isNullOrBlank()) {
+        result += " · 폴백: $fallbackEventCodes"
+    }
+    return result
 }
 
 fun buildStoredAbComparisonSummary(session: StoredAbTestSession): String {

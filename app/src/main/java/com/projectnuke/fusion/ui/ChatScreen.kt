@@ -195,6 +195,10 @@ import java.util.Locale
 import java.util.UUID
 import com.projectnuke.fusion.chat.GenerationRequestSnapshot
 import com.projectnuke.fusion.chat.TokenCoalescer
+import com.projectnuke.fusion.llm.RuntimeExecutionSnapshot
+import com.projectnuke.fusion.llm.RuntimeAttemptSnapshot
+import com.projectnuke.fusion.llm.inferredMtpStatus
+import com.projectnuke.fusion.util.FallbackCauseFormatter
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.roundToInt
@@ -1283,7 +1287,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 }
                             }
                             val runtimeFields = outcomeRuntimeFields(outcome, engine)
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats, buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true))
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats, buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes))
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -1468,7 +1472,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 }
                             }
                             val runtimeFields = outcomeRuntimeFields(outcome, engine)
-                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats, buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true))
+                            val metrics = buildFusionMetricsLine(shortModelName(request.selectedModelId.orEmpty()), buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true), reply, SystemClock.elapsedRealtime() - started, firstToken.get().takeIf { it >= 0L }, buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)), outcome.stats, buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes))
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
                             chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "답변 저장 중...") }
                             if (!chatViewModel.registry.isActive(request.conversationId, request.requestId)) return@start
@@ -3319,7 +3323,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 firstTokenLatencyMs = firstTokenLatencyMs,
                                                 settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = actualWebSearchUsed, mtpStatus = runtimeFields.mtpStatus, actualBackend = runtimeFields.actualBackend, actualVisionBackend = runtimeFields.actualVisionBackend)),
                                                 nativeStats = rawOutcome.stats,
-                                                appliedRuntimeLine = buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, requestSettings.speculativeDecodingEnabled == true)
+                                                appliedRuntimeLine = buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, requestSettings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes)
                                             )
                                             chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, requireActiveSession = true) { it.copy(streamingMetricsLine = metricsLine, generationStatus = "답변 저장 중...") }
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start
@@ -9940,25 +9944,47 @@ private fun estimateOutputTokens(text: String): Int {
 private data class OutcomeRuntimeFields(
     val mtpStatus: com.projectnuke.fusion.llm.MtpRuntimeStatus,
     val actualBackend: String?,
-    val actualVisionBackend: String?
+    val actualVisionBackend: String?,
+    val fallbackEventCodes: String? = null
 )
 
 private fun outcomeRuntimeFields(
     outcome: GenerationOutcome,
     engine: LiteRtLlmEngine
 ): OutcomeRuntimeFields {
-    val snapshot = (outcome as? GenerationOutcome.Success)?.snapshot
-    if (snapshot != null) {
-        return OutcomeRuntimeFields(
-            mtpStatus = snapshot.mtpStatus,
-            actualBackend = snapshot.selectedTextBackend.name,
-            actualVisionBackend = snapshot.selectedVisionBackend?.name
-        )
+    when (outcome) {
+        is GenerationOutcome.Success -> {
+            val snapshot = outcome.snapshot
+            if (snapshot != null) {
+                return OutcomeRuntimeFields(
+                    mtpStatus = snapshot.mtpStatus,
+                    actualBackend = snapshot.selectedTextBackend.name,
+                    actualVisionBackend = snapshot.selectedVisionBackend?.name,
+                    fallbackEventCodes = FallbackCauseFormatter.format(snapshot)
+                        ?.takeIf { it.isNotBlank() }
+                )
+            }
+        }
+        is GenerationOutcome.Failure -> {
+            val attemptSnapshot = outcome.attemptSnapshot
+            if (attemptSnapshot != null) {
+                return OutcomeRuntimeFields(
+                    mtpStatus = attemptSnapshot.inferredMtpStatus(),
+                    actualBackend = null,
+                    actualVisionBackend = null,
+                    fallbackEventCodes = FallbackCauseFormatter.format(attemptSnapshot)
+                        ?.takeIf { it.isNotBlank() }
+                )
+            }
+        }
+        else -> { /* Cancelled, Empty - fall through to legacy */ }
     }
+    // Fallback for legacy paths or when snapshot is not available
     return OutcomeRuntimeFields(
         mtpStatus = engine.lastMtpStatus,
         actualBackend = engine.lastRuntimeSelection?.actualTextBackend,
-        actualVisionBackend = engine.lastRuntimeSelection?.actualVisionBackend
+        actualVisionBackend = engine.lastRuntimeSelection?.actualVisionBackend,
+        fallbackEventCodes = null
     )
 }
 

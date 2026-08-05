@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.BenchmarkResultEntity
+import com.projectnuke.fusion.util.FallbackCauseFormatter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -457,7 +458,11 @@ private fun formatSpeedRange(minSpeed: Float?, maxSpeed: Float?): String {
 
 private fun BenchmarkResultEntity.appliedSettingsLine(): String {
     val mtpText = if (mtpRequested) "MTP $mtpStatus" else "MTP 꺼짐"
-    return "적용된 설정: ${selectedTextBackend ?: accelerator} · $mtpText · maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP"
+    var result = "적용된 설정: ${selectedTextBackend ?: accelerator} · $mtpText · maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP"
+    if (!fallbackEventCodes.isNullOrBlank()) {
+        result += " · 폴백: $fallbackEventCodes"
+    }
+    return result
 }
 
 private fun Float?.formatSpeed(): String {
