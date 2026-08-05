@@ -39,6 +39,7 @@ import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.BenchmarkResultEntity
 import com.projectnuke.fusion.llm.ChatGenerationRunningException
 import com.projectnuke.fusion.llm.EngineSelectionRuntime
+import com.projectnuke.fusion.llm.FallbackReason
 import com.projectnuke.fusion.llm.FusionRuntimeLock
 import com.projectnuke.fusion.llm.GenerationOutcome
 import com.projectnuke.fusion.llm.LiteRtLlmEngine
@@ -339,8 +340,13 @@ try {
             val decodeMs = firstTokenMs?.let { totalMs - it }?.takeIf { it > 0 }
             val decodeTps = decodeMs?.let { estimatedTokens * 1000.0 / it }
             val outcomeSnapshot = success.snapshot
-            val mtpStatus = outcomeSnapshot?.mtpStatus ?: engine.lastMtpStatus
-            val runtimeSelection = outcomeSnapshot?.let {
+            // Read from the immutable snapshot — never from
+            // engine.lastMtpStatus / engine.lastRuntimeSelection, which are
+            // only meaningful for the currently loaded engine and would
+            // contradict the snapshot when present.
+            val mtpStatus = outcomeSnapshot?.mtpStatus
+                ?: MtpRuntimeStatus.OFF
+            val runtimeSelection: EngineSelectionRuntime? = outcomeSnapshot?.let {
                 EngineSelectionRuntime(
                     requestedAccelerator = it.requestedAccelerator.name,
                     actualTextBackend = it.selectedTextBackend.name,
@@ -349,7 +355,7 @@ try {
                     initializedWithMtp = it.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST,
                     fallbackReason = null
                 )
-            } ?: engine.lastRuntimeSelection
+            }
             val nativeStats = success.stats
             val effective = buildEffectiveRuntimeSettings(
                 modelName = snapshot.modelName,
@@ -423,12 +429,29 @@ onResult(resultText)
         onStatus(null)
         val userMessage = benchmarkUserErrorMessage(e, snapshot)
         Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
+        // Acquisition-failure path: use the attempt snapshot if present.
+        // If absent (legacy/preview/Cancelled/Empty branch), synthesize an
+        // attempt snapshot from the requested profile — never reread
+        // engine.lastMtpStatus / engine.lastRuntimeSelection, which are stale
+        // for a failed attempt.
+        val attemptSnapshot = e.attemptSnapshot ?: RuntimeAttemptSnapshot(
+            requestedAccelerator = snapshot.settings.accelerator,
+            fallbackEvents = emptyList(),
+            modelFingerprint = com.projectnuke.fusion.llm.ModelFingerprintSummary(
+                canonicalPath = snapshot.modelPath.orEmpty(),
+                fileSize = 0L,
+                modifiedAt = 0L,
+                validationVersion = 0,
+                mtpSupported = false
+            ),
+            mtpRequested = snapshot.settings.speculativeDecodingEnabled == true
+        )
         runCatching {
             saveBenchmarkResult(
                 context = context,
                 benchmarkDao = benchmarkDao,
                 snapshot = snapshot,
-                mtpStatus = e.attemptSnapshot?.inferredMtpStatus() ?: engine.lastMtpStatus,
+                mtpStatus = attemptSnapshot.inferredMtpStatus(),
                 modelLoadingMs = null,
                 firstTokenLatencyMs = null,
                 totalGenerationMs = 0L,
@@ -438,7 +461,7 @@ onResult(resultText)
                 success = false,
                 errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot),
                 actualBackend = null,
-                attemptSnapshot = e.attemptSnapshot
+                attemptSnapshot = attemptSnapshot
             )
         }.onFailure { saveError ->
             Log.e("FusionBenchmark", "Failed to save benchmark result", saveError)
@@ -451,12 +474,27 @@ onResult(resultText)
         onStatus(null)
         val userMessage = benchmarkUserErrorMessage(e, snapshot)
         Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
+        // Generic-exception path: construct an attempt snapshot from the
+        // requested profile. Never reread engine.lastMtpStatus or
+        // engine.lastRuntimeSelection — they are stale for a failed attempt.
+        val attemptSnapshot = RuntimeAttemptSnapshot(
+            requestedAccelerator = snapshot.settings.accelerator,
+            fallbackEvents = emptyList(),
+            modelFingerprint = com.projectnuke.fusion.llm.ModelFingerprintSummary(
+                canonicalPath = snapshot.modelPath.orEmpty(),
+                fileSize = 0L,
+                modifiedAt = 0L,
+                validationVersion = 0,
+                mtpSupported = false
+            ),
+            mtpRequested = snapshot.settings.speculativeDecodingEnabled == true
+        )
         runCatching {
             saveBenchmarkResult(
                 context = context,
                 benchmarkDao = benchmarkDao,
                 snapshot = snapshot,
-                mtpStatus = engine.lastMtpStatus,
+                mtpStatus = attemptSnapshot.inferredMtpStatus(),
                 modelLoadingMs = null,
                 firstTokenLatencyMs = null,
                 totalGenerationMs = 0L,
@@ -465,7 +503,8 @@ onResult(resultText)
                 decodeTokensPerSecond = null,
                 success = false,
                 errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot),
-                actualBackend = engine.lastRuntimeSelection?.actualTextBackend
+                actualBackend = null,
+                attemptSnapshot = attemptSnapshot
             )
         }.onFailure { saveError ->
             Log.e("FusionBenchmark", "Failed to save benchmark result", saveError)

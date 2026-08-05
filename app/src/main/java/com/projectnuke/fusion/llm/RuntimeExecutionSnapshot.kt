@@ -104,6 +104,32 @@ data class RuntimeAttemptSnapshot(
 )
 
 /**
+ * One immutable snapshot of a failed generation that happened *after* a
+ * successful Engine acquisition — i.e. the engine was selected and created
+ * but the generation itself crashed. This carries the full acquisition
+ * lineage (so callers see the requested/applied/MTP state and the fallback
+ * events that led up to the running engine) plus the [FailureKind] of the
+ * generation error, so consumers never reread mutable engine state.
+ *
+ * Distinct from [RuntimeAttemptSnapshot]:
+ *  - [RuntimeAttemptSnapshot] = acquisition failed before backend selection.
+ *    No engine was selected; `selectedTextBackend` is meaningless.
+ *  - [RuntimeFailureSnapshot] = acquisition succeeded and an Engine was
+ *    selected; the generation then failed. `selectedTextBackend` and
+ *    `mtpStatus` reflect the running engine that was used.
+ */
+data class RuntimeFailureSnapshot(
+    val requestedAccelerator: AcceleratorMode,
+    val selectedTextBackend: RuntimeBackend,
+    val selectedVisionBackend: RuntimeBackend?,
+    val mtpRequested: Boolean,
+    val mtpRuntimeStatus: MtpRuntimeStatus,
+    val fallbackEventsFromAcquisition: List<RuntimeFallbackEvent>,
+    val modelFingerprint: ModelFingerprintSummary,
+    val failureKind: FailureKind
+)
+
+/**
  * Infers the MTP runtime status from the fallback events in a failed attempt.
  * Returns FAILED if all candidates exhausted, FALLBACK_DISABLED if MTP was
  * attempted but fell back, UNSUPPORTED if MTP capability was rejected,

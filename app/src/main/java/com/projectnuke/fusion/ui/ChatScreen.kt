@@ -9952,7 +9952,7 @@ private data class OutcomeRuntimeFields(
 
 private fun outcomeRuntimeFields(
     outcome: GenerationOutcome,
-    engine: LiteRtLlmEngine
+    @Suppress("UNUSED_PARAMETER") engine: LiteRtLlmEngine
 ): OutcomeRuntimeFields {
     when (outcome) {
         is GenerationOutcome.Success -> {
@@ -9966,8 +9966,35 @@ private fun outcomeRuntimeFields(
                         ?.takeIf { it.isNotBlank() }
                 )
             }
+            // Legacy success path with no snapshot: cannot reconstruct state
+            // from stale engine without violating the snapshot contract.
+            // Report a conservative "unknown" rather than rereading engine.
+            return OutcomeRuntimeFields(
+                mtpStatus = com.projectnuke.fusion.llm.MtpRuntimeStatus.OFF,
+                actualBackend = null,
+                actualVisionBackend = null,
+                fallbackEventCodes = null
+            )
         }
         is GenerationOutcome.Failure -> {
+            // 1) Generation-after-acquisition failure: a running engine was
+            //    selected; the failure snapshot carries its backend / MTP
+            //    state / acquisition fallback events. Callers must NOT
+            //    reread engine.lastMtpStatus or engine.lastRuntimeSelection.
+            val failureSnapshot = outcome.failureSnapshot
+            if (failureSnapshot != null) {
+                return OutcomeRuntimeFields(
+                    mtpStatus = failureSnapshot.mtpRuntimeStatus,
+                    actualBackend = failureSnapshot.selectedTextBackend.name,
+                    actualVisionBackend = failureSnapshot.selectedVisionBackend?.name,
+                    fallbackEventCodes = FallbackCauseFormatter.formatEvents(failureSnapshot.fallbackEventsFromAcquisition)
+                        ?.takeIf { it.isNotBlank() }
+                )
+            }
+            // 2) Acquisition failure: no engine was selected; the attempt
+            //    snapshot carries the inferred MTP status and the fallback
+            //    events from selection. actualBackend is null because no
+            //    backend was selected.
             val attemptSnapshot = outcome.attemptSnapshot
             if (attemptSnapshot != null) {
                 return OutcomeRuntimeFields(
@@ -9978,14 +10005,23 @@ private fun outcomeRuntimeFields(
                         ?.takeIf { it.isNotBlank() }
                 )
             }
+            // 3) Legacy failure path: no snapshots at all (e.g. MODEL_NOT_FOUND,
+            //    IMAGE_NOT_FOUND where getOrCreateEngine was never reached).
+            //    Never reread engine state — report conservative unknowns.
+            return OutcomeRuntimeFields(
+                mtpStatus = com.projectnuke.fusion.llm.MtpRuntimeStatus.OFF,
+                actualBackend = null,
+                actualVisionBackend = null,
+                fallbackEventCodes = null
+            )
         }
-        else -> { /* Cancelled, Empty - fall through to legacy */ }
+        else -> { /* Cancelled, Empty - fall through to conservative defaults */ }
     }
-    // Fallback for legacy paths or when snapshot is not available
+    // Fallback for Cancelled/Empty paths: never reread engine state.
     return OutcomeRuntimeFields(
-        mtpStatus = engine.lastMtpStatus,
-        actualBackend = engine.lastRuntimeSelection?.actualTextBackend,
-        actualVisionBackend = engine.lastRuntimeSelection?.actualVisionBackend,
+        mtpStatus = com.projectnuke.fusion.llm.MtpRuntimeStatus.OFF,
+        actualBackend = null,
+        actualVisionBackend = null,
         fallbackEventCodes = null
     )
 }

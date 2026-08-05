@@ -102,8 +102,15 @@ private data class AbResult(
     val errorMessage: String? = null,
     /** Phase 8: immutable runtime snapshot captured from the Success outcome. */
     val runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
-    /** Phase 4: immutable attempt snapshot captured from the Failure outcome. */
+    /** Phase 4: immutable attempt snapshot captured from the Failure outcome
+     * when acquisition failed (engine was not selected). */
     val attemptSnapshot: com.projectnuke.fusion.llm.RuntimeAttemptSnapshot? = null,
+    /** Phase B: immutable generation-after-acquisition failure snapshot
+     * when an Engine was successfully selected but generation then crashed.
+     * Carries requested accelerator, selected text/vision backend, MTP
+     * runtime status, fallback events from acquisition, model fingerprint,
+     * and the generation failure kind. Distinct from [attemptSnapshot]. */
+    val failureSnapshot: com.projectnuke.fusion.llm.RuntimeFailureSnapshot? = null,
     /** Native benchmark stats captured from the Success outcome, when reported. */
     val nativeStats: com.projectnuke.fusion.llm.GenerationBenchmarkStats? = null
 ) {
@@ -694,6 +701,7 @@ private suspend fun runSingleAbTarget(
         }
         is GenerationOutcome.Failure -> {
             val attemptSnapshot = outcome.attemptSnapshot
+            val failureSnapshot = outcome.failureSnapshot
             AbResult(
                 targetLabel = label,
                 modelName = target.model.spec.displayName,
@@ -709,7 +717,8 @@ private suspend fun runSingleAbTarget(
                 decodeTokensPerSecond = null,
                 createdAt = System.currentTimeMillis(),
                 errorMessage = outcome.message,
-                attemptSnapshot = attemptSnapshot
+                attemptSnapshot = attemptSnapshot,
+                failureSnapshot = failureSnapshot
             )
         }
     }
@@ -788,15 +797,30 @@ private fun AbResult.settingsSummary(): String {
  * requested.
  */
 private fun AbResult.appliedRuntimeLine(): String? {
-    val snap = runtimeSnapshot ?: return null
-    val backend = snap.selectedTextBackend.name
-    val mtpState = snap.mtpStatus.name
-    val fallbackSummary = FallbackCauseFormatter.formatFallbackSummary(snap)
-    var result = "적용: $backend · MTP $mtpState"
-    if (fallbackSummary.isNotBlank()) {
-        result += " · 폴백: $fallbackSummary"
+    // Priority: success snapshot > failure snapshot (acquisition succeeded,
+    // generation crashed; the running engine's state is in the failure
+    // snapshot) > attempt snapshot (acquisition failed; no selected backend).
+    runtimeSnapshot?.let { snap ->
+        val backend = snap.selectedTextBackend.name
+        val mtpState = snap.mtpStatus.name
+        val fallbackSummary = FallbackCauseFormatter.formatFallbackSummary(snap)
+        var result = "적용: $backend · MTP $mtpState"
+        if (fallbackSummary.isNotBlank()) {
+            result += " · 폴백: $fallbackSummary"
+        }
+        return result + (snap.selectedVisionBackend?.let { " · 비전 $it" } ?: "")
     }
-    return result + (snap.selectedVisionBackend?.let { " · 비전 $it" } ?: "")
+    failureSnapshot?.let { snap ->
+        val backend = snap.selectedTextBackend.name
+        val mtpState = snap.mtpRuntimeStatus.name
+        val fallbackSummary = FallbackCauseFormatter.formatEvents(snap.fallbackEventsFromAcquisition)
+        var result = "적용: $backend · MTP $mtpState"
+        if (fallbackSummary.isNotBlank()) {
+            result += " · 폴백: $fallbackSummary"
+        }
+        return result + (snap.selectedVisionBackend?.let { " · 비전 $it" } ?: "")
+    }
+    return null
 }
 
 private fun AbResult.copyText(): String = buildString {
@@ -827,13 +851,41 @@ private fun AbResult.copyText(): String = buildString {
 private fun AbResult.toStoredResult(): StoredAbTestResult {
     val snapshot = runtimeSnapshot
     val attemptSnap = attemptSnapshot
-    val fallbackCodes = if (succeeded) {
-        runtimeSnapshot?.let { FallbackCauseFormatter.format(it) }
+    val failureSnap = failureSnapshot
+    // Machine-readable fallback event codes: prefer stable structured codes over
+    // the human-readable formatter output (see Repair Phase C). For now, this
+    // uses the formatter's pipe-separated text — Phase C2 will replace it with
+    // a JSON array. The point of Phase B is that *localized prose* (Korean/Chinese)
+    // is never stored as a code: `format()` is a stable pipe-delimited summary,
+    // not localized user-facing prose; `formatAttemptsFallbackSummary()` and
+    // `formatFallbackSummary()` are the localized-prose variants and are
+    // NOT used here.
+    val fallbackCodes = when {
+        succeeded -> snapshot?.let { FallbackCauseFormatter.format(it) }
             ?.takeIf { it.isNotBlank() }
-    } else {
-        attemptSnapshot?.let { FallbackCauseFormatter.format(it) }
+        failureSnap != null -> FallbackCauseFormatter.formatEvents(failureSnap.fallbackEventsFromAcquisition)
             ?.takeIf { it.isNotBlank() }
+        attemptSnap != null -> FallbackCauseFormatter.formatEvents(attemptSnap.fallbackEvents)
+            ?.takeIf { it.isNotBlank() }
+        else -> null
     }
+    // Resolve model fingerprint fields from whichever snapshot captured them.
+    // Priority: success snapshot > failure snapshot > attempt snapshot.
+    val fpPath = snapshot?.modelFingerprint?.canonicalPath
+        ?: failureSnap?.modelFingerprint?.canonicalPath
+        ?: attemptSnap?.modelFingerprint?.canonicalPath
+    val fpSize = snapshot?.modelFingerprint?.fileSize
+        ?: failureSnap?.modelFingerprint?.fileSize
+        ?: attemptSnap?.modelFingerprint?.fileSize
+    val fpModifiedAt = snapshot?.modelFingerprint?.modifiedAt
+        ?: failureSnap?.modelFingerprint?.modifiedAt
+        ?: attemptSnap?.modelFingerprint?.modifiedAt
+    val fpValidationVersion = snapshot?.modelFingerprint?.validationVersion
+        ?: failureSnap?.modelFingerprint?.validationVersion
+        ?: attemptSnap?.modelFingerprint?.validationVersion
+    val fpMtpSupported = snapshot?.modelFingerprint?.mtpSupported
+        ?: failureSnap?.modelFingerprint?.mtpSupported
+        ?: attemptSnap?.modelFingerprint?.mtpSupported
     return StoredAbTestResult(
         targetLabel = targetLabel,
         modelName = modelName,
@@ -854,19 +906,22 @@ private fun AbResult.toStoredResult(): StoredAbTestResult {
         estimatedTokens = estimatedTokens,
         totalTokensPerSecond = totalTokensPerSecond,
         decodeTokensPerSecond = decodeTokensPerSecond,
-        selectedTextBackend = snapshot?.selectedTextBackend?.name,
-        selectedVisionBackend = snapshot?.selectedVisionBackend?.name,
-        mtpRuntimeStatus = snapshot?.mtpStatus?.name,
+        selectedTextBackend = snapshot?.selectedTextBackend?.name
+            ?: failureSnap?.selectedTextBackend?.name,
+        selectedVisionBackend = snapshot?.selectedVisionBackend?.name
+            ?: failureSnap?.selectedVisionBackend?.name,
+        mtpRuntimeStatus = snapshot?.mtpStatus?.name
+            ?: failureSnap?.mtpRuntimeStatus?.name,
         fallbackEventCodes = fallbackCodes,
         nativeTtftSeconds = nativeStats?.timeToFirstTokenSeconds,
         nativePrefillTokensPerSecond = nativeStats?.prefillTokensPerSecond,
         nativeDecodeTokensPerSecond = nativeStats?.decodeTokensPerSecond,
-        modelFingerprintPath = snapshot?.modelFingerprint?.canonicalPath
-            ?: attemptSnap?.modelFingerprint?.canonicalPath,
-        modelFingerprintSize = snapshot?.modelFingerprint?.fileSize
-            ?: attemptSnap?.modelFingerprint?.fileSize,
-        modelFingerprintModifiedAt = snapshot?.modelFingerprint?.modifiedAt
-            ?: attemptSnap?.modelFingerprint?.modifiedAt
+        modelFingerprintPath = fpPath,
+        modelFingerprintSize = fpSize,
+        modelFingerprintModifiedAt = fpModifiedAt,
+        modelFingerprintValidationVersion = fpValidationVersion,
+        modelFingerprintMtpSupported = fpMtpSupported,
+        generationFailureKind = failureSnap?.failureKind?.name
     )
 }
 

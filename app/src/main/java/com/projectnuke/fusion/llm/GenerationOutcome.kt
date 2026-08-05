@@ -46,13 +46,26 @@ sealed interface GenerationOutcome {
      * Generation failed with a recoverable error. [kind] is a stable
      * machine-readable category; [message] is a user-safe localized
      * explanation never populated from raw server/native output.
-     * [attemptSnapshot] carries the immutable attempt snapshot so callers
-     * never reread engine state after failure to reconstruct what happened.
+     *
+     * [attemptSnapshot] carries the immutable acquisition-failure snapshot
+     * so callers never reread engine state after an *acquisition* failure.
+     * Null when acquisition succeeded but the generation itself crashed.
+     *
+     * [failureSnapshot] carries the immutable generation-after-acquisition
+     * failure snapshot — the requested accelerator, the selected text/vision
+     * backend of the running engine, the MTP runtime status, the fallback
+     * events from acquisition, and the generation failure kind. Null when
+     * the failure happened during acquisition, not after.
+     *
+     * Exactly one of [attemptSnapshot] / [failureSnapshot] is non-null for
+     * any typed failure; the legacy constructor keeps [attemptSnapshot]
+     * nullable for older call sites that have not yet been migrated.
      */
     data class Failure(
         val kind: FailureKind,
         val message: String,
-        val attemptSnapshot: RuntimeAttemptSnapshot? = null
+        val attemptSnapshot: RuntimeAttemptSnapshot? = null,
+        val failureSnapshot: RuntimeFailureSnapshot? = null
     ) : GenerationOutcome
 }
 

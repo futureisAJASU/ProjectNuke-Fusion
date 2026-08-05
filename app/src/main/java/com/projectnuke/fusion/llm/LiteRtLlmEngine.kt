@@ -192,7 +192,7 @@ class LiteRtLlmEngine(
                 throw e
             } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM generation failed", e)
-                return@withContext classifyGenerationException(e, isMultimodal = false)
+                return@withContext classifyGenerationException(e, isMultimodal = false, profile = resolvedProfile)
             }
 
             val sanitized = promptAdapter.sanitizeOutput(output.toString())
@@ -326,7 +326,7 @@ class LiteRtLlmEngine(
                 throw e
             } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM multimodal generation failed", e)
-                return@withContext classifyGenerationException(e, isMultimodal = true)
+                return@withContext classifyGenerationException(e, isMultimodal = true, profile = resolvedProfile)
             }
 
             val sanitized = promptAdapter.sanitizeOutput(output.toString())
@@ -360,7 +360,8 @@ class LiteRtLlmEngine(
 
     private fun classifyGenerationException(
         error: Throwable,
-        isMultimodal: Boolean
+        isMultimodal: Boolean,
+        profile: RequestedEngineProfile
     ): GenerationOutcome.Failure {
         val kind = when {
             isMultimodal && isVisionBackendUnsupported(error) -> FailureKind.MODEL_MULTIMODAL_UNSUPPORTED
@@ -375,7 +376,37 @@ class LiteRtLlmEngine(
             FailureKind.GENERATION_INTERRUPTED -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
             else -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
         }
-        return GenerationOutcome.Failure(kind = kind, message = message)
+        // Build the immutable generation-after-acquisition failure snapshot
+        // from the currently loaded engine state. Callers will read this
+        // snapshot, never `engine.lastMtpStatus` or `engine.lastRuntimeSelection`.
+        val loaded = loadedState
+        val fingerprint = ModelFingerprint.of(profile.modelPath)
+        val failureSnapshot = if (loaded != null) {
+            RuntimeFailureSnapshot(
+                requestedAccelerator = profile.accelerator,
+                selectedTextBackend = loaded.actualTextBackend.toRuntimeBackend(),
+                selectedVisionBackend = loaded.actualVisionBackend?.toRuntimeBackend(),
+                mtpRequested = profile.mtpRequested,
+                mtpRuntimeStatus = loaded.mtpStatus,
+                fallbackEventsFromAcquisition = loaded.fallbackEvents,
+                modelFingerprint = ModelFingerprintSummary(
+                    canonicalPath = fingerprint.canonicalPath,
+                    fileSize = fingerprint.fileSize,
+                    modifiedAt = fingerprint.modifiedAt,
+                    validationVersion = fingerprint.validationVersion,
+                    mtpSupported = fingerprint.mtpSupported
+                ),
+                failureKind = kind
+            )
+        } else {
+            null
+        }
+        return GenerationOutcome.Failure(
+            kind = kind,
+            message = message,
+            attemptSnapshot = null,
+            failureSnapshot = failureSnapshot
+        )
     }
 
     private fun getOrCreateEngine(profile: RequestedEngineProfile): Engine {

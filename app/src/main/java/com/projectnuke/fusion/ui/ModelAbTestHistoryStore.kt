@@ -48,6 +48,15 @@ data class StoredAbTestResult(
     val modelFingerprintPath: String? = null,
     val modelFingerprintSize: Long? = null,
     val modelFingerprintModifiedAt: Long? = null,
+    /** Phase B: preserve the full model fingerprint including validator
+     * version and MTP capability so stored history distinguishes a model
+     * whose drafter support changed across a model-file replacement. */
+    val modelFingerprintValidationVersion: Int? = null,
+    val modelFingerprintMtpSupported: Boolean? = null,
+    /** Phase B: machine-readable generation failure kind when [success] is
+     * false. Null for acquisition failures that never reached a running
+     * engine, and for successful targets. */
+    val generationFailureKind: String? = null,
     val rating: AbResultRating = AbResultRating.NONE
 )
 
@@ -193,6 +202,9 @@ private fun StoredAbTestResult.toJson(): JSONObject {
     modelFingerprintPath?.let { obj.put("modelFingerprintPath", it) }
     modelFingerprintSize?.let { obj.put("modelFingerprintSize", it) }
     modelFingerprintModifiedAt?.let { obj.put("modelFingerprintModifiedAt", it) }
+    modelFingerprintValidationVersion?.let { obj.put("modelFingerprintValidationVersion", it) }
+    modelFingerprintMtpSupported?.let { obj.put("modelFingerprintMtpSupported", it) }
+    generationFailureKind?.let { obj.put("generationFailureKind", it) }
     return obj
 }
 
@@ -241,6 +253,9 @@ private fun JSONObject.toStoredResult(): StoredAbTestResult? {
         modelFingerprintPath = optString("modelFingerprintPath").takeIf { has("modelFingerprintPath") && it.isNotBlank() },
         modelFingerprintSize = if (has("modelFingerprintSize")) optLong("modelFingerprintSize") else null,
         modelFingerprintModifiedAt = if (has("modelFingerprintModifiedAt")) optLong("modelFingerprintModifiedAt") else null,
+        modelFingerprintValidationVersion = if (has("modelFingerprintValidationVersion")) optInt("modelFingerprintValidationVersion") else null,
+        modelFingerprintMtpSupported = if (has("modelFingerprintMtpSupported")) optBoolean("modelFingerprintMtpSupported") else null,
+        generationFailureKind = optString("generationFailureKind").takeIf { has("generationFailureKind") && it.isNotBlank() },
         rating = runCatching { AbResultRating.valueOf(optString("rating", AbResultRating.NONE.name)) }
             .getOrDefault(AbResultRating.NONE)
     )
