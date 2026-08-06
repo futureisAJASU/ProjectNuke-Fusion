@@ -137,10 +137,14 @@ data class RuntimeFailureSnapshot(
  */
 fun RuntimeAttemptSnapshot.inferredMtpStatus(): MtpRuntimeStatus = when {
     !mtpRequested -> MtpRuntimeStatus.OFF
+    // Terminal failures take precedence. An all-candidates-exhausted or
+    // all-candidates-skipped failure means the entire acquisition ladder
+    // was defeated — even if an earlier MTP candidate contributed a
+    // cooldown or init-failure event, the terminal conclusion is FAILED.
+    fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_EXHAUSTED } -> MtpRuntimeStatus.FAILED
+    fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE } -> MtpRuntimeStatus.FAILED
     fallbackEvents.any { it.reason == FallbackReason.MTP_UNSUPPORTED } -> MtpRuntimeStatus.UNSUPPORTED
     fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE } -> MtpRuntimeStatus.FALLBACK_DISABLED
     fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED } -> MtpRuntimeStatus.FALLBACK_DISABLED
-    fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_EXHAUSTED } -> MtpRuntimeStatus.FAILED
-    fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE } -> MtpRuntimeStatus.FAILED
     else -> MtpRuntimeStatus.FAILED
 }

@@ -48,6 +48,7 @@ import com.projectnuke.fusion.llm.FusionRuntimeManager
 import com.projectnuke.fusion.llm.MtpRuntimeStatus
 import com.projectnuke.fusion.llm.GenerationBenchmarkStats
 import com.projectnuke.fusion.llm.RuntimeAttemptSnapshot
+import com.projectnuke.fusion.llm.RuntimeFailureSnapshot
 import com.projectnuke.fusion.llm.inferredMtpStatus
 import com.projectnuke.fusion.llm.RuntimeComponentBackend
 import com.projectnuke.fusion.model.AcceleratorMode
@@ -320,13 +321,15 @@ try {
                         is GenerationOutcome.Success -> ""
                         is GenerationOutcome.Failure -> "generation failed: ${outcome.kind}"
                     }
-                    // Capture attempt snapshot for failed runs before throwing
-                    val attemptSnapshot = (outcome as? GenerationOutcome.Failure)?.attemptSnapshot
-                    throw BenchmarkFailedException(reason, attemptSnapshot)
+                    val asFailure = outcome as? GenerationOutcome.Failure
+                    val attemptSnapshot = asFailure?.attemptSnapshot
+                    val failureSnapshot = asFailure?.failureSnapshot
+                    throw BenchmarkFailedException(reason, attemptSnapshot, failureSnapshot)
                 }
                 is GenerationOutcome.Failure -> {
                     val attemptSnapshot = outcome.attemptSnapshot
-                    throw BenchmarkFailedException("generation failed: ${outcome.kind}", attemptSnapshot)
+                    val failureSnapshot = outcome.failureSnapshot
+                    throw BenchmarkFailedException("generation failed: ${outcome.kind}", attemptSnapshot, failureSnapshot)
                 }
                 is GenerationOutcome.Success -> {
                     /* continue with success path below */
@@ -431,29 +434,36 @@ onResult(resultText)
         onStatus(null)
         val userMessage = benchmarkUserErrorMessage(e, snapshot)
         Toast.makeText(context, userMessage, Toast.LENGTH_SHORT).show()
-        // Acquisition-failure path: use the attempt snapshot if present.
-        // If absent (legacy/preview/Cancelled/Empty branch), synthesize an
-        // attempt snapshot from the requested profile — never reread
-        // engine.lastMtpStatus / engine.lastRuntimeSelection, which are stale
-        // for a failed attempt.
+        // Phase 2: when a generation-after-acquisition failureSnapshot exists,
+        // use its real fingerprint and MTP status instead of fabricated
+        // defaults. The failureSnapshot captures the loaded engine state
+        // that existed when generation crashed, including the selected
+        // backend, MTP runtime status, and model fingerprint.
         val attemptSnapshot = e.attemptSnapshot ?: RuntimeAttemptSnapshot(
             requestedAccelerator = snapshot.settings.accelerator,
-            fallbackEvents = emptyList(),
-            modelFingerprint = com.projectnuke.fusion.llm.ModelFingerprintSummary(
-                canonicalPath = snapshot.modelPath.orEmpty(),
-                fileSize = 0L,
-                modifiedAt = 0L,
-                validationVersion = 0,
-                mtpSupported = false
-            ),
+            fallbackEvents = e.failureSnapshot?.fallbackEventsFromAcquisition ?: emptyList(),
+            modelFingerprint = if (e.failureSnapshot != null) {
+                e.failureSnapshot!!.modelFingerprint
+            } else {
+                com.projectnuke.fusion.llm.ModelFingerprintSummary(
+                    canonicalPath = snapshot.modelPath.orEmpty(),
+                    fileSize = 0L,
+                    modifiedAt = 0L,
+                    validationVersion = 0,
+                    mtpSupported = false
+                )
+            },
             mtpRequested = snapshot.settings.speculativeDecodingEnabled == true
         )
+        val mtpStatus = e.failureSnapshot?.mtpRuntimeStatus
+            ?: attemptSnapshot.inferredMtpStatus()
+        val actualBackend = e.failureSnapshot?.selectedTextBackend?.name
         runCatching {
             saveBenchmarkResult(
                 context = context,
                 benchmarkDao = benchmarkDao,
                 snapshot = snapshot,
-                mtpStatus = attemptSnapshot.inferredMtpStatus(),
+                mtpStatus = mtpStatus,
                 modelLoadingMs = null,
                 firstTokenLatencyMs = null,
                 totalGenerationMs = 0L,
@@ -462,7 +472,7 @@ onResult(resultText)
                 decodeTokensPerSecond = null,
                 success = false,
                 errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot),
-                actualBackend = null,
+                actualBackend = actualBackend,
                 attemptSnapshot = attemptSnapshot
             )
         }.onFailure { saveError ->
@@ -836,5 +846,6 @@ private fun Context.appVersionName(): String? {
  */
 internal class BenchmarkFailedException(
     val reason: String,
-    val attemptSnapshot: RuntimeAttemptSnapshot? = null
+    val attemptSnapshot: RuntimeAttemptSnapshot? = null,
+    val failureSnapshot: RuntimeFailureSnapshot? = null
 ) : RuntimeException("Benchmark failed: $reason")
