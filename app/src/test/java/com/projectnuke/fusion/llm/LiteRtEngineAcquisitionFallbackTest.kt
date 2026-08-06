@@ -1,11 +1,19 @@
 package com.projectnuke.fusion.llm
 
+import com.projectnuke.fusion.model.AcceleratorMode
+import com.projectnuke.fusion.model.RequestedEngineProfile
 import org.junit.Assert.*
 import org.junit.Test
 
+/**
+ * Dummy class for testing - used as the generic type for selectFirstWorkingEngine.
+ * Must not extend Engine (which is final).
+ */
 private class DummyEngine
 
 class LiteRtEngineAcquisitionFallbackTest {
+
+    private val dummyEngine = DummyEngine()
 
     @Test
     fun case1_capabilityRejectedMTP_recordsMTP_UNSUPPORTED_andFallsThrough() {
@@ -17,14 +25,14 @@ class LiteRtEngineAcquisitionFallbackTest {
         val outcome = selectFirstWorkingEngine<DummyEngine>(
             ladder,
             enableVisionBackend = false,
-            configureFlag = { flag ->
+            configureFlag = { flag: Boolean ->
                 configureCalls.add(flag)
                 true
             },
-            tryCreate = { _, mtpEnabled, _ ->
+            tryCreate = { _: String, mtpEnabled: Boolean, _: Boolean ->
                 if (mtpEnabled) EngineCandidateAttempt.CapabilityRejected("GPU", true)
-                else EngineCandidateAttempt.Success(DummyEngine())
-            }
+                else EngineCandidateAttempt.Success(dummyEngine)
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNotNull("selection should not be null", outcome.selection)
@@ -50,7 +58,7 @@ class LiteRtEngineAcquisitionFallbackTest {
         val outcome = selectFirstWorkingEngine<DummyEngine>(
             ladder = ladder,
             enableVisionBackend = false,
-            configureFlag = { mtp ->
+            configureFlag = { mtp: Boolean ->
                 if (mtp) {
                     mtpConfigureAttempted = true
                     false
@@ -58,9 +66,9 @@ class LiteRtEngineAcquisitionFallbackTest {
                     true
                 }
             },
-            tryCreate = { _, _, _ ->
-                EngineCandidateAttempt.Success(DummyEngine())
-            }
+            tryCreate = { _: String, _: Boolean, _: Boolean ->
+                EngineCandidateAttempt.Success(dummyEngine)
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNotNull(outcome.selection)
@@ -81,8 +89,8 @@ class LiteRtEngineAcquisitionFallbackTest {
         )
         var gpuPlainDisableFailed = false
 
-        val configureFlag: (Boolean) -> Boolean = { flag ->
-            if (!flag && !gpuPlainDisableFailed) {
+        val configureFlag: (Boolean) -> Boolean = { flag: Boolean ->
+            if ((flag == false) && !gpuPlainDisableFailed) {
                 gpuPlainDisableFailed = true
                 false
             } else {
@@ -94,9 +102,9 @@ class LiteRtEngineAcquisitionFallbackTest {
             ladder = ladder,
             enableVisionBackend = false,
             configureFlag = configureFlag,
-            tryCreate = { _, _, _ ->
-                EngineCandidateAttempt.Success(DummyEngine())
-            }
+            tryCreate = { _: String, _: Boolean, _: Boolean ->
+                EngineCandidateAttempt.Success(dummyEngine)
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNotNull(outcome.selection)
@@ -120,11 +128,11 @@ class LiteRtEngineAcquisitionFallbackTest {
             ladder = ladder,
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { _, mtpEnabled, _ ->
+            tryCreate = { _: String, mtpEnabled: Boolean, _: Boolean ->
                 EngineCandidateAttempt.InitializationFailed(
                     RuntimeException("init failure mtp=$mtpEnabled")
                 )
-            }
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNull(outcome.selection)
@@ -153,9 +161,9 @@ class LiteRtEngineAcquisitionFallbackTest {
             ladder = emptyList(),
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { _, _, _ ->
-                EngineCandidateAttempt.Success(DummyEngine())
-            }
+            tryCreate = { _: String, _: Boolean, _: Boolean ->
+                EngineCandidateAttempt.Success(dummyEngine)
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNull(outcome.selection)
@@ -174,10 +182,10 @@ class LiteRtEngineAcquisitionFallbackTest {
             ladder = ladder,
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { _, mtpEnabled, _ ->
+            tryCreate = { _: String, mtpEnabled: Boolean, _: Boolean ->
                 if (mtpEnabled) EngineCandidateAttempt.InitializationFailed(RuntimeException("MTP init fail"))
-                else EngineCandidateAttempt.Success(DummyEngine())
-            }
+                else EngineCandidateAttempt.Success(dummyEngine)
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNotNull(outcome.selection)
@@ -201,15 +209,15 @@ class LiteRtEngineAcquisitionFallbackTest {
             ladder = ladder,
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { backendName, mtpEnabled, _ ->
+            tryCreate = { backendName: String, mtpEnabled: Boolean, _: Boolean ->
                 when {
-                    backendName == "GPU" && !mtpEnabled ->
+                    backendName == "GPU" && (mtpEnabled == false) ->
                         EngineCandidateAttempt.InitializationFailed(RuntimeException("GPU init fail"))
-                    backendName == "CPU" && !mtpEnabled ->
-                        EngineCandidateAttempt.Success(DummyEngine())
+                    backendName == "CPU" && (mtpEnabled == false) ->
+                        EngineCandidateAttempt.Success(dummyEngine)
                     else -> error("unexpected")
                 }
-            }
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNotNull(outcome.selection)
@@ -229,7 +237,7 @@ class LiteRtEngineAcquisitionFallbackTest {
     }
 
     @Test
-    fun GPU_MTP_plain_CPU_all_fail_only_backend_failures_no_bridge_events() {
+    fun `GPU_MTP_plain_CPU_all_fail_only_backend_failures_no_bridge_events`() {
         val ladder = listOf(
             EngineCandidate("GPU", mtpEnabled = true),
             EngineCandidate("GPU", mtpEnabled = false),
@@ -240,9 +248,9 @@ class LiteRtEngineAcquisitionFallbackTest {
             ladder = ladder,
             enableVisionBackend = false,
             configureFlag = { true },
-            tryCreate = { _, _, _ ->
+            tryCreate = { _: String, _: Boolean, _: Boolean ->
                 EngineCandidateAttempt.InitializationFailed(RuntimeException("all fail"))
-            }
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
         )
 
         assertNull(outcome.selection)
@@ -257,5 +265,75 @@ class LiteRtEngineAcquisitionFallbackTest {
         outcome.fallbackEvents.forEach { event ->
             assertNull(event.selectedReplacementBackend)
         }
+    }
+
+    @Test
+    fun case9_GPU_vision_backend_fails_then_CPU_vision_succeeds() {
+        val ladder = listOf(
+            EngineCandidate("GPU", mtpEnabled = false)
+        )
+
+        val outcome = selectFirstWorkingEngine<DummyEngine>(
+            ladder = ladder,
+            enableVisionBackend = true,
+            configureFlag = { true },
+            tryCreate = { _: String, _: Boolean, visionCpu: Boolean ->
+                if (!visionCpu) EngineCandidateAttempt.InitializationFailed(RuntimeException("GPU vision fail"))
+                else EngineCandidateAttempt.Success(dummyEngine)
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
+        )
+
+        assertNotNull(outcome.selection)
+        assertEquals("GPU", outcome.selection!!.backendName)
+        assertEquals("CPU", outcome.selection!!.visionBackend)
+        assertEquals(1, outcome.fallbackEvents.size)
+        val event = outcome.fallbackEvents[0]
+        assertEquals(FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED, event.reason)
+        assertEquals(RuntimeBackend.GPU, event.attemptedTextBackend)
+        assertEquals(RuntimeBackend.GPU, event.attemptedVisionBackend)
+        assertEquals(RuntimeBackend.CPU, event.selectedReplacementBackend)
+    }
+
+    @Test
+    fun case10_GPU_plain_fails_CPU_also_fails_no_bridge_event() {
+        val ladder = listOf(
+            EngineCandidate("GPU", mtpEnabled = false),
+            EngineCandidate("CPU", mtpEnabled = false)
+        )
+
+        val outcome = selectFirstWorkingEngine<DummyEngine>(
+            ladder = ladder,
+            enableVisionBackend = false,
+            configureFlag = { true },
+            tryCreate = { backendName: String, mtpEnabled: Boolean, _: Boolean ->
+                EngineCandidateAttempt.InitializationFailed(RuntimeException("$backendName init fail"))
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
+        )
+
+        assertNull(outcome.selection)
+        assertEquals(2, outcome.fallbackEvents.size)
+        val allReasons = outcome.fallbackEvents.map { it.reason }
+        assertTrue(allReasons.all { it == FallbackReason.BACKEND_ENGINE_INIT_FAILED })
+        outcome.fallbackEvents.forEach { assertNull(it.selectedReplacementBackend) }
+    }
+
+    @Test
+    fun case12_exact_match_reuse_cached_engine_without_ladder() {
+        val ladder = listOf(
+            EngineCandidate("GPU", mtpEnabled = true),
+            EngineCandidate("GPU", mtpEnabled = false)
+        )
+
+        val outcome = selectFirstWorkingEngine<DummyEngine>(
+            ladder = ladder,
+            enableVisionBackend = false,
+            configureFlag = { true },
+            tryCreate = { _: String, _: Boolean, _: Boolean ->
+                EngineCandidateAttempt.Success(dummyEngine)
+            } as (String, Boolean, Boolean) -> EngineCandidateAttempt<DummyEngine>
+        )
+
+        assertNotNull(outcome.selection)
+        assertEquals(true, outcome.selection!!.selectedMtpEnabled)
     }
 }
