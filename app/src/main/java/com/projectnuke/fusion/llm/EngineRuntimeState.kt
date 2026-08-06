@@ -60,5 +60,12 @@ internal data class LoadedRuntimeState(
     val runtimeSelection: EngineSelectionRuntime,
     val actualTextBackend: String,
     val actualVisionBackend: String?,
+    /**
+     * Stable events belonging to the Engine acquisition (e.g. MTP_ENGINE_INIT_FAILED,
+     * GPU_TEXT_ENGINE_FAILED_CPU_SELECTED). Set once on fresh Engine init and never
+     * mutated. Request-local cooldown/skip events do NOT live here — they are carried
+     * in [LiteRtLlmEngine.currentRequestFallbackEvents] for the lifetime of a single
+     * generate call and are combined with this list at snapshot-build time.
+     */
     val fallbackEvents: List<RuntimeFallbackEvent> = emptyList()
 )

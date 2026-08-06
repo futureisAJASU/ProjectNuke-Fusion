@@ -77,6 +77,16 @@ class LiteRtLlmEngine(
         get() = loadedState?.runtimeSelection
 
     /**
+     * Phase 1: request-local fallback events live here for the lifetime of one
+     * generate/generateStreaming call. Combined with [loadedState].fallbackEvents
+     * (stable acquisition events) at snapshot-build time. Never written back
+     * into loadedState, so a reused Engine never inherits another request's
+     * cooldown or skip events.
+     */
+    @Volatile
+    private var currentRequestFallbackEvents: List<RuntimeFallbackEvent> = emptyList()
+
+    /**
      * Updates the native LiteRT-LM minimum log severity at runtime. Used by
      * benchmark / debug mode to lower the threshold to WARNING so internal
      * component-placement (sampler) diagnostics surface; production mode keeps
@@ -381,6 +391,10 @@ class LiteRtLlmEngine(
         // snapshot, never `engine.lastMtpStatus` or `engine.lastRuntimeSelection`.
         val loaded = loadedState
         val fingerprint = ModelFingerprint.of(profile.modelPath)
+        val combinedEvents = combineFallbackEvents(
+            loaded?.fallbackEvents ?: emptyList(),
+            currentRequestFallbackEvents
+        )
         val failureSnapshot = if (loaded != null) {
             RuntimeFailureSnapshot(
                 requestedAccelerator = profile.accelerator,
@@ -388,7 +402,7 @@ class LiteRtLlmEngine(
                 selectedVisionBackend = loaded.actualVisionBackend?.toRuntimeBackend(),
                 mtpRequested = profile.mtpRequested,
                 mtpRuntimeStatus = loaded.mtpStatus,
-                fallbackEventsFromAcquisition = loaded.fallbackEvents,
+                fallbackEventsFromAcquisition = combinedEvents,
                 modelFingerprint = ModelFingerprintSummary(
                     canonicalPath = fingerprint.canonicalPath,
                     fileSize = fingerprint.fileSize,
@@ -507,16 +521,13 @@ class LiteRtLlmEngine(
                 if (isPlannedCandidate) {
                     Log.i("FusionLiteRT", "All candidates skipped; reusing exactly matching live engine for plan")
                     lastMtpStatus = currentLoadedState.mtpStatus
-                    // Copy current request's skip events into a new request
-                    // snapshot. Do NOT mutate or accumulate unbounded historical
-                    // fallback events in the loaded Engine state — construct a
-                    // fresh LoadedRuntimeState with only the current request
-                    // event list appended so the reuse snapshot is pure.
-                    val updatedState = currentLoadedState.copy(
-                        fallbackEvents = currentLoadedState.fallbackEvents + recordedFallbackEvents
-                    )
-                    loadedState = updatedState
-                    return updatedState.engine
+                    // Phase 1: request-local cooldown/skip events are NOT merged
+                    // into the loaded Engine state. The stable acquisition events
+                    // in loadedState remain unchanged, and the current request's
+                    // local events are carried in currentRequestFallbackEvents so
+                    // the snapshot is pure for this request alone.
+                    currentRequestFallbackEvents = recordedFallbackEvents
+                    return currentLoadedState.engine
                 }
             }
             recordedFallbackEvents += RuntimeFallbackEvent(
@@ -554,13 +565,11 @@ class LiteRtLlmEngine(
             Log.i("FusionLiteRT", "Backend: $preferredBackendName")
             Log.i("FusionLiteRT", "Vision backend requested: ${profile.enableVisionBackend}")
             Log.i("FusionLiteRT", "Model path: ${File(profile.modelPath).name}")
-            // Include current request's skip events in the loaded engine's snapshot
-            if (recordedFallbackEvents.isNotEmpty()) {
-                val updatedState = currentState.copy(
-                    fallbackEvents = currentState.fallbackEvents + recordedFallbackEvents
-                )
-                loadedState = updatedState
-            }
+            // Phase 1: request-local cooldown/skip events are NOT merged
+            // into the loaded Engine state. They are carried in
+            // currentRequestFallbackEvents and combined with stable
+            // acquisition events at snapshot-build time.
+            currentRequestFallbackEvents = recordedFallbackEvents
             return currentState.engine
         }
 
@@ -745,6 +754,10 @@ class LiteRtLlmEngine(
             fallbackReason = selectionFirstReason ?: fallbackReason
         )
 
+        // Phase 1: fresh Engine init stores only the acquisition events.
+        // Request-local cooldown events are cleared — there are no pending
+        // skip events to carry forward from this init.
+        currentRequestFallbackEvents = emptyList()
         // The stored key reflects the engine actually loaded (the selected MTP
         // state), so a later fallback is reused until the memory skip kicks in.
         loadedState = LoadedRuntimeState(
@@ -805,12 +818,20 @@ class LiteRtLlmEngine(
      * reason string, so multiple concurrent fallbacks (MTP + backend) survive.
      * [samplerBackend] is UNKNOWN until a stable LiteRT-LM API reports sampler
      * placement (see Phase 9).
+     *
+     * Phase 1: combines stable acquisition events from [loadedState] with the
+     * current request's local cooldown/skip events. Neither list is ever
+     * mutated by this merge.
      */
     private fun buildRuntimeExecutionSnapshot(
         profile: RequestedEngineProfile
     ): RuntimeExecutionSnapshot? {
         val state = loadedState ?: return null
         val fingerprint = state.key.fingerprint
+        val combinedEvents = combineFallbackEvents(
+            state.fallbackEvents,
+            currentRequestFallbackEvents
+        )
         return RuntimeExecutionSnapshot(
             requestedAccelerator = profile.accelerator,
             selectedTextBackend = state.actualTextBackend.toRuntimeBackend(),
@@ -818,7 +839,7 @@ class LiteRtLlmEngine(
             samplerBackend = RuntimeComponentBackend.UNKNOWN,
             mtpRequested = profile.mtpRequested,
             mtpStatus = state.mtpStatus,
-            fallbackEvents = state.fallbackEvents,
+            fallbackEvents = combinedEvents,
             modelFingerprint = ModelFingerprintSummary(
                 canonicalPath = fingerprint.canonicalPath,
                 fileSize = fingerprint.fileSize,
@@ -829,6 +850,16 @@ class LiteRtLlmEngine(
         )
     }
 
+    /**
+     * Phase 1: deterministic combination of stable Engine acquisition events
+     * and request-local cooldown/skip events. Both lists are immutable.
+     * Duplicate consecutive events are collapsed using an explicit bounded
+     * deduplication policy: a duplicate is defined as having the same
+     * [RuntimeFallbackEvent.reason], [RuntimeFallbackEvent.attemptedTextBackend],
+     * [RuntimeFallbackEvent.attemptedMtpEnabled], and
+     * [RuntimeFallbackEvent.attemptedVisionBackend]; no more than 2 consecutive
+     * duplicates are kept.
+     */
     private fun buildSamplerConfig(options: ConversationOptions): SamplerConfig {        val topK = options.topK.coerceAtLeast(1)
         val topP = options.topP.coerceIn(0f, 1f).toDouble()
         val temperature = options.temperature.coerceAtLeast(0f).toDouble()
@@ -1679,3 +1710,42 @@ internal class MtpFailureMemory(
         }
     }
 }
+
+/**
+ * Phase 1: deterministic combination of stable Engine acquisition events
+ * and request-local cooldown/skip events.
+ */
+internal fun combineFallbackEvents(
+    acquisitionEvents: List<RuntimeFallbackEvent>,
+    requestLocalEvents: List<RuntimeFallbackEvent>
+): List<RuntimeFallbackEvent> {
+    val merged = listOfNotNull(acquisitionEvents, requestLocalEvents).flatten()
+    if (merged.isEmpty()) return emptyList()
+    val result = mutableListOf<RuntimeFallbackEvent>()
+    for (i in merged.indices) {
+        val event = merged[i]
+        // First two items always pass.
+        if (i < 2) {
+            result.add(event)
+            continue
+        }
+        // At this point result.size >= 2.
+        val prev = result[result.lastIndex]
+        if (!isDuplicateFallback(prev, event)) {
+            result.add(event)
+            continue
+        }
+        val prevPrev = result[result.lastIndex - 1]
+        if (!isDuplicateFallback(prevPrev, event)) {
+            result.add(event)
+        }
+        // Otherwise this is the 3rd+ consecutive duplicate → skip
+    }
+    return result
+}
+
+private fun isDuplicateFallback(a: RuntimeFallbackEvent, b: RuntimeFallbackEvent): Boolean =
+    a.reason == b.reason &&
+        a.attemptedTextBackend == b.attemptedTextBackend &&
+        a.attemptedMtpEnabled == b.attemptedMtpEnabled &&
+        a.attemptedVisionBackend == b.attemptedVisionBackend
