@@ -39,6 +39,7 @@ android {
         compose = true
     }
     testOptions {
+        unitTests.isReturnDefaultValues = true
         unitTests.all { test ->
             test.systemProperty(
                 "litertlm.golden.path",

@@ -892,6 +892,32 @@ class LiteRtLlmEngine(
     }
 
     /**
+     * Phase D: typed durability state of the Engine-owned failure memory.
+     *
+     *  - [FailureMemoryDurability.NotAttempted]: no save/clear operation has
+     *    been attempted yet since the Engine was constructed.
+     *  - [FailureMemoryDurability.Durable]: the last save/clear succeeded;
+     *    cooldown is expected to survive a process restart.
+     *  - [FailureMemoryDurability.InMemoryOnly]: the last save/clear either
+     *    returned false or threw. Cooldown still works for the lifetime of
+     *    this Engine instance but will NOT survive a restart. [cause]
+     *    carries the typed exception (or a synthetic IllegalStateException
+     *    when storage returned false without throwing) so callers can
+     *    route the failure into diagnostics/developer logging.
+     */
+    fun failureMemoryDurability(): FailureMemoryDurability {
+        val result = mtpFailureMemory.lastDurabilityResult()
+        val cause = mtpFailureMemory.lastDurabilityException()
+        return when (result) {
+            null -> FailureMemoryDurability.NotAttempted
+            true -> FailureMemoryDurability.Durable
+            false -> FailureMemoryDurability.InMemoryOnly(
+                cause = cause ?: IllegalStateException("Failure memory storage returned false")
+            )
+        }
+    }
+
+    /**
      * Settles the speculative-decoding flag to [desired] and verifies the
      * result before any Engine initialization. Returns true only when the
      * flag reached the desired state:
@@ -929,6 +955,28 @@ enum class MtpRuntimeStatus {
     RUNTIME_CONFIRMED_ACTIVE,
     FALLBACK_DISABLED,
     FAILED
+}
+
+/**
+ * Phase D: typed durability state of the Engine-owned failure memory.
+ *
+ * Exposed through [LiteRtLlmEngine.failureMemoryDurability] and observable
+ * through diagnostics/developer logging so the app never claims cooldown
+ * will survive a restart when persistence is broken.
+ */
+sealed interface FailureMemoryDurability {
+    /** No save/clear operation has been attempted yet. */
+    data object NotAttempted : FailureMemoryDurability
+    /** The last save/clear succeeded; cooldown is durable. */
+    data object Durable : FailureMemoryDurability
+    /**
+     * The last save/clear either returned false or threw. Cooldown still
+     * works in-memory for the lifetime of this Engine instance but will
+     * NOT survive a restart. [cause] is the typed exception (or a
+     * synthetic IllegalStateException when storage returned false without
+     * throwing).
+     */
+    data class InMemoryOnly(val cause: Throwable) : FailureMemoryDurability
 }
 
 public data class EngineSelectionRuntime(
@@ -1392,11 +1440,22 @@ internal class MtpFailureMemory(
     }
 
     init {
-        storage.load().forEach { (serializedKey, serializedValue) ->
-            val key = deserializeKey(serializedKey) ?: return@forEach
-            val parts = serializedValue.split("|", limit = 2)
-            val failedAt = parts.getOrNull(0)?.toLongOrNull() ?: return@forEach
-            failures[key] = FailureRecord(failedAt = failedAt, fallbackReason = parts.getOrNull(1).orEmpty())
+        // Phase D: storage.load() may throw (e.g., disk full, I/O error,
+        // corrupt SharedPreferences). Catch and record the durability
+        // failure so Engine construction does not crash. In-memory state
+        // starts empty in that case — cooldown cannot restore from disk
+        // but new failures persist in memory within the current session.
+        try {
+            storage.load().forEach { (serializedKey, serializedValue) ->
+                val key = deserializeKey(serializedKey) ?: return@forEach
+                val parts = serializedValue.split("|", limit = 2)
+                val failedAt = parts.getOrNull(0)?.toLongOrNull() ?: return@forEach
+                failures[key] = FailureRecord(failedAt = failedAt, fallbackReason = parts.getOrNull(1).orEmpty())
+            }
+        } catch (t: Throwable) {
+            lastDurabilityResult = false
+            lastDurabilityException = t
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.load() threw — continuing with empty in-memory state", t)
         }
     }
 
@@ -1542,10 +1601,20 @@ internal class MtpFailureMemory(
      */
     fun clearAll() = synchronized(lock) {
         failures.clear()
-        val clearResult = storage.clear()
-        lastDurabilityResult = clearResult
-        if (!clearResult) {
-            lastDurabilityException = IllegalStateException("Failed to clear failure memory storage")
+        // Phase D: storage.clear() may throw OR return false. Both are
+        // durability-failure outcomes; in-memory state is already cleared.
+        try {
+            val clearResult = storage.clear()
+            lastDurabilityResult = clearResult
+            if (!clearResult) {
+                lastDurabilityException = IllegalStateException("Failed to clear failure memory storage")
+            } else {
+                lastDurabilityException = null
+            }
+        } catch (t: Throwable) {
+            lastDurabilityResult = false
+            lastDurabilityException = t
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.clear() threw — in-memory state still cleared", t)
         }
     }
 
@@ -1575,19 +1644,38 @@ internal class MtpFailureMemory(
         return lastDurabilityResult == false
     }
 
-    internal fun persistedEntryCount(): Int = synchronized(lock) { storage.load().size }
+    internal fun persistedEntryCount(): Int = synchronized(lock) {
+        // Phase D: best-effort; a storage exception returns 0 so callers
+        // can still verify in-memory operation in tests.
+        try {
+            storage.load().size
+        } catch (t: Throwable) {
+            0
+        }
+    }
 
     private fun persist() {
-        val result = storage.save(
-            failures.entries.associate { (key, record) ->
-                serializeKey(key) to "${record.failedAt}|${record.fallbackReason}"
+        // Phase D: storage.save() may throw (disk full, I/O error). Catch
+        // and record the durability failure; in-memory state is still
+        // authoritative for the current session so cooldown still works
+        // for the lifetime of this Engine instance, but the app must
+        // not claim it will survive restart.
+        try {
+            val result = storage.save(
+                failures.entries.associate { (key, record) ->
+                    serializeKey(key) to "${record.failedAt}|${record.fallbackReason}"
+                }
+            )
+            lastDurabilityResult = result
+            if (!result) {
+                lastDurabilityException = IllegalStateException("Failed to save failure memory to storage")
+            } else {
+                lastDurabilityException = null
             }
-        )
-        lastDurabilityResult = result
-        if (!result) {
-            lastDurabilityException = IllegalStateException("Failed to save failure memory to storage")
-        } else {
-            lastDurabilityException = null
+        } catch (t: Throwable) {
+            lastDurabilityResult = false
+            lastDurabilityException = t
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.save() threw — in-memory state still usable", t)
         }
     }
 }
