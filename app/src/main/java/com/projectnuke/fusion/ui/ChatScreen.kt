@@ -1235,7 +1235,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 modelPath = modelPath,
                                 enableVisionBackend = isImageGeneration
                             )
-                            val conversationOptions = request.settings.toConversationOptions()
+                            val conversationOptions = request.settings.toConversationOptions(
+                                estimatedPromptTokens = com.projectnuke.fusion.chat.PromptTokenEstimator.estimateTokens(messagesForGeneration)
+                            )
                             val outcome = FusionRuntimeLock.withChatGeneration {
                                 generateWithLiteRtRecovery(
                                     engine = engine,
@@ -1437,7 +1439,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                             val started = SystemClock.elapsedRealtime()
                             val firstToken = java.util.concurrent.atomic.AtomicLong(-1L)
                             val engineProfile = request.settings.toRequestedEngineProfile(modelPath, enableVisionBackend = false)
-                            val conversationOptions = request.settings.toConversationOptions()
+                            val conversationOptions = request.settings.toConversationOptions(
+                                estimatedPromptTokens = com.projectnuke.fusion.chat.PromptTokenEstimator.estimateTokens(messagesForGeneration)
+                            )
                             val outcome = FusionRuntimeLock.withChatGeneration {
                                 generateWithLiteRtRecovery(
                                     engine = engine,
@@ -2165,7 +2169,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                     engine.generate(
                                         messages = sessionMessages,
                                         profile = request.settings.toRequestedEngineProfile(activeModelPath, enableVisionBackend = false),
-                                        options = request.settings.toConversationOptions()
+                                        options = request.settings.toConversationOptions(
+                                            estimatedPromptTokens = com.projectnuke.fusion.chat.PromptTokenEstimator.estimateTokens(sessionMessages)
+                                        )
                                     )
                                 }
                             )
@@ -3200,7 +3206,9 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                 modelPath = activeModelPath!!,
                                                 enableVisionBackend = snapshot.multimodalImagePaths.isNotEmpty()
                                             )
-                                            val conversationOptions = requestSettings.toConversationOptions()
+                                            val conversationOptions = requestSettings.toConversationOptions(
+                                                estimatedPromptTokens = com.projectnuke.fusion.chat.PromptTokenEstimator.estimateTokens(gatedMessages)
+                                            )
 
                                             val rawOutcome = FusionRuntimeLock.withChatGeneration {
                                                 generateWithLiteRtRecovery(

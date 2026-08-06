@@ -60,16 +60,37 @@ fun GenerationSettings.toRequestedEngineProfile(
 
 /**
  * Backward-compatible migration: builds the per-turn options from a
- * [GenerationSettings] value.
- * Validates that the requested output budget fits within the KV cache capacity.
+ * [GenerationSettings] value using zero prompt-size estimate.
+ *
+ * The default form must NOT pre-clamp `maxOutputToken` against the KV cache
+ * using a heuristic prompt estimate: doing so with the broken "prompt ≈ output"
+ * heuristic reduces the user-visible output cap from 4000 to 96 tokens
+ * when defaults are used (maxTokens=4000, kvCacheCapacityTokens=4096).
+ *
+ * Runtime callers that know the actual fitted prompt size should use the
+ * [toConversationOptions] overload so [KvCacheCapacityPolicy.validateOutputBudget]
+ * is only applied when there is real prompt information to compare against.
  */
-fun GenerationSettings.toConversationOptions(): ConversationOptions {
-    // Ensure output budget doesn't exceed what KV cache can hold
-    // Heuristic: assume prompt ≈ output budget, so 2 * output <= capacity
+fun GenerationSettings.toConversationOptions(): ConversationOptions = toConversationOptions(
+    estimatedPromptTokens = 0
+)
+
+/**
+ * Overload that clamps the requested output budget against the KV cache capacity
+ * using the caller's measured prompt-token estimate. Use this at the call site
+ * where the actual fitted prompt is known (e.g., after
+ * [com.projectnuke.fusion.chat.FinalPromptBudgeter.fit]). The output cap is
+ * reduced only when the user-requested output plus the prompt estimate would
+ * exceed the KV cache; otherwise the user-requested output is honored.
+ *
+ * Pass [estimatedPromptTokens] = 0 to skip the clamp entirely (the default
+ * `toConversationOptions()` form does this).
+ */
+fun GenerationSettings.toConversationOptions(estimatedPromptTokens: Int): ConversationOptions {
     val validatedMaxOutput = KvCacheCapacityPolicy.validateOutputBudget(
         requestedOutputTokens = maxTokens.coerceAtLeast(1),
         kvCacheCapacityTokens = kvCacheCapacityTokens.coerceAtLeast(KvCacheCapacityPolicy.MIN_CAPACITY),
-        estimatedPromptTokens = maxTokens.coerceAtLeast(1) // heuristic: prompt ≈ output
+        estimatedPromptTokens = estimatedPromptTokens.coerceAtLeast(0)
     )
     return ConversationOptions(
         maxOutputToken = validatedMaxOutput,

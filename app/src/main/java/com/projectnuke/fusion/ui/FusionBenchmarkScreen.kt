@@ -300,7 +300,9 @@ try {
                     modelPath = snapshot.modelPath.orEmpty(),
                     enableVisionBackend = false
                 ),
-                options = snapshot.settings.toConversationOptions(),
+                options = snapshot.settings.toConversationOptions(
+                    estimatedPromptTokens = com.projectnuke.fusion.chat.PromptTokenEstimator.estimateTokensForString(FusionBenchmarkPrompt)
+                ),
                 onToken = { token ->
                     if (firstTokenMs == null && token.isNotEmpty()) {
                         firstTokenMs = SystemClock.elapsedRealtime() - start

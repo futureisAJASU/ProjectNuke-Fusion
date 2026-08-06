@@ -606,7 +606,9 @@ private suspend fun runSingleAbTarget(
             modelPath = target.model.path,
             enableVisionBackend = false
         ),
-        options = resolvedSettings.toConversationOptions(),
+        options = resolvedSettings.toConversationOptions(
+            estimatedPromptTokens = com.projectnuke.fusion.chat.PromptTokenEstimator.estimateTokensForString(input)
+        ),
         onToken = { token ->
             if (firstTokenLatencyMs == null && token.isNotEmpty()) {
                 firstTokenLatencyMs = SystemClock.elapsedRealtime() - startedAt
