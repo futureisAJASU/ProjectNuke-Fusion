@@ -7,6 +7,17 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
+/**
+ * A migration as an ordered list of single SQL statements. Room migrations
+ * execute statements one-by-one via [SupportSQLiteDatabase.execSQL], so each
+ * entry here must be a single statement (no semicolon-joined scripts).
+ *
+ * Exposing the SQL list independently of the Room [Migration] object lets
+ * JVM-side tests replay the migration against an in-memory SQLite (sqlite-jdbc)
+ * without needing the Android framework.
+ */
+data class MigrationSql(val statements: List<String>)
+
 @Database(
     entities = [
         ConversationEntity::class,
@@ -80,25 +91,52 @@ abstract class AppDatabase : RoomDatabase() {
          * (bundled by androidx.sqlite). New columns all use NOT NULL DEFAULT
          * so historical rows fill in safe placeholders. No destructive table
          * replacement is performed.
+         *
+         * Phase F: [BenchmarkResultEntity.initializedWithMtp] is derived for
+         * existing rows from the renamed `mtpRequested` and the existing
+         * `mtpStatus` string rather than left at the DEFAULT 0 placeholder.
+         * The placeholder is still applied at ADD COLUMN time so the column
+         * has a deterministic value during the ALTER, and then updated to the
+         * derived value before the migration completes.
          */
-        private val Migration3To4 = object : Migration(3, 4) {
+        internal val Migration3To4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // Rename ambiguous conceptual columns.
-                db.execSQL("ALTER TABLE benchmark_results RENAME COLUMN actualBackend TO selectedTextBackend")
-                db.execSQL("ALTER TABLE benchmark_results RENAME COLUMN mtpEnabled TO mtpRequested")
-                // Add the new runtime snapshot columns.
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN selectedVisionBackend TEXT")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN samplerBackend TEXT NOT NULL DEFAULT 'UNKNOWN'")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN fallbackEventCodes TEXT")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN initializedWithMtp INTEGER NOT NULL DEFAULT 0")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeTtftSeconds REAL")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativePrefillTokensPerSecond REAL")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeDecodeTokensPerSecond REAL")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativePrefillTokenCount INTEGER")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeDecodeTokenCount INTEGER")
-                db.execSQL("ALTER TABLE benchmark_results ADD COLUMN nativeInitTimeSeconds REAL")
+                for (statement in BenchmarkResultsMigration3To4Sql.statements) {
+                    db.execSQL(statement)
+                }
             }
         }
+
+        /**
+         * Phase F: the list of SQL statements executed by [Migration3To4]
+         * in declaration order. Exposed as a public list so JVM-side tests
+         * can replay the migration against an in-memory SQLite (sqlite-jdbc)
+         * without needing the Android framework. The contract is that each
+         * entry must be a single SQL statement; multi-statement scripts must
+         * be split into separate entries.
+         */
+        val BenchmarkResultsMigration3To4Sql: MigrationSql = MigrationSql(
+            listOf(
+                // Rename ambiguous conceptual columns.
+                "ALTER TABLE benchmark_results RENAME COLUMN actualBackend TO selectedTextBackend",
+                "ALTER TABLE benchmark_results RENAME COLUMN mtpEnabled TO mtpRequested",
+                // Add the new runtime snapshot columns.
+                "ALTER TABLE benchmark_results ADD COLUMN selectedVisionBackend TEXT",
+                "ALTER TABLE benchmark_results ADD COLUMN samplerBackend TEXT NOT NULL DEFAULT 'UNKNOWN'",
+                "ALTER TABLE benchmark_results ADD COLUMN fallbackEventCodes TEXT",
+                "ALTER TABLE benchmark_results ADD COLUMN initializedWithMtp INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE benchmark_results ADD COLUMN nativeTtftSeconds REAL",
+                "ALTER TABLE benchmark_results ADD COLUMN nativePrefillTokensPerSecond REAL",
+                "ALTER TABLE benchmark_results ADD COLUMN nativeDecodeTokensPerSecond REAL",
+                "ALTER TABLE benchmark_results ADD COLUMN nativePrefillTokenCount INTEGER",
+                "ALTER TABLE benchmark_results ADD COLUMN nativeDecodeTokenCount INTEGER",
+                "ALTER TABLE benchmark_results ADD COLUMN nativeInitTimeSeconds REAL",
+                // Derive `initializedWithMtp` for historical rows.
+                "UPDATE benchmark_results SET initializedWithMtp = " +
+                    "CASE WHEN mtpRequested = 1 AND mtpStatus = 'INITIALIZED_WITH_MTP_REQUEST' " +
+                    "THEN 1 ELSE 0 END",
+            )
+        )
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {

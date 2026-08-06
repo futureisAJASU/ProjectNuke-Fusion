@@ -81,4 +81,6 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.4")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.14.0")
+    // Phase F: real in-memory SQLite for JVM-side migration tests.
+    testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
 }

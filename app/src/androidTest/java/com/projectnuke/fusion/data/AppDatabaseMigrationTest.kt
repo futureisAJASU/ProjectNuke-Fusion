@@ -60,6 +60,16 @@ class AppDatabaseMigrationTest {
             )
         )
 
+        // Phase F: insert a second row where mtpRequested=1 but mtpStatus is
+        // a fallback so that the derived initializedWithMtp MUST be 0, not 1.
+        db.execSQL(
+            "INSERT INTO benchmark_results (createdAt, modelName, modelPath, accelerator, actualBackend, mtpEnabled, mtpStatus, maxTokens, temperature, topK, topP, reasoningEnabled, webSearchEnabled, promptLabel, promptText, modelLoadingMs, firstTokenLatencyMs, totalGenerationMs, estimatedOutputTokens, totalTokensPerSecond, decodeTokensPerSecond, success, errorMessage, appVersion, deviceModel, androidVersion) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            arrayOf(
+                2000L, "test-model-2", "/path/model2", "AUTO", "GPU", 1, "OFF",
+                4096, 1.0f, 64, 0.95f, 0, 0, "test", "prompt2", 100L, 50L, 2000L, 100, 10.0, 20.0, 1, null, "1.0.0", "test-device", "32"
+            )
+        )
+
         // Migrate to version 4
         val migratedDb = helper.runMigrationsAndValidate("fusion-test-db", 4, true)
 
@@ -89,14 +99,26 @@ class AppDatabaseMigrationTest {
         assertTrue("v4 should have nativeDecodeTokenCount", v4Columns.contains("nativeDecodeTokenCount"))
         assertTrue("v4 should have nativeInitTimeSeconds", v4Columns.contains("nativeInitTimeSeconds"))
 
-        // Verify data migration
-        val cursor = migratedDb.query("SELECT selectedTextBackend, mtpRequested, selectedVisionBackend, samplerBackend, initializedWithMtp FROM benchmark_results")
-        assertEquals(1, cursor.count)
+        // Verify data migration. Two rows: row 1 had
+        // mtpRequested=1, mtpStatus=INITIALIZED_WITH_MTP_REQUEST so the
+        // derived initializedWithMtp must be 1; row 2 had mtpRequested=1
+        // but mtpStatus=OFF so the derived value must be 0.
+        val cursor = migratedDb.query("SELECT id, selectedTextBackend, mtpRequested, samplerBackend, mtpStatus, initializedWithMtp FROM benchmark_results ORDER BY id ASC")
+        assertEquals(2, cursor.count)
         cursor.moveToFirst()
-        assertEquals("GPU", cursor.getString(0))
-        assertEquals(1, cursor.getInt(1))
+        // row 1
+        assertEquals("GPU", cursor.getString(1))
+        assertEquals(1, cursor.getInt(2))
         assertEquals("UNKNOWN", cursor.getString(3)) // samplerBackend default
-        assertEquals(1, cursor.getInt(4)) // initializedWithMtp
+        assertEquals("INITIALIZED_WITH_MTP_REQUEST", cursor.getString(4))
+        assertEquals(1, cursor.getInt(5))
+        cursor.moveToNext()
+        // row 2
+        assertEquals("GPU", cursor.getString(1))
+        assertEquals(1, cursor.getInt(2))
+        assertEquals("UNKNOWN", cursor.getString(3))
+        assertEquals("OFF", cursor.getString(4))
+        assertEquals(0, cursor.getInt(5))
         cursor.close()
     }
 }
