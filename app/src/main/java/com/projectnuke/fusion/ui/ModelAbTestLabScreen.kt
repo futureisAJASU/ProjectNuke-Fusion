@@ -48,6 +48,7 @@ import com.projectnuke.fusion.llm.RuntimeAttemptSnapshot
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.LocalGenerationSettingsPolicy
 import com.projectnuke.fusion.model.KvCacheCapacityPolicy
 import com.projectnuke.fusion.model.toConversationOptions
 import com.projectnuke.fusion.model.toRequestedEngineProfile
@@ -752,22 +753,8 @@ private fun loadLocalAbModels(context: Context, selectedModel: String, selectedP
 }
 
 private fun loadAbSettings(prefs: android.content.SharedPreferences): GenerationSettings {
-    val maxTokens = prefs.getInt("max_tokens", 4000).coerceIn(1, 32000)
-    val kvCacheCapacityTokens = if (prefs.contains("kv_cache_capacity_tokens")) {
-        prefs.getInt("kv_cache_capacity_tokens", 4096).coerceIn(KvCacheCapacityPolicy.MIN_CAPACITY, KvCacheCapacityPolicy.MAX_CAPACITY)
-    } else {
-        maxTokens.coerceAtLeast(4096)
-    }
-    return GenerationSettings(
-        maxTokens = maxTokens,
-        kvCacheCapacityTokens = kvCacheCapacityTokens,
-        topK = prefs.getInt("top_k", 64).coerceIn(1, 100),
-        topP = prefs.getFloat("top_p", 0.95f).coerceIn(0f, 1f),
-        temperature = prefs.getFloat("temperature", 1.0f).coerceIn(0f, 2f),
-        accelerator = runCatching { AcceleratorMode.valueOf(prefs.getString("accelerator", "GPU") ?: "GPU") }.getOrDefault(AcceleratorMode.GPU),
-        reasoningBudgetTokens = prefs.getInt("reasoning_budget_tokens", 512).coerceIn(1, 8192),
-        speculativeDecodingEnabled = prefs.getBoolean("speculative_decoding_enabled", false)
-    )
+    // Phase 4: centralized settings policy replaces per-screen duplication.
+    return LocalGenerationSettingsPolicy.fromPrefs(prefs)
 }
 
 private fun recommendedAbSettings(context: Context, spec: FusionModelSpec): GenerationSettings {

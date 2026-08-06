@@ -135,6 +135,7 @@ import com.projectnuke.fusion.llm.LiteRtLlmEngine
 import com.projectnuke.fusion.model.AcceleratorMode
 import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.GenerationSettings
+import com.projectnuke.fusion.model.LocalGenerationSettingsPolicy
 import com.projectnuke.fusion.model.KvCacheCapacityPolicy
 import com.projectnuke.fusion.model.toConversationOptions
 import com.projectnuke.fusion.model.toRequestedEngineProfile
@@ -10368,43 +10369,12 @@ private fun shortModelName(name: String): String {
         else -> name
     }
 }
-
 private fun loadSavedGenerationSettings(
     prefs: SharedPreferences
 ): GenerationSettings {
-    val accelerator = runCatching {
-        AcceleratorMode.valueOf(
-            prefs.getString(PrefAccelerator, AcceleratorMode.GPU.name) ?: AcceleratorMode.GPU.name
-        )
-    }.getOrDefault(AcceleratorMode.GPU)
-
-    val speculativeDecodingEnabled = if (prefs.contains(PrefSpeculativeDecoding)) {
-        prefs.getBoolean(PrefSpeculativeDecoding, false)
-    } else {
-        null
-    }
-
-    // Migration: if kv_cache_capacity_tokens is not set, derive from legacy max_tokens
-    // Legacy behavior: max_tokens was used for both output and KV cache.
-    // New behavior: separate output max (maxTokens) from KV cache capacity.
-    val maxTokens = prefs.getInt(PrefMaxTokens, 4000).coerceIn(2000, 32000)
-    val kvCacheCapacityTokens = if (prefs.contains(PrefKvCacheCapacityTokens)) {
-        prefs.getInt(PrefKvCacheCapacityTokens, 4096).coerceIn(KvCacheCapacityPolicy.MIN_CAPACITY, KvCacheCapacityPolicy.MAX_CAPACITY)
-    } else {
-        // Legacy migration: use maxTokens as KV cache capacity (minimum 4096)
-        maxTokens.coerceAtLeast(4096)
-    }
-
-    return GenerationSettings(
-        maxTokens = maxTokens,
-        kvCacheCapacityTokens = kvCacheCapacityTokens,
-        topK = prefs.getInt(PrefTopK, 64).coerceIn(5, 100),
-        topP = prefs.getFloat(PrefTopP, 0.95f).coerceIn(0f, 1f),
-        temperature = prefs.getFloat(PrefTemperature, 1.0f).coerceIn(0f, 2f),
-        accelerator = accelerator,
-        reasoningBudgetTokens = prefs.getInt(PrefReasoningBudget, 512).coerceIn(128, 8192),
-        speculativeDecodingEnabled = speculativeDecodingEnabled
-    )
+    // Phase 4: centralized settings policy replaces per-screen duplication.
+    // This preserves the exact same migration behavior via LocalGenerationSettingsPolicy.
+    return LocalGenerationSettingsPolicy.fromPrefs(prefs)
 }
 
 private fun saveFusionSettings(
