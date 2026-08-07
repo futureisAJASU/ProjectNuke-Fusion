@@ -84,9 +84,9 @@ class AppDatabaseMigrationTest {
             )
         )
 
-        // Phase 3: Run Migration3To4 explicitly
+        // Phase 3: Run Migration3To4
         val appContext = ApplicationProvider.getApplicationContext<Context>()
-        AppDatabase.Migration3To4.migrate(db)
+        db.close()
         helper.runMigrationsAndValidate("fusion-test-db", 4, true, AppDatabase.Migration3To4)
 
         // Phase 4: Verify v4 schema
