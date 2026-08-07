@@ -72,6 +72,9 @@ class LiteRtLlmEngine(
     @Volatile
     var lastMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
         private set
+    
+    @Volatile
+    private var lastRecordedDurability: FailureMemoryDurability = FailureMemoryDurability.NotAttempted
 
     val lastRuntimeSelection: EngineSelectionRuntime?
         get() = loadedState?.runtimeSelection
@@ -446,7 +449,8 @@ class LiteRtLlmEngine(
                     EngineCandidateAttempt.InitializationFailed(result.exceptionOrNull() ?: IllegalStateException("Engine creation failed"))
                 }
             },
-            clock = clock
+            clock = clock,
+            onPersistenceCompleted = { checkAndRecordDurabilityTransition() }
         )
 
         val outcome = coordinator.acquire(profile, loadedState)
@@ -685,6 +689,7 @@ class LiteRtLlmEngine(
     fun clearMtpFailureMemory(modelPath: String) {
         val canonicalPath = runCatching { File(modelPath).canonicalPath }.getOrElse { modelPath }
         mtpFailureMemory.clearForModel(canonicalPath)
+        checkAndRecordDurabilityTransition()
     }
 
     /**
@@ -692,6 +697,7 @@ class LiteRtLlmEngine(
      */
     fun clearAllMtpFailureMemory() {
         mtpFailureMemory.clearAll()
+        checkAndRecordDurabilityTransition()
     }
 
     /**
@@ -717,6 +723,28 @@ class LiteRtLlmEngine(
             false -> FailureMemoryDurability.InMemoryOnly(
                 cause = cause ?: IllegalStateException("Failure memory storage returned false")
             )
+        }
+    }
+
+    /**
+     * Checks for durability state transitions and records them to the developer log.
+     * Called after operations that may modify failure memory persistence.
+     */
+    private fun checkAndRecordDurabilityTransition() {
+        val current = failureMemoryDurability()
+        if (current != lastRecordedDurability) {
+            when {
+                lastRecordedDurability == FailureMemoryDurability.Durable && current is FailureMemoryDurability.InMemoryOnly -> {
+                    FusionDeveloperLogStore.recordDurabilityState(context, current)
+                }
+                lastRecordedDurability is FailureMemoryDurability.InMemoryOnly && current == FailureMemoryDurability.Durable -> {
+                    FusionDeveloperLogStore.recordDurabilityState(context, current)
+                }
+                lastRecordedDurability == FailureMemoryDurability.NotAttempted && current != FailureMemoryDurability.NotAttempted -> {
+                    FusionDeveloperLogStore.recordDurabilityState(context, current)
+                }
+            }
+            lastRecordedDurability = current
         }
     }
 
@@ -1469,6 +1497,10 @@ internal class MtpFailureMemory(
                     serializeKey(key) to "${record.failedAt}|${record.fallbackReason}"
                 }
             )
+            val previousDurability = lastDurabilityResult?.let { 
+                if (it) FailureMemoryDurability.Durable else FailureMemoryDurability.InMemoryOnly(IllegalStateException("Failure memory storage returned false")) 
+            }
+            
             lastDurabilityResult = result
             if (!result) {
                 lastDurabilityException = IllegalStateException("Failed to save failure memory to storage")

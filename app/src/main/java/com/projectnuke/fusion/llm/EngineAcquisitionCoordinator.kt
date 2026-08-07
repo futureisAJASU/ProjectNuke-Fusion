@@ -20,7 +20,8 @@ internal class EngineAcquisitionCoordinator(
     private val mtpCapabilityProbe: (String) -> Boolean?,
     private val configureFlag: (Boolean) -> Boolean,
     private val engineFactory: (backendName: String, mtpEnabled: Boolean, visionBackendIsCpu: Boolean) -> EngineCandidateAttempt<Engine>,
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    private val onPersistenceCompleted: () -> Unit = {}
 ) {
 
     /**
@@ -210,6 +211,7 @@ internal class EngineAcquisitionCoordinator(
                 mtpSupported = fingerprint.mtpSupported,
                 fallbackReason = "MTP initialization failed"
             )
+            onPersistenceCompleted()
         }
 
         // Record plain backend failures
@@ -230,6 +232,7 @@ internal class EngineAcquisitionCoordinator(
                     mtpSupported = fingerprint.mtpSupported,
                     fallbackReason = "Backend initialization failed"
                 )
+                onPersistenceCompleted()
             }
         }
 
