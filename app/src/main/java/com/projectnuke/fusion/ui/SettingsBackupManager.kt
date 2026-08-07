@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.projectnuke.fusion.model.AcceleratorMode
+import com.projectnuke.fusion.model.LocalGenerationSettingsPolicy
 import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -20,7 +21,7 @@ private const val SettingsBackupSchemaVersion = 1
 private const val PrefSelectedModel = "selected_model"
 private const val PrefSelectedModelPath = "selected_model_path"
 private const val PrefAccelerator = "accelerator"
-private const val PrefMaxTokens = "max_tokens"
+private const val PrefMaxTokens = "generation_max_output_tokens"
 private const val PrefTemperature = "temperature"
 private const val PrefTopK = "top_k"
 private const val PrefTopP = "top_p"
@@ -34,6 +35,9 @@ private const val PrefRecentModels = "recent_models"
 private const val PrefModelNotes = "model_notes"
 private const val PrefModelLibrarySortMode = "model_library_sort_mode"
 private const val PrefFusionAppLanguage = "fusion_app_language"
+// Legacy keys for backward compatibility with old backups
+private const val LEGACY_PrefMaxTokens = "max_tokens"
+private const val LEGACY_PrefKvCache = "kv_cache_capacity_tokens"
 
 enum class SettingsRestoreResult {
     Success,
@@ -62,17 +66,17 @@ fun buildSettingsBackupJson(context: Context, prefs: SharedPreferences): String 
         .put("selectedModel", prefs.getString(PrefSelectedModel, "Gemma 4 E2B-it"))
         .put("selectedModelPath", prefs.getString(PrefSelectedModelPath, null))
         .put("accelerator", prefs.getString(PrefAccelerator, AcceleratorMode.GPU.name))
-        .put("maxTokens", prefs.getInt(PrefMaxTokens, 4000))
+        .put("maxTokens", prefs.getInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, 4000))
         .put("temperature", prefs.getFloat(PrefTemperature, 1.0f).toDouble())
         .put("topK", prefs.getInt(PrefTopK, 64))
         .put("topP", prefs.getFloat(PrefTopP, 0.95f).toDouble())
-        .put("mtpEnabled", prefs.getBoolean(PrefSpeculativeDecoding, false))
-        .put("reasoningEnabled", prefs.getBoolean(PrefReasoningEnabled, false))
-        .put("reasoningBudget", prefs.getInt(PrefReasoningBudget, 512))
-        .put("webSearchEnabled", prefs.getBoolean(PrefWebSearchEnabled, false))
-        .put("appLanguage", prefs.getString(PrefFusionAppLanguage, FusionAppLanguage.SYSTEM.value))
-        .put("savedMemoryContextEnabled", prefs.getBoolean(PrefSavedMemoryContextEnabled, false))
-        .put("memoryManagerSortMode", prefs.getString(PrefMemoryManagerSortMode, MemoryManagerSortMode.UPDATED_DESC.name))
+        .put("mtpEnabled", prefs.getBoolean("speculative_decoding_enabled", false))
+        .put("reasoningEnabled", prefs.getBoolean("reasoning_enabled", false))
+        .put("reasoningBudget", prefs.getInt("reasoning_budget_tokens", 512))
+        .put("webSearchEnabled", prefs.getBoolean("web_search_enabled", false))
+        .put("appLanguage", prefs.getString("fusion_app_language", FusionAppLanguage.SYSTEM.value))
+        .put("savedMemoryContextEnabled", prefs.getBoolean("saved_memory_context_enabled", false))
+        .put("memoryManagerSortMode", prefs.getString("memory_manager_sort_mode", MemoryManagerSortMode.UPDATED_DESC.name))
         .put("lowMemoryMode", lowMemoryMode)
     val modelLibrary = JSONObject()
         .put("favorites", JSONArray((prefs.getStringSet(PrefFavoriteModelIds, emptySet()) ?: emptySet()).toList()))
@@ -115,14 +119,17 @@ suspend fun restoreSettingsBackupJson(
         editor.putString(PrefAccelerator, accelerator.name)
         restoredKeys += PrefAccelerator
     }
-    if (settings.has("maxTokens")) { editor.putInt(PrefMaxTokens, settings.optInt("maxTokens", 4000).coerceIn(2000, 32000)); restoredKeys += PrefMaxTokens }
-    if (settings.has("temperature")) { editor.putFloat(PrefTemperature, settings.optDouble("temperature", 1.0).toFloat().coerceIn(0f, 2f)); restoredKeys += PrefTemperature }
-    if (settings.has("topK")) { editor.putInt(PrefTopK, settings.optInt("topK", 64).coerceIn(5, 100)); restoredKeys += PrefTopK }
-    if (settings.has("topP")) { editor.putFloat(PrefTopP, settings.optDouble("topP", 0.95).toFloat().coerceIn(0f, 1f)); restoredKeys += PrefTopP }
-    if (settings.has("mtpEnabled")) { editor.putBoolean(PrefSpeculativeDecoding, settings.optBoolean("mtpEnabled", false)); restoredKeys += PrefSpeculativeDecoding }
-    if (settings.has("reasoningEnabled")) { editor.putBoolean(PrefReasoningEnabled, settings.optBoolean("reasoningEnabled", false)); restoredKeys += PrefReasoningEnabled }
-    if (settings.has("reasoningBudget")) { editor.putInt(PrefReasoningBudget, settings.optInt("reasoningBudget", 512).coerceIn(128, 8192)); restoredKeys += PrefReasoningBudget }
-    if (settings.has("webSearchEnabled")) { editor.putBoolean(PrefWebSearchEnabled, settings.optBoolean("webSearchEnabled", false)); restoredKeys += PrefWebSearchEnabled }
+if (settings.has("maxTokens")) {
+            editor.putInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, settings.optInt("maxTokens", 4000).coerceIn(2000, 32000))
+            restoredKeys += LocalGenerationSettingsPolicy.KEY_MAX_TOKENS
+        }
+if (settings.has("temperature")) { editor.putFloat(PrefTemperature, settings.optDouble("temperature", 1.0).toFloat().coerceIn(0f, 2f)); restoredKeys += PrefTemperature }
+if (settings.has("topK")) { editor.putInt(PrefTopK, settings.optInt("topK", 64).coerceIn(5, 100)); restoredKeys += PrefTopK }
+if (settings.has("topP")) { editor.putFloat(PrefTopP, settings.optDouble("topP", 0.95).toFloat().coerceIn(0f, 1f)); restoredKeys += PrefTopP }
+if (settings.has("mtpEnabled")) { editor.putBoolean("speculative_decoding_enabled", settings.optBoolean("mtpEnabled", false)); restoredKeys += "speculative_decoding_enabled" }
+if (settings.has("reasoningEnabled")) { editor.putBoolean("reasoning_enabled", settings.optBoolean("reasoningEnabled", false)); restoredKeys += "reasoning_enabled" }
+if (settings.has("reasoningBudget")) { editor.putInt("reasoning_budget_tokens", settings.optInt("reasoningBudget", 512).coerceIn(128, 8192)); restoredKeys += "reasoning_budget_tokens" }
+if (settings.has("webSearchEnabled")) { editor.putBoolean("web_search_enabled", settings.optBoolean("webSearchEnabled", false)); restoredKeys += "web_search_enabled" }
     if (settings.has("appLanguage")) {
         val rawLanguage = settings.optString("appLanguage", FusionAppLanguage.SYSTEM.value)
         val language = FusionAppLanguage.fromValue(rawLanguage)

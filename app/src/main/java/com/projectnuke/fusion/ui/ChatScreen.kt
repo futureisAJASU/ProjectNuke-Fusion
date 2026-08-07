@@ -8433,12 +8433,12 @@ private fun applyDeviceAwareRecommendedSettings(
     val memoryInfo = buildModelMemoryInfo(context, spec)
     val tokenRecommendation = buildDeviceAwareTokenRecommendation(spec, memoryInfo.totalRamGb, memoryInfo.availableRamGb)
     if (tokenRecommendation.value > 0) {
-        editor.putInt(PrefMaxTokens, tokenRecommendation.value)
+        editor.putInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, tokenRecommendation.value)
     }
-    editor.putBoolean(PrefSpeculativeDecoding, spec.recommendedMtpEnabled)
-    editor.putBoolean(PrefReasoningEnabled, spec.recommendedReasoningEnabled)
+    editor.putBoolean("speculative_decoding_enabled", spec.recommendedMtpEnabled)
+    editor.putBoolean("reasoning_enabled", spec.recommendedReasoningEnabled)
     if (spec.runtimeFormat == ModelRuntimeFormat.EXYNOS_AI_STUDIO) {
-        editor.putString(PrefAccelerator, AcceleratorMode.AUTO.name)
+        editor.putString(LocalGenerationSettingsPolicy.KEY_ACCELERATOR, AcceleratorMode.AUTO.name)
     }
     editor.apply()
 }
@@ -10386,27 +10386,28 @@ private fun saveFusionSettings(
     selectedModelPath: String?
 ) {
     prefs.edit()
-        .putInt(PrefMaxTokens, settings.maxTokens)
-        .putInt(PrefKvCacheCapacityTokens, settings.kvCacheCapacityTokens)
-        .putInt(PrefTopK, settings.topK)
-        .putFloat(PrefTopP, settings.topP)
-        .putFloat(PrefTemperature, settings.temperature)
-        .putInt(PrefReasoningBudget, settings.reasoningBudgetTokens)
-        .putString(PrefAccelerator, settings.accelerator.name)
-        .putBoolean(PrefReasoningEnabled, reasoningEnabled)
-        .putBoolean(PrefWebSearchEnabled, webSearchEnabled)
-        .putString(PrefSelectedModel, selectedModel)
+        .putInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, settings.maxTokens)
+        .putInt(LocalGenerationSettingsPolicy.KEY_KV_CACHE, settings.kvCacheCapacityTokens)
+        .putInt(LocalGenerationSettingsPolicy.KEY_TOP_K, settings.topK)
+        .putFloat(LocalGenerationSettingsPolicy.KEY_TOP_P, settings.topP)
+        .putFloat(LocalGenerationSettingsPolicy.KEY_TEMPERATURE, settings.temperature)
+        .putInt(LocalGenerationSettingsPolicy.KEY_REASONING_BUDGET, settings.reasoningBudgetTokens)
+        .putString(LocalGenerationSettingsPolicy.KEY_ACCELERATOR, settings.accelerator.name)
+        .putBoolean("speculative_decoding_enabled", settings.speculativeDecodingEnabled == true)
+        .putBoolean("reasoning_enabled", reasoningEnabled)
+        .putBoolean("web_search_enabled", webSearchEnabled)
+        .putString("selected_model", selectedModel)
         .apply {
             if (selectedModelPath.isNullOrBlank()) {
-                remove(PrefSelectedModelPath)
+                remove("selected_model_path")
             } else {
-                putString(PrefSelectedModelPath, selectedModelPath)
+                putString("selected_model_path", selectedModelPath)
             }
 
             if (settings.speculativeDecodingEnabled == null) {
-                remove(PrefSpeculativeDecoding)
+                remove("speculative_decoding_enabled")
             } else {
-                putBoolean(PrefSpeculativeDecoding, settings.speculativeDecodingEnabled)
+                putBoolean("speculative_decoding_enabled", settings.speculativeDecodingEnabled!!)
             }
         }
         .apply()
