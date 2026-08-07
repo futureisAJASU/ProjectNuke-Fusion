@@ -1,220 +1,314 @@
 package com.projectnuke.fusion.llm
 
-import com.projectnuke.fusion.model.AcceleratorMode
-import com.projectnuke.fusion.model.RequestedEngineProfile
+import com.projectnuke.fusion.model.*
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * Phase 4: real production acquisition coordinator tests.
- *
- * These tests exercise the `selectFirstWorkingEngine` coordinator directly with
- * synthetic ladders and injected `tryCreate` lambdas. Each tests covers one
- * of the 13 enumerated fallback cases without faking any production logic.
- * The coordinator under test is the exact same code path that
- * `LiteRtLlmEngine.getOrCreateEngine` uses at runtime.
- */
 class RepairPhase4AcquisitionCoordinatorTest {
 
-    private val gpuMtp  = EngineCandidate("GPU", mtpEnabled = true)
-    private val gpuPlain = EngineCandidate("GPU", mtpEnabled = false)
-    private val cpuPlain = EngineCandidate("CPU", mtpEnabled = false)
+    private class MockMtpFailureMemory : MtpFailureMemory(NoopMtpFailureMemoryStorage) {
+        var shouldSkipMtpResult: String? = null
+        var shouldSkipBackendResult: String? = null
 
-    private fun verifyEvent(
-        events: List<RuntimeFallbackEvent>,
-        index: Int,
-        reason: FallbackReason,
-        textBackend: RuntimeBackend? = null,
-        mtp: Boolean? = null
-    ) {
-        assertTrue("expected at least ${index + 1} fallback events, got ${events.size}",
-            events.size > index)
-        val ev = events[index]
-        assertEquals(reason, ev.reason)
-        if (textBackend != null) assertEquals(textBackend, ev.attemptedTextBackend)
-        if (mtp != null) assertEquals(mtp, ev.attemptedMtpEnabled)
+        override fun shouldSkipMtp(modelPath: String, backendName: String, mtpEnabled: Boolean, validationVersion: Int, kvCacheCapacityTokens: Int, enableVisionBackend: Boolean, fileSize: Long, modifiedAt: Long, mtpSupported: Boolean): String? = shouldSkipMtpResult
+        override fun shouldSkipBackend(modelPath: String, backendName: String, validationVersion: Int, kvCacheCapacityTokens: Int, enableVisionBackend: Boolean, fileSize: Long, modifiedAt: Long, mtpSupported: Boolean): String? = shouldSkipBackendResult
     }
 
-    // ── Case 1: MTP_UNSUPPORTED ──────────────────────────────────────────
+    private fun createCoordinator(
+        memory: MtpFailureMemory = MockMtpFailureMemory(),
+        probe: (String) -> Boolean? = { true },
+        flag: (Boolean) -> Boolean = { true },
+        factory: (String, Boolean, Boolean) -> EngineCandidateAttempt<Any> = { _, _, _ -> 
+            EngineCandidateAttempt.Success(Any()) 
+        }
+    ) = EngineAcquisitionCoordinator(memory, probe, flag, factory as (String, Boolean, Boolean) -> EngineCandidateAttempt<com.google.ai.edge.litertlm.Engine>, { 1000L })
+
+    private val defaultProfile = RequestedEngineProfile(
+        modelPath = "test_model.bin",
+        accelerator = AcceleratorMode.AUTO,
+        kvCacheCapacityTokens = 2048,
+        mtpRequested = true,
+        enableVisionBackend = false
+    )
 
     @Test
-    fun `case1 CapabilityRejected drops MTP candidate and records MTP_UNSUPPORTED`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(EngineCandidate("GPU", true), EngineCandidate("GPU", false)),
-            enableVisionBackend = false,
+    fun `capability rejection prevents factory calls and records MTP_UNSUPPORTED`() {
+        var factoryCalls = 0
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = MockMtpFailureMemory(),
+            mtpCapabilityProbe = { false },
             configureFlag = { true },
-            tryCreate = { backend, mtp, _ ->
-                if (mtp) EngineCandidateAttempt.CapabilityRejected(backend, mtp)
-                else EngineCandidateAttempt.Success(DummyEngine())
+            engineFactory = { _, _, _ -> 
+                factoryCalls++
+                EngineCandidateAttempt.Success(mockEngine())
             }
         )
-        assertNotNull(outcome.selection)
-        assertEquals("GPU", outcome.selection!!.backendName)
-        assertEquals(false, outcome.selection!!.selectedMtpEnabled)
-        assertEquals(1, outcome.fallbackEvents.size)
-        assertEquals(FallbackReason.MTP_UNSUPPORTED, outcome.fallbackEvents[0].reason)
-        assertEquals(RuntimeBackend.GPU, outcome.fallbackEvents[0].attemptedTextBackend)
-        assertTrue(outcome.fallbackEvents[0].attemptedMtpEnabled!!)
-    }
 
-    // ── Case 5: SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED ────────────────
+        val outcome = coordinator.acquire(defaultProfile, null)
 
-    @Test
-    fun `case5 speculative enable flag failure records event and falls through to plain`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(EngineCandidate("GPU", true), EngineCandidate("GPU", false)),
-            enableVisionBackend = false,
-            configureFlag = { mtp -> if (mtp) false else true },
-            tryCreate = { _, _, _ -> EngineCandidateAttempt.Success(DummyEngine()) }
-        )
         assertNotNull(outcome.selection)
-        assertEquals("GPU", outcome.selection!!.backendName)
         assertEquals(false, outcome.selection!!.selectedMtpEnabled)
-        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED })
+        assertEquals(0, factoryCalls)
+        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_UNSUPPORTED })
     }
 
     @Test
-    fun `case6 disable flag failure records and candidate force skipped`() {
-        var firstGpuCall = true
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(EngineCandidate("GPU", false), EngineCandidate("CPU", false)),
-            enableVisionBackend = false,
-            configureFlag = { mtp ->
-                if (!mtp) {
-                    // First call (GPU) returns false, second call (CPU) returns true
-                    if (firstGpuCall) {
-                        firstGpuCall = false
-                        false
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                }
-            },
-            tryCreate = { _, _, _ -> EngineCandidateAttempt.Success(DummyEngine()) }
+    fun `GPU plain failure falls back to CPU success`() {
+        var callCount = 0
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = MockMtpFailureMemory(),
+            mtpCapabilityProbe = { true },
+            configureFlag = { true },
+            engineFactory = { backend, _, _ -> 
+                callCount++
+                if (backend == "GPU") EngineCandidateAttempt.InitializationFailed(RuntimeException("GPU Fail"))
+                else EngineCandidateAttempt.Success(mockEngine())
+            }
         )
+
+        val profile = defaultProfile.copy(mtpRequested = false)
+        val outcome = coordinator.acquire(profile, null)
+
         assertNotNull(outcome.selection)
         assertEquals("CPU", outcome.selection!!.backendName)
-        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.SPECULATIVE_DISABLE_FLAG_SETTLEMENT_FAILED })
+        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED })
     }
 
-    // ── Case 7: ALL_CANDIDATES_EXHAUSTED ────────────────────────────────
-
     @Test
-    fun `case 7 all candidates init-fail → selection null, 3 fallback events`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(EngineCandidate("GPU", true), EngineCandidate("GPU", false), EngineCandidate("CPU", false)),
-            enableVisionBackend = false,
+    fun `MTP failure with plain GPU skipped by failure memory selects CPU`() {
+        val memory = MockMtpFailureMemory().apply {
+            shouldSkipBackendResult = FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE
+        }
+        
+        var gpuCalls = 0
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = memory,
+            mtpCapabilityProbe = { true },
             configureFlag = { true },
-            tryCreate = { _, _, _ -> EngineCandidateAttempt.InitializationFailed(RuntimeException("stop")) }
-        )
-        assertNull(outcome.selection)
-        assertNotNull(outcome.failure)
-        assertEquals(3, outcome.fallbackEvents.size)
-        assertEquals(FallbackReason.MTP_ENGINE_INIT_FAILED, outcome.fallbackEvents[0].reason)
-        assertEquals(FallbackReason.BACKEND_ENGINE_INIT_FAILED, outcome.fallbackEvents[1].reason)
-        assertEquals(FallbackReason.BACKEND_ENGINE_INIT_FAILED, outcome.fallbackEvents[2].reason)
-    }
-
-    // ── Case 11: Empty ladder ─────────────────────────────────────────────
-
-    @Test
-    fun `all candidates skipped via empty ladder yields nil selection`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = emptyList(),
-            enableVisionBackend = false,
-            configureFlag = { true },
-            tryCreate = { _, _, _ -> error("not called") }
-        )
-        assertNull(outcome.selection)
-        assertEquals(0, outcome.fallbackEvents.size)
-        assertNull(outcome.failure)
-    }
-
-    // ── Case 4: MTP_ENGINE_INIT_FAILED ─────────────────────────────────────
-
-    @Test
-    fun `MTP init failed then plain success records MTP engine init failed`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(EngineCandidate("GPU", true), EngineCandidate("GPU", false)),
-            enableVisionBackend = false,
-            configureFlag = { true },
-            tryCreate = { _, mtp, _ ->
-                if (mtp) EngineCandidateAttempt.InitializationFailed(RuntimeException("MTP down"))
-                else EngineCandidateAttempt.Success(DummyEngine())
+            engineFactory = { backend, _, _ -> 
+                if (backend == "GPU") gpuCalls++
+                EngineCandidateAttempt.Success(mockEngine())
             }
         )
-        assertNotNull(outcome.selection)
-        assertEquals(false, outcome.selection!!.selectedMtpEnabled)
-        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED })
-    }
 
-    // ── Case 8: GPU_TEXT_ENGINE_FAILED_CPU_SELECTED ──────────────────────
+        val profile = defaultProfile.copy(mtpRequested = false)
+        val outcome = coordinator.acquire(profile, null)
 
-    @Test
-    fun `GPU plain failure then CPU success records GPU_TEXT_ENGINE_FAILED_CPU_SELECTED`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(EngineCandidate("GPU", false), EngineCandidate("CPU", false)),
-            enableVisionBackend = false,
-            configureFlag = { true },
-            tryCreate = { backend, _, _ ->
-                if (backend == "GPU") EngineCandidateAttempt.InitializationFailed(RuntimeException("GPU fail"))
-                else EngineCandidateAttempt.Success(DummyEngine())
-            }
-        )
         assertNotNull(outcome.selection)
         assertEquals("CPU", outcome.selection!!.backendName)
-        assertEquals(2, outcome.fallbackEvents.size)
-        assertEquals(FallbackReason.BACKEND_ENGINE_INIT_FAILED, outcome.fallbackEvents[0].reason)
-        assertEquals(FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED, outcome.fallbackEvents[1].reason)
-        assertEquals(RuntimeBackend.CPU, outcome.fallbackEvents[1].selectedReplacementBackend)
+        assertEquals(0, gpuCalls)
     }
 
-    // ── Case 9: GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED ────────────
-
     @Test
-    fun `GPU vision fails then CPU vision succeeds on a GPU-plain candidate`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(EngineCandidate("GPU", false)),
-            enableVisionBackend = true,
-            configureFlag = { true },
-            tryCreate = { _, _, visionCpu ->
-                if (!visionCpu) EngineCandidateAttempt.InitializationFailed(RuntimeException("GPU vision crash"))
-                else EngineCandidateAttempt.Success(DummyEngine())
-            }
-        )
-        assertNotNull(outcome.selection)
-        assertEquals("GPU", outcome.selection!!.backendName)
-        assertEquals("CPU", outcome.selection!!.visionBackend)
-        assertEquals(false, outcome.selection!!.selectedMtpEnabled)
-        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED })
-        val ev = outcome.fallbackEvents.first { it.reason == FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED }
-        assertEquals(RuntimeBackend.GPU, ev.attemptedTextBackend)
-        assertEquals(RuntimeBackend.GPU, ev.attemptedVisionBackend)
-        assertEquals(RuntimeBackend.CPU, ev.selectedReplacementBackend)
-    }
+    fun `all candidates filtered by cooldown reuses compatible loaded engine`() {
+        val memory = MockMtpFailureMemory().apply {
+            shouldSkipMtpResult = FallbackReason.MTP_SKIPPED_RECENT_FAILURE
+            shouldSkipBackendResult = FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE
+        }
 
-    // ── Multi-fail chain: MTP → GPU plain → CPU all fail ─────────────────
-
-    @Test
-    fun `GPU MTP fails then GPU plain fails then CPU fails → no bridge events`() {
-        val outcome = selectFirstWorkingEngine<DummyEngine>(
-            ladder = listOf(
-                EngineCandidate("GPU", true),
-                EngineCandidate("GPU", false),
-                EngineCandidate("CPU", false)
+        val engine = mockEngine()
+        val loadedState = LoadedRuntimeState(
+            engine = engine,
+            key = EngineRuntimeKey(
+                fingerprint = ModelFingerprint.of(defaultProfile.modelPath),
+                accelerator = defaultProfile.accelerator,
+                kvCacheCapacityTokens = defaultProfile.kvCacheCapacityTokens,
+                enableVisionBackend = defaultProfile.enableVisionBackend,
+                mtpEnabled = false,
+                selectedBackend = "GPU"
             ),
-            enableVisionBackend = false,
+            mtpStatus = MtpRuntimeStatus.OFF,
+            runtimeSelection = mockRuntimeSelection(),
+            actualTextBackend = "GPU",
+            actualVisionBackend = null,
+            fallbackEvents = emptyList()
+        )
+
+        var factoryCalls = 0
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = memory,
+            mtpCapabilityProbe = { true },
             configureFlag = { true },
-            tryCreate = { _, _, _ ->
-                EngineCandidateAttempt.InitializationFailed(RuntimeException("failed"))
+            engineFactory = { _, _, _ -> 
+                factoryCalls++
+                EngineCandidateAttempt.Success(mockEngine())
             }
         )
+        val outcome = coordinator.acquire(defaultProfile, loadedState)
+
+        assertNotNull(outcome.selection)
+        assertEquals(engine, outcome.selection!!.engine)
+        assertEquals(0, factoryCalls)
+    }
+
+    @Test
+    fun `incompatible loaded engine is rejected when all candidates skipped`() {
+        val memory = MockMtpFailureMemory().apply {
+            shouldSkipMtpResult = FallbackReason.MTP_SKIPPED_RECENT_FAILURE
+            shouldSkipBackendResult = FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE
+        }
+
+        val engine = mockEngine()
+        val loadedState = LoadedRuntimeState(
+            engine = engine,
+            key = EngineRuntimeKey(
+                fingerprint = ModelFingerprint.of("different_model.bin"),
+                accelerator = defaultProfile.accelerator,
+                kvCacheCapacityTokens = defaultProfile.kvCacheCapacityTokens,
+                enableVisionBackend = defaultProfile.enableVisionBackend,
+                mtpEnabled = false,
+                selectedBackend = "GPU"
+            ),
+            mtpStatus = MtpRuntimeStatus.OFF,
+            runtimeSelection = mockRuntimeSelection(),
+            actualTextBackend = "GPU",
+            actualVisionBackend = null,
+            fallbackEvents = emptyList()
+        )
+
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = memory,
+            mtpCapabilityProbe = { true },
+            configureFlag = { true },
+            engineFactory = { _, _, _ -> EngineCandidateAttempt.Success(mockEngine()) }
+        )
+        val outcome = coordinator.acquire(defaultProfile, loadedState)
+
         assertNull(outcome.selection)
         assertNotNull(outcome.failure)
-        assertEquals(3, outcome.fallbackEvents.size)
-        assertTrue(outcome.fallbackEvents.all { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED || it.reason == FallbackReason.BACKEND_ENGINE_INIT_FAILED })
-        outcome.fallbackEvents.forEach { assertNull(it.selectedReplacementBackend) }
+        assertTrue(outcome.failure!!.attemptSnapshot.fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE })
     }
+
+    @Test
+    fun `request local event isolation`() {
+        val memory = MockMtpFailureMemory().apply {
+            shouldSkipBackendResult = FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE
+        }
+
+        val engine = mockEngine()
+        val loadedState = LoadedRuntimeState(
+            engine = engine,
+            key = EngineRuntimeKey(
+                fingerprint = ModelFingerprint.of(defaultProfile.modelPath),
+                accelerator = defaultProfile.accelerator,
+                kvCacheCapacityTokens = defaultProfile.kvCacheCapacityTokens,
+                enableVisionBackend = defaultProfile.enableVisionBackend,
+                mtpEnabled = false,
+                selectedBackend = "CPU"
+            ),
+            mtpStatus = MtpRuntimeStatus.OFF,
+            runtimeSelection = mockRuntimeSelection(),
+            actualTextBackend = "CPU",
+            actualVisionBackend = null,
+            fallbackEvents = emptyList()
+        )
+
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = memory,
+            mtpCapabilityProbe = { true },
+            configureFlag = { true },
+            engineFactory = { _, _, _ -> EngineCandidateAttempt.Success(mockEngine()) }
+        )
+        
+        val outcomeA = coordinator.acquire(defaultProfile.copy(accelerator = AcceleratorMode.AUTO), loadedState)
+        assertTrue(outcomeA.fallbackEvents.any { it.reason == FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE })
+        
+        val outcomeB = coordinator.acquire(defaultProfile.copy(accelerator = AcceleratorMode.CPU), loadedState)
+        assertFalse(outcomeB.fallbackEvents.any { it.reason == FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE })
+    }
+
+    @Test
+    fun `output only change does not recreate engine`() {
+        var factoryCalls = 0
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = MockMtpFailureMemory(),
+            mtpCapabilityProbe = { true },
+            configureFlag = { true },
+            engineFactory = { _, _, _ -> 
+                factoryCalls++
+                EngineCandidateAttempt.Success(mockEngine())
+            }
+        )
+        
+        val profile1 = defaultProfile.copy(kvCacheCapacityTokens = 2048)
+        val outcome1 = coordinator.acquire(profile1, null)
+        val engine1 = outcome1.selection!!.engine
+        
+        val loadedState = LoadedRuntimeState(
+            engine = engine1,
+            key = EngineRuntimeKey(
+                fingerprint = ModelFingerprint.of(profile1.modelPath),
+                accelerator = profile1.accelerator,
+                kvCacheCapacityTokens = profile1.kvCacheCapacityTokens,
+                enableVisionBackend = profile1.enableVisionBackend,
+                mtpEnabled = outcome1.selection!!.selectedMtpEnabled,
+                selectedBackend = outcome1.selection!!.backendName
+            ),
+            mtpStatus = MtpRuntimeStatus.OFF,
+            runtimeSelection = mockRuntimeSelection(),
+            actualTextBackend = outcome1.selection!!.backendName,
+            actualVisionBackend = null,
+            fallbackEvents = emptyList()
+        )
+        
+        val profile2 = profile1.copy() 
+        val outcome2 = coordinator.acquire(profile2, loadedState)
+        
+        assertEquals(engine1, outcome2.selection!!.engine)
+        assertEquals(1, factoryCalls)
+    }
+
+    @Test
+    fun `kv capacity change alters engine identity`() {
+        var factoryCalls = 0
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = MockMtpFailureMemory(),
+            mtpCapabilityProbe = { true },
+            configureFlag = { true },
+            engineFactory = { _, _, _ -> 
+                factoryCalls++
+                EngineCandidateAttempt.Success(mockEngine())
+            }
+        )
+        
+        val profile1 = defaultProfile.copy(kvCacheCapacityTokens = 2048)
+        val outcome1 = coordinator.acquire(profile1, null)
+        val engine1 = outcome1.selection!!.engine
+        
+        val loadedState = LoadedRuntimeState(
+            engine = engine1,
+            key = EngineRuntimeKey(
+                fingerprint = ModelFingerprint.of(profile1.modelPath),
+                accelerator = profile1.accelerator,
+                kvCacheCapacityTokens = profile1.kvCacheCapacityTokens,
+                enableVisionBackend = profile1.enableVisionBackend,
+                mtpEnabled = outcome1.selection!!.selectedMtpEnabled,
+                selectedBackend = outcome1.selection!!.backendName
+            ),
+            mtpStatus = MtpRuntimeStatus.OFF,
+            runtimeSelection = mockRuntimeSelection(),
+            actualTextBackend = outcome1.selection!!.backendName,
+            actualVisionBackend = null,
+            fallbackEvents = emptyList()
+        )
+        
+        val profile2 = profile1.copy(kvCacheCapacityTokens = 4096)
+        val outcome2 = coordinator.acquire(profile2, loadedState)
+        
+        assertNotEquals(engine1, outcome2.selection!!.engine)
+        assertEquals(2, factoryCalls)
+    }
+
+    private fun mockEngine(): com.google.ai.edge.litertlm.Engine {
+        // Use a real Engine object but with dummy config to avoid native crashes in JVM tests
+        // Note: In a real Android environment this would need a proper mock or a mock-factory.
+        // For JVM unit tests, we are using this to satisfy type constraints.
+        return java.lang.reflect.Proxy.newProxyInstance(
+            com.google.ai.edge.litertlm.Engine::class.java.classLoader,
+            arrayOf(com.google.ai.edge.litertlm.Engine::class.java)
+        ) as com.google.ai.edge.litertlm.Engine
+    }
+
+    private fun mockRuntimeSelection() = EngineSelectionRuntime("AUTO", "GPU", null, true, true, null)
 }

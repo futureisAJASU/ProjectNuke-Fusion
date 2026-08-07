@@ -424,353 +424,125 @@ class LiteRtLlmEngine(
     }
 
     private fun getOrCreateEngine(profile: RequestedEngineProfile): Engine {
-        val mtpRequested = profile.mtpRequested
-        val fingerprint = ModelFingerprint.of(profile.modelPath)
-        val mtpSupported = fingerprint.mtpSupported
-        val maxNumTokens = profile.kvCacheCapacityTokens.coerceAtLeast(1)
-
-        // Failure memory is consulted per candidate backend: an MTP failure on
-        // GPU must never poison an explicit CPU request, and AUTO failures are
-        // remembered under the exact backend that failed, not the accelerator.
-        // Preserve the original planned candidates (before failure-memory filtering)
-        // for all-skipped reuse logic. The filtered `ladder` is the runtime
-        // try-list; the original `plannedCandidates` is what the loaded Engine
-        // must offline-match.
-        var mtpSkippedByMemory = false
-        val recordedFallbackEvents = mutableListOf<RuntimeFallbackEvent>()
-        val plannedCandidates = buildEngineCandidateLadder(
-            accelerator = profile.accelerator,
-            mtpRequested = mtpRequested,
-            mtpSupported = mtpSupported
-        )
-        val availableCandidates = plannedCandidates.filter { candidate ->
-            if (candidate.mtpEnabled) {
-                val skipReason = mtpFailureMemory.shouldSkipMtp(
-                    modelPath = fingerprint.canonicalPath,
-                    backendName = candidate.backend,
-                    mtpEnabled = true,
-                    validationVersion = fingerprint.validationVersion,
-                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                    enableVisionBackend = profile.enableVisionBackend,
-                    fileSize = fingerprint.fileSize,
-                    modifiedAt = fingerprint.modifiedAt,
-                    mtpSupported = fingerprint.mtpSupported
-                )
-                if (skipReason != null) {
-                    mtpSkippedByMemory = true
-                    recordedFallbackEvents += RuntimeFallbackEvent(
-                        attemptedTextBackend = candidate.backend.toRuntimeBackend(),
-                        attemptedMtpEnabled = true,
-                        reason = FallbackReason.MTP_SKIPPED_RECENT_FAILURE
-                    )
-                    Log.i(
-                        "FusionLiteRT",
-                        "MTP skipped due to recent failure: $skipReason (backend=${candidate.backend})"
-                    )
-                    return@filter false
-                }
-            } else {
-                // Check plain backend failure memory for AUTO fallback caching
-                val skipReason = mtpFailureMemory.shouldSkipBackend(
-                    modelPath = fingerprint.canonicalPath,
-                    backendName = candidate.backend,
-                    validationVersion = fingerprint.validationVersion,
-                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                    enableVisionBackend = profile.enableVisionBackend,
-                    fileSize = fingerprint.fileSize,
-                    modifiedAt = fingerprint.modifiedAt,
-                    mtpSupported = fingerprint.mtpSupported
-                )
-                if (skipReason != null) {
-                    recordedFallbackEvents += RuntimeFallbackEvent(
-                        attemptedTextBackend = candidate.backend.toRuntimeBackend(),
-                        attemptedMtpEnabled = false,
-                        reason = FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE
-                    )
-                    Log.i(
-                        "FusionLiteRT",
-                        "Backend skipped due to recent failure: $skipReason (backend=${candidate.backend})"
-                    )
-                    return@filter false
-                }
-            }
-            true
-        }
-        // The runtime ladder is what selectFirstWorkingEngine iterates.
-        val ladder = availableCandidates
-        val preferredBackendName = ladder.firstOrNull()?.backend ?: run {
-            // All candidates were skipped by failure memory. The only escape is
-            // an exact-matchEMPTY reuse: a currently live, successfully
-            // initialized Engine whose stored EngineRuntimeKey corresponds to
-            // a candidate still in the *original* planned candidates. A different
-            // model / profile / backend / MTP / vision / KV Engine must never be
-            // reused, and the loaded engine must never be defeated by the same
-            // failure-memory skip that triggered this branch (because failure
-            // memory can only veto *new* init attempts, not already-live success).
-            val currentLoadedState = loadedState
-            if (currentLoadedState != null) {
-                val loadedKey = currentLoadedState.key
-                val isPlannedCandidate = plannedCandidates.any { candidate ->
-                    candidate.backend == loadedKey.selectedBackend &&
-                        candidate.mtpEnabled == loadedKey.mtpEnabled &&
-                        loadedKey.fingerprint == fingerprint &&
-                        loadedKey.accelerator == profile.accelerator &&
-                        loadedKey.kvCacheCapacityTokens == profile.kvCacheCapacityTokens &&
-                        loadedKey.enableVisionBackend == profile.enableVisionBackend
-                }
-                if (isPlannedCandidate) {
-                    Log.i("FusionLiteRT", "All candidates skipped; reusing exactly matching live engine for plan")
-                    lastMtpStatus = currentLoadedState.mtpStatus
-                    // Phase 1: request-local cooldown/skip events are NOT merged
-                    // into the loaded Engine state. The stable acquisition events
-                    // in loadedState remain unchanged, and the current request's
-                    // local events are carried in currentRequestFallbackEvents so
-                    // the snapshot is pure for this request alone.
-                    currentRequestFallbackEvents = recordedFallbackEvents
-                    return currentLoadedState.engine
-                }
-            }
-            recordedFallbackEvents += RuntimeFallbackEvent(
-                reason = FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE
-            )
-            lastMtpStatus = MtpRuntimeStatus.FAILED
-            val attemptSnapshot = RuntimeAttemptSnapshot(
-                requestedAccelerator = profile.accelerator,
-                fallbackEvents = recordedFallbackEvents,
-                modelFingerprint = ModelFingerprintSummary(
-                    canonicalPath = fingerprint.canonicalPath,
-                    fileSize = fingerprint.fileSize,
-                    modifiedAt = fingerprint.modifiedAt,
-                    validationVersion = fingerprint.validationVersion,
-                    mtpSupported = fingerprint.mtpSupported
-                ),
-                mtpRequested = mtpRequested
-            )
-            throw EngineSelectionFailedException(attemptSnapshot, IllegalStateException("All engine candidates skipped due to recent failures"))
-        }
-        val requestedKey = EngineRuntimeKey(
-            fingerprint = fingerprint,
-            accelerator = profile.accelerator,
-            kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-            enableVisionBackend = profile.enableVisionBackend,
-            mtpEnabled = ladder.firstOrNull()?.mtpEnabled ?: false,
-            selectedBackend = preferredBackendName
-        )
-
-        val currentState = loadedState
-        if (currentState != null && currentState.key == requestedKey) {
-            lastMtpStatus = currentState.mtpStatus
-            Log.i("FusionLiteRT", "MTP requested: $mtpRequested (cached engine reused)")
-            Log.i("FusionLiteRT", "MTP status: $lastMtpStatus")
-            Log.i("FusionLiteRT", "Backend: $preferredBackendName")
-            Log.i("FusionLiteRT", "Vision backend requested: ${profile.enableVisionBackend}")
-            Log.i("FusionLiteRT", "Model path: ${File(profile.modelPath).name}")
-            // Phase 1: request-local cooldown/skip events are NOT merged
-            // into the loaded Engine state. They are carried in
-            // currentRequestFallbackEvents and combined with stable
-            // acquisition events at snapshot-build time.
-            currentRequestFallbackEvents = recordedFallbackEvents
-            return currentState.engine
-        }
-
-        unload()
-
-        // Only reset severity when no runtime owner is active.
-        // Benchmark/debug mode owns severity inside its exclusive section.
-        if (!FusionRuntimeLock.isBenchmarkRunning) {
-            Engine.setNativeMinLogSeverity(nativeMinLogSeverity())
-        }
-
-        Log.i("FusionLiteRT", "MTP requested: $mtpRequested")
-        Log.i("FusionLiteRT", "Backend: $preferredBackendName")
-        Log.i("FusionLiteRT", "Vision backend requested: ${profile.enableVisionBackend}")
-        Log.i("FusionLiteRT", "Model path: ${File(profile.modelPath).name}")
-        if (mtpRequested && !mtpSupported) {
-            lastMtpStatus = MtpRuntimeStatus.UNSUPPORTED
-            Log.i("FusionLiteRT", "MTP unsupported model/runtime")
-        } else if (mtpRequested && mtpSupported) {
-            lastMtpStatus = MtpRuntimeStatus.REQUESTED
-            Log.i("FusionLiteRT", "MTP requested, model supports it")
-        } else {
-            lastMtpStatus = MtpRuntimeStatus.OFF
-        }
-
-        var newEngine: Engine? = null
-        var selectedMtpEnabled = false
-        var mtpFlagAppliedForMtp = false
-        var mtpAttempted = false
-        var mtpCapabilityResult: Boolean? = null
-        var lastMtpAttemptBackend: String? = null
-        var failure: Throwable? = null
-        val selection = selectFirstWorkingEngine(
-            ladder = ladder,
-            enableVisionBackend = profile.enableVisionBackend,
+        val coordinator = EngineAcquisitionCoordinator(
+            mtpFailureMemory = mtpFailureMemory,
+            mtpCapabilityProbe = mtpCapabilityProbe,
             configureFlag = { settleSpeculativeDecodingFlag(it) },
-            tryCreate = { backendName, mtpEnabled, visionBackendIsCpu ->
-                // Check MTP capability first if MTP is enabled. A capability
-                // rejection is the *return value* of this lambda; the factory
-                // must NOT be invoked, and the CPU-vision retry must NOT fire.
-                val capabilityResult = if (mtpEnabled) {
-                    mtpAttempted = true
-                    mtpCapabilityProbe(profile.modelPath)
-                } else {
-                    null
-                }
-                if (capabilityResult == false) {
-                    mtpCapabilityResult = false
-                    lastMtpAttemptBackend = backendName
-                    EngineCandidateAttempt.CapabilityRejected(backendName, mtpEnabled)
-                } else {
-                    if (capabilityResult == true) {
-                        mtpCapabilityResult = true
-                        mtpAttempted = true
-                    }
-                    val backend = if (backendName == "CPU") Backend.CPU() else Backend.GPU()
-                    val result = createEngine(
-                        modelPath = profile.modelPath,
-                        backend = backend,
-                        visionBackend = if (profile.enableVisionBackend) {
-                            if (visionBackendIsCpu) Backend.CPU() else backend
-                        } else {
-                            null
-                        },
-                        maxNumTokens = maxNumTokens
-                    )
-                    if (mtpEnabled && result.isFailure) lastMtpAttemptBackend = backendName
-                    if (result.isSuccess) {
-                        EngineCandidateAttempt.Success(result.getOrThrow())
+            engineFactory = { backendName, mtpEnabled, visionBackendIsCpu ->
+                val backend = if (backendName == "CPU") Backend.CPU() else Backend.GPU()
+                val result = createEngine(
+                    modelPath = profile.modelPath,
+                    backend = backend,
+                    visionBackend = if (profile.enableVisionBackend) {
+                        if (visionBackendIsCpu) Backend.CPU() else backend
                     } else {
-                        EngineCandidateAttempt.InitializationFailed(result.exceptionOrNull() ?: IllegalStateException("Engine creation failed"))
-                    }
+                        null
+                    },
+                    maxNumTokens = profile.kvCacheCapacityTokens.coerceAtLeast(1)
+                )
+                if (result.isSuccess) {
+                    EngineCandidateAttempt.Success(result.getOrThrow())
+                } else {
+                    EngineCandidateAttempt.InitializationFailed(result.exceptionOrNull() ?: IllegalStateException("Engine creation failed"))
                 }
-            }
+            },
+            clock = clock
         )
-        val selectionResult = selection.selection
-        if (selectionResult != null) {
-            newEngine = selectionResult.engine
-            selectedMtpEnabled = selectionResult.selectedMtpEnabled
-            mtpFlagAppliedForMtp = selectionResult.mtpFlagAppliedForMtp
-            Log.i(
-                "FusionLiteRT",
-                "Engine initialized with ${selectionResult.backendName}" +
-                    (if (selectedMtpEnabled) " + MTP" else " without MTP")
-            )
-        } else {
-            failure = selection.failure
-            recordedFallbackEvents += RuntimeFallbackEvent(
-                reason = FallbackReason.ALL_CANDIDATES_EXHAUSTED
-            )
-        }
-        recordedFallbackEvents += selection.fallbackEvents
 
-        val resolvedEngine = newEngine ?: run {
-            // Best-effort reset; if this also fails the flag state is unknown
-            // and the next engine selection will re-settle before any init.
+        val outcome = coordinator.acquire(profile, loadedState)
+
+        // Update runtime state based on outcome
+        val selectionResult = outcome.selection
+        if (selectionResult != null) {
+            val resolvedEngine = selectionResult.engine
+            val selectedMtpEnabled = selectionResult.selectedMtpEnabled
+            val mtpFlagAppliedForMtp = selectionResult.mtpFlagAppliedForMtp
+            val actualTextBackend = selectionResult.backendName
+            
+            lastMtpStatus = resolveMtpRuntimeStatus(
+                mtpRequested = profile.mtpRequested,
+                mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported,
+                selectedMtpEnabled = selectedMtpEnabled,
+                mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
+                mtpCapabilityResult = null, // Coordinator doesn't expose probe result directly in SelectionResult
+                mtpSkippedByMemory = outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
+                mtpAttempted = profile.mtpRequested && ModelFingerprint.of(profile.modelPath).mtpSupported
+            )
+            
+            val fallbackReason = resolveMtpFallbackReason(
+                mtpRequested = profile.mtpRequested,
+                mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported,
+                selectedMtpEnabled = selectedMtpEnabled,
+                mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
+                mtpCapabilityResult = null,
+                mtpSkippedByMemory = outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
+                mtpAttempted = profile.mtpRequested && ModelFingerprint.of(profile.modelPath).mtpSupported
+            )
+            
+            val initializedWithMtp = profile.mtpRequested && ModelFingerprint.of(profile.modelPath).mtpSupported && selectedMtpEnabled && mtpFlagAppliedForMtp
+            
+            val runtimeSelection = EngineSelectionRuntime(
+                requestedAccelerator = profile.accelerator.name,
+                actualTextBackend = actualTextBackend,
+                actualVisionBackend = selectionResult.visionBackend,
+                requestedMtp = profile.mtpRequested,
+                initializedWithMtp = initializedWithMtp,
+                fallbackReason = outcome.fallbackEvents.firstOrNull()?.reason?.name ?: fallbackReason
+            )
+
+            currentRequestFallbackEvents = emptyList()
+            loadedState = LoadedRuntimeState(
+                engine = resolvedEngine,
+                key = EngineRuntimeKey(
+                    fingerprint = ModelFingerprint.of(profile.modelPath),
+                    accelerator = profile.accelerator,
+                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+                    enableVisionBackend = profile.enableVisionBackend,
+                    mtpEnabled = selectedMtpEnabled,
+                    selectedBackend = actualTextBackend
+                ),
+                mtpStatus = lastMtpStatus,
+                runtimeSelection = runtimeSelection,
+                actualTextBackend = actualTextBackend,
+                actualVisionBackend = selectionResult.visionBackend,
+                fallbackEvents = outcome.fallbackEvents
+            )
+            return resolvedEngine
+        } else {
+            // Failure path
             settleSpeculativeDecodingFlag(false)
             lastMtpStatus = MtpRuntimeStatus.FAILED
-            val attemptSnapshot = RuntimeAttemptSnapshot(
+            val attemptSnapshot = outcome.failure?.let { failure ->
+                if (failure is EngineSelectionFailedException) {
+                    failure.attemptSnapshot
+                } else {
+                    RuntimeAttemptSnapshot(
+                        requestedAccelerator = profile.accelerator,
+                        fallbackEvents = outcome.fallbackEvents,
+                        modelFingerprint = ModelFingerprintSummary(
+                            canonicalPath = ModelFingerprint.of(profile.modelPath).canonicalPath,
+                            fileSize = ModelFingerprint.of(profile.modelPath).fileSize,
+                            modifiedAt = ModelFingerprint.of(profile.modelPath).modifiedAt,
+                            validationVersion = ModelFingerprint.of(profile.modelPath).validationVersion,
+                            mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported
+                        ),
+                        mtpRequested = profile.mtpRequested
+                    )
+                }
+            } ?: RuntimeAttemptSnapshot(
                 requestedAccelerator = profile.accelerator,
-                fallbackEvents = recordedFallbackEvents,
+                fallbackEvents = outcome.fallbackEvents,
                 modelFingerprint = ModelFingerprintSummary(
-                    canonicalPath = fingerprint.canonicalPath,
-                    fileSize = fingerprint.fileSize,
-                    modifiedAt = fingerprint.modifiedAt,
-                    validationVersion = fingerprint.validationVersion,
-                    mtpSupported = fingerprint.mtpSupported
+                    canonicalPath = ModelFingerprint.of(profile.modelPath).canonicalPath,
+                    fileSize = ModelFingerprint.of(profile.modelPath).fileSize,
+                    modifiedAt = ModelFingerprint.of(profile.modelPath).modifiedAt,
+                    validationVersion = ModelFingerprint.of(profile.modelPath).validationVersion,
+                    mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported
                 ),
-                mtpRequested = mtpRequested
+                mtpRequested = profile.mtpRequested
             )
-            throw EngineSelectionFailedException(attemptSnapshot, failure)
+            throw EngineSelectionFailedException(attemptSnapshot, outcome.failure)
         }
-
-        lastMtpStatus = resolveMtpRuntimeStatus(
-            mtpRequested = mtpRequested,
-            mtpSupported = mtpSupported,
-            selectedMtpEnabled = selectedMtpEnabled,
-            mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
-            mtpCapabilityResult = mtpCapabilityResult,
-            mtpSkippedByMemory = mtpSkippedByMemory,
-            mtpAttempted = mtpAttempted
-        )
-
-        val fallbackReason = resolveMtpFallbackReason(
-            mtpRequested = mtpRequested,
-            mtpSupported = mtpSupported,
-            selectedMtpEnabled = selectedMtpEnabled,
-            mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
-            mtpCapabilityResult = mtpCapabilityResult,
-            mtpSkippedByMemory = mtpSkippedByMemory,
-            mtpAttempted = mtpAttempted
-        )
-        val initializedWithMtp = mtpRequested && mtpSupported && selectedMtpEnabled && mtpFlagAppliedForMtp
-
-        // Record the failure under the exact candidate backend that failed so
-        // the next load skips only that (backend, MTP) combination.
-        if (mtpRequested && mtpSupported && !selectedMtpEnabled && lastMtpAttemptBackend != null) {
-            mtpFailureMemory.recordFailure(
-                modelPath = fingerprint.canonicalPath,
-                backendName = lastMtpAttemptBackend!!,
-                mtpEnabled = true,
-                validationVersion = fingerprint.validationVersion,
-                kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                enableVisionBackend = profile.enableVisionBackend,
-                fileSize = fingerprint.fileSize,
-                modifiedAt = fingerprint.modifiedAt,
-                mtpSupported = fingerprint.mtpSupported,
-                fallbackReason = fallbackReason ?: "MTP initialization failed"
-            )
-        }
-
-        // Record plain backend failures from the selection process into
-        // failure memory so AUTO can skip known-bad non-MTP backends.
-        for (ev in recordedFallbackEvents) {
-            if (ev.reason == FallbackReason.BACKEND_ENGINE_INIT_FAILED &&
-                ev.attemptedTextBackend != null &&
-                !ev.attemptedMtpEnabled!!
-            ) {
-                mtpFailureMemory.recordFailure(
-                    modelPath = fingerprint.canonicalPath,
-                    backendName = ev.attemptedTextBackend!!.name,
-                    mtpEnabled = false,
-                    validationVersion = fingerprint.validationVersion,
-                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                    enableVisionBackend = profile.enableVisionBackend,
-                    fileSize = fingerprint.fileSize,
-                    modifiedAt = fingerprint.modifiedAt,
-                    mtpSupported = fingerprint.mtpSupported,
-                    fallbackReason = "Backend initialization failed"
-                )
-            }
-        }
-
-        val actualTextBackend = selectionResult?.backendName ?: preferredBackendName
-        val selectionFirstReason = recordedFallbackEvents.firstOrNull()?.reason?.name
-        val runtimeSelection = EngineSelectionRuntime(
-            requestedAccelerator = profile.accelerator.name,
-            actualTextBackend = actualTextBackend,
-            actualVisionBackend = selectionResult?.visionBackend,
-            requestedMtp = mtpRequested,
-            initializedWithMtp = initializedWithMtp,
-            fallbackReason = selectionFirstReason ?: fallbackReason
-        )
-
-        // Phase 1: fresh Engine init stores only the acquisition events.
-        // Request-local cooldown events are cleared — there are no pending
-        // skip events to carry forward from this init.
-        currentRequestFallbackEvents = emptyList()
-        // The stored key reflects the engine actually loaded (the selected MTP
-        // state), so a later fallback is reused until the memory skip kicks in.
-        loadedState = LoadedRuntimeState(
-            engine = resolvedEngine,
-            key = requestedKey.copy(mtpEnabled = selectedMtpEnabled, selectedBackend = actualTextBackend),
-            mtpStatus = lastMtpStatus,
-            runtimeSelection = runtimeSelection,
-            actualTextBackend = actualTextBackend,
-            actualVisionBackend = selectionResult?.visionBackend,
-            fallbackEvents = recordedFallbackEvents
-        )
-
-        return resolvedEngine
     }
 
     private fun createEngine(
