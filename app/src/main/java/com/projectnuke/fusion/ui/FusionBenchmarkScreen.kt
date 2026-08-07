@@ -474,7 +474,8 @@ onResult(resultText)
                 success = false,
                 errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot),
                 actualBackend = actualBackend,
-                attemptSnapshot = attemptSnapshot
+                attemptSnapshot = attemptSnapshot,
+                failureSnapshot = e.failureSnapshot
             )
         }.onFailure { saveError ->
             Log.e("FusionBenchmark", "Failed to save benchmark result", saveError)
@@ -517,7 +518,8 @@ onResult(resultText)
                 success = false,
                 errorMessage = sanitizeBenchmarkErrorMessage(e, snapshot),
                 actualBackend = null,
-                attemptSnapshot = attemptSnapshot
+                attemptSnapshot = attemptSnapshot,
+                failureSnapshot = null
             )
         }.onFailure { saveError ->
             Log.e("FusionBenchmark", "Failed to save benchmark result", saveError)
@@ -545,6 +547,7 @@ private suspend fun saveBenchmarkResult(
     actualBackend: String?,
     runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
     attemptSnapshot: com.projectnuke.fusion.llm.RuntimeAttemptSnapshot? = null,
+    failureSnapshot: com.projectnuke.fusion.llm.RuntimeFailureSnapshot? = null,
     nativeStats: GenerationBenchmarkStats? = null
 ) {
     benchmarkDao.insert(
@@ -562,6 +565,7 @@ private suspend fun saveBenchmarkResult(
             actualBackend = actualBackend,
             runtimeSnapshot = runtimeSnapshot,
             attemptSnapshot = attemptSnapshot,
+            failureSnapshot = failureSnapshot,
             nativeStats = nativeStats,
             appVersion = context.appVersionName(),
             deviceModel = "${Build.MANUFACTURER} ${Build.MODEL}",
@@ -591,6 +595,7 @@ internal fun buildBenchmarkResultEntityPayload(
     actualBackend: String?,
     runtimeSnapshot: com.projectnuke.fusion.llm.RuntimeExecutionSnapshot? = null,
     attemptSnapshot: com.projectnuke.fusion.llm.RuntimeAttemptSnapshot? = null,
+    failureSnapshot: com.projectnuke.fusion.llm.RuntimeFailureSnapshot? = null,
     nativeStats: GenerationBenchmarkStats? = null,
     appVersion: String?,
     deviceModel: String,
@@ -599,13 +604,19 @@ internal fun buildBenchmarkResultEntityPayload(
 ): BenchmarkResultEntity {
     val selectedTextBackend = if (success) {
         runtimeSnapshot?.selectedTextBackend?.name ?: actualBackend
+    } else if (failureSnapshot != null) {
+        // Generation-after-acquisition failure: we have a real selected backend
+        failureSnapshot.selectedTextBackend?.name
     } else {
-        // For failed runs with attemptSnapshot, there's no selected backend
+        // For failed runs with attemptSnapshot only (acquisition failure), there's no selected backend
         // For legacy failed runs without attemptSnapshot, fall back to actualBackend
         if (attemptSnapshot != null) null else actualBackend
     }
     val selectedVisionBackend = if (success) {
         runtimeSnapshot?.selectedVisionBackend?.name
+    } else if (failureSnapshot != null) {
+        // Generation-after-acquisition failure: preserve vision backend
+        failureSnapshot.selectedVisionBackend?.name
     } else {
         null
     }
@@ -616,18 +627,32 @@ internal fun buildBenchmarkResultEntityPayload(
     }
     val fallbackEventCodes = if (success) {
         runtimeSnapshot?.let { FallbackCauseFormatter.formatCodes(it) }
+    } else if (failureSnapshot != null) {
+        // Generation-after-acquisition failure: use acquisition fallback events from failure snapshot
+        FallbackCauseFormatter.formatCodes(failureSnapshot)
     } else {
         attemptSnapshot?.let { FallbackCauseFormatter.formatCodes(it) }
     }
     val mtpRequestedFromSnapshot = if (success) {
         runtimeSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)
+    } else if (failureSnapshot != null) {
+        failureSnapshot.mtpRequested
     } else {
         attemptSnapshot?.mtpRequested ?: (snapshot.settings.speculativeDecodingEnabled == true)
     }
     val initializedWithMtp = if (success) {
         runtimeSnapshot?.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
+    } else if (failureSnapshot != null) {
+        failureSnapshot.mtpRuntimeStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST
     } else {
         false
+    }
+    val mtpRuntimeStatus = if (success) {
+        runtimeSnapshot?.mtpStatus
+    } else if (failureSnapshot != null) {
+        failureSnapshot.mtpRuntimeStatus
+    } else {
+        mtpStatus
     }
     return BenchmarkResultEntity(
         createdAt = createdAtMs,
@@ -638,7 +663,7 @@ internal fun buildBenchmarkResultEntityPayload(
         selectedVisionBackend = selectedVisionBackend,
         samplerBackend = samplerBackend,
         mtpRequested = mtpRequestedFromSnapshot,
-        mtpStatus = mtpStatus.toKoreanMtpStatus(),
+        mtpStatus = mtpRuntimeStatus?.toKoreanMtpStatus() ?: MtpRuntimeStatus.OFF.toKoreanMtpStatus(),
         fallbackEventCodes = fallbackEventCodes,
         initializedWithMtp = initializedWithMtp,
         nativeTtftSeconds = nativeStats?.timeToFirstTokenSeconds,
