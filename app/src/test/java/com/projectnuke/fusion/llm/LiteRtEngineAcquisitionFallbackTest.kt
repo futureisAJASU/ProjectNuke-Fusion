@@ -9,7 +9,7 @@ import org.junit.Test
  * Dummy class for testing - used as the generic type for selectFirstWorkingEngine.
  * Must not extend Engine (which is final).
  */
-private class DummyEngine
+internal class DummyEngine
 
 class LiteRtEngineAcquisitionFallbackTest {
 
