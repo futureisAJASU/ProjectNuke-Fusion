@@ -406,7 +406,7 @@ fun FusionModelSpec.deviceLabel(): String = when (recommendedDeviceClass) {
 fun FusionModelSpec.recommendedMaxTokensFor8GbLabel(): String = if (recommendedMaxTokens8Gb > 0) "maxTokens ${recommendedMaxTokens8Gb}" else "서버 설정 필요"
 
 fun FusionModelSpec.applyRecommendedSettings(editor: android.content.SharedPreferences.Editor) {
-    if (recommendedMaxTokens8Gb > 0) editor.putInt("max_tokens", recommendedMaxTokens8Gb)
+    if (recommendedMaxTokens8Gb > 0) editor.putInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, recommendedMaxTokens8Gb)
     editor.putBoolean("speculative_decoding_enabled", recommendedMtpEnabled)
     editor.putBoolean("reasoning_enabled", recommendedReasoningEnabled)
     if (runtimeFormat == ModelRuntimeFormat.EXYNOS_AI_STUDIO) editor.putString("accelerator", AcceleratorMode.AUTO.name)

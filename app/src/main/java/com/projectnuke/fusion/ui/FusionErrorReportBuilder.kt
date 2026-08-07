@@ -47,7 +47,7 @@ suspend fun buildFusionDeveloperLogSnapshotFromHistory(
     val mtpEnabled = prefs.getBoolean("speculative_decoding_enabled", false)
     val reasoningEnabled = prefs.getBoolean("reasoning_enabled", false)
     val webSearchEnabled = prefs.getBoolean("web_search_enabled", false)
-    val maxTokens = prefs.getInt("max_tokens", 4000)
+    val maxTokens = prefs.getInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, 4000)
     val temperature = prefs.getFloat("temperature", 1.0f)
     val topK = prefs.getInt("top_k", 64)
     val topP = prefs.getFloat("top_p", 0.95f)

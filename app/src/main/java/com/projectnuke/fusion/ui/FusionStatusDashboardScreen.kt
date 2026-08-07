@@ -154,7 +154,7 @@ private suspend fun buildFusionStatusDashboardSnapshot(
     val selectedModelPath = prefs.getString("selected_model_path", null)
     val accelerator = prefs.getString("accelerator", "GPU") ?: "GPU"
     val mtpEnabled = prefs.getBoolean("speculative_decoding_enabled", false)
-    val maxTokens = prefs.getInt("max_tokens", 4000)
+    val maxTokens = prefs.getInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, 4000)
     val temperature = prefs.getFloat("temperature", 1.0f)
     val topK = prefs.getInt("top_k", 64)
     val topP = prefs.getFloat("top_p", 0.95f)

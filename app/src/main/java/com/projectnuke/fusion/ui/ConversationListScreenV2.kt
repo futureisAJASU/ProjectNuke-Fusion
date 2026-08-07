@@ -687,7 +687,7 @@ fun ConversationListScreenV2(
                     val modelName = prefs.getString("selected_model", "Gemma 4 E2B-it") ?: "Gemma 4 E2B-it"
                     val modelPath = prefs.getString("selected_model_path", null)
                     val accelerator = prefs.getString("accelerator", "GPU") ?: "GPU"
-                    val maxTokens = prefs.getInt("max_tokens", 4000)
+                    val maxTokens = prefs.getInt(LocalGenerationSettingsPolicy.KEY_MAX_TOKENS, 4000)
                     val topK = prefs.getInt("top_k", 64)
                     val topP = prefs.getFloat("top_p", 0.95f)
                     val temperature = prefs.getFloat("temperature", 1.0f)

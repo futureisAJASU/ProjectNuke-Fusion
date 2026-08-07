@@ -538,8 +538,8 @@ private fun FusionPulseAmbientLight(
 private const val ChatOptionConversationSummary = "대화 요약"
 private const val ChatOptionMemoryCandidateExtraction = "메모리 후보 추출"
 private const val FusionPrefsName = "fusion_chat_settings"
-private const val PrefMaxTokens = "max_tokens"
-private const val PrefKvCacheCapacityTokens = "kv_cache_capacity_tokens"
+private const val PrefMaxTokens = LocalGenerationSettingsPolicy.KEY_MAX_TOKENS
+private const val PrefKvCacheCapacityTokens = LocalGenerationSettingsPolicy.KEY_KV_CACHE
 private const val PrefTopK = "top_k"
 private const val PrefTopP = "top_p"
 private const val PrefTemperature = "temperature"
