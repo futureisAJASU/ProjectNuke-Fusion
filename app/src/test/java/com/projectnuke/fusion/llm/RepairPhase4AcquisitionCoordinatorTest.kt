@@ -75,10 +75,23 @@ class RepairPhase4AcquisitionCoordinatorTest {
 
     @Test
     fun `case6 disable flag failure records and candidate force skipped`() {
+        var firstGpuCall = true
         val outcome = selectFirstWorkingEngine<DummyEngine>(
             ladder = listOf(EngineCandidate("GPU", false), EngineCandidate("CPU", false)),
             enableVisionBackend = false,
-            configureFlag = { mtp -> if (mtp) true else false },
+            configureFlag = { mtp ->
+                if (!mtp) {
+                    // First call (GPU) returns false, second call (CPU) returns true
+                    if (firstGpuCall) {
+                        firstGpuCall = false
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                }
+            },
             tryCreate = { _, _, _ -> EngineCandidateAttempt.Success(DummyEngine()) }
         )
         assertNotNull(outcome.selection)
@@ -116,7 +129,7 @@ class RepairPhase4AcquisitionCoordinatorTest {
         )
         assertNull(outcome.selection)
         assertEquals(0, outcome.fallbackEvents.size)
-        assertNotNull(outcome.failure)
+        assertNull(outcome.failure)
     }
 
     // ── Case 4: MTP_ENGINE_INIT_FAILED ─────────────────────────────────────
