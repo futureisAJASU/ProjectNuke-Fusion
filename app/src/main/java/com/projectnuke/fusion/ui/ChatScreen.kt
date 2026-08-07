@@ -3313,13 +3313,26 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                                     DeveloperLogStore.record(context, "chat", "답변 생성 실패", "empty")
                                                     return@start
                                                 }
-                                                is GenerationOutcome.Failure -> {
-                                                    DeveloperLogStore.record(context, "chat", "답변 생성 실패", rawOutcome.kind.name)
-                                                    if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == snapshot.conversationId) {
-                                                        Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
-                                                    }
-                                                    return@start
-                                                }
+                                 is GenerationOutcome.Failure -> {
+                                     if (chatViewModel.registry.isActive(s.conversationId, s.requestId) && currentConversationId == snapshot.conversationId) {
+                                         Toast.makeText(context, rawOutcome.message, Toast.LENGTH_LONG).show()
+                                     }
+                                     val runtimeFields = outcomeRuntimeFields(rawOutcome, engine)
+                                     chatViewModel.updateRequestState(s.conversationId, snapshot.requestId, true) { it.copy(
+                                         streamingMetricsLine = buildFusionMetricsLine(
+                                             shortModelName(snapshot.selectedModelId!!),
+                                             buildAcceleratorLabel(acceleratorName = requestSettings.accelerator.name, speculativeDecodingEnabled = requestSettings.speculativeDecodingEnabled == true),
+                                             "",
+                                             0L,
+                                             null,
+                                             buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = false, mtpStatus = runtimeFields.mtpStatus, actualBackend = runtimeFields.actualBackend, actualVisionBackend = runtimeFields.actualVisionBackend)),
+                                             rawOutcome.stats,
+                                             buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, requestSettings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes)
+                                         ),
+                                         generationStatus = "오류 발생"
+                                     )
+                                     return@start
+                                 }
                                             }
 
                                             if (!chatViewModel.registry.isActive(s.conversationId, s.requestId)) return@start

@@ -467,6 +467,9 @@ private fun AbResultCard(
         } else {
             Text("이 대상의 실행에 실패했습니다.", color = AbFail)
             Text(result.errorMessage.orEmpty(), color = AbSubtle, fontSize = 12.sp)
+            result.appliedRuntimeLine()?.let {
+                Text(it, color = AbSubtle, fontSize = 12.sp)
+            }
         }
     }
 }
