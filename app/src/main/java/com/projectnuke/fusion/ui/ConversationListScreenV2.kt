@@ -71,6 +71,7 @@ import com.projectnuke.fusion.data.BenchmarkDao
 import com.projectnuke.fusion.data.ConversationEntity
 import com.projectnuke.fusion.data.MessageEntity
 import com.projectnuke.fusion.data.escapeSqlLikeQuery
+import com.projectnuke.fusion.model.LocalGenerationSettingsPolicy
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.AttachmentStorageStats
 import com.projectnuke.fusion.util.collectFusionSocInfo

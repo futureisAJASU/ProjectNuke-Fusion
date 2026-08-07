@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import com.projectnuke.fusion.data.BenchmarkResultEntity
+import com.projectnuke.fusion.model.LocalGenerationSettingsPolicy
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
 import com.projectnuke.fusion.util.collectFusionSocInfo
 import java.text.SimpleDateFormat

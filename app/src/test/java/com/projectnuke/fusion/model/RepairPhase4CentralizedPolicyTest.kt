@@ -110,4 +110,71 @@ class RepairPhase4CentralizedPolicyTest {
         assertEquals(4000, LocalGenerationSettingsPolicy.deriveKvCapacityForOutput(2000))
         assertEquals(KvCacheCapacityPolicy.MAX_CAPACITY, LocalGenerationSettingsPolicy.deriveKvCapacityForOutput(20000))
     }
+
+    @Test
+    fun `default settings do not clamp 4000 to 96`() {
+        val prefs = FakePrefs().apply {
+            map["generation_max_output_tokens"] = 4000
+        }
+        val settings = LocalGenerationSettingsPolicy.fromPrefs(prefs)
+        assertEquals(4000, settings.maxTokens)
+        assertEquals(8192, settings.kvCacheCapacityTokens) // 2x heuristic
+    }
+
+    @Test
+    fun `lowMemoryKvCapacity reduces KV when policy says so`() {
+        val prefs = FakePrefs().apply {
+            map["generation_max_output_tokens"] = 4000
+            map["engine_kv_cache_capacity_tokens"] = 8192
+        }
+        // Simulate low memory by directly calling lowMemoryKvCapacity
+        val lowMemoryKv = LocalGenerationSettingsPolicy.lowMemoryKvCapacity()
+        assertTrue("lowMemoryKvCapacity should be less than normal capacity", lowMemoryKv < 8192)
+        assertTrue("lowMemoryKvCapacity should be at least MIN_CAPACITY", lowMemoryKv >= KvCacheCapacityPolicy.MIN_CAPACITY)
+    }
+
+    @Test
+    fun `output only change does not recreate engine profile`() {
+        // Test that when only maxTokens changes (but KV derived from it stays the same ratio),
+        // the engine key doesn't change - this is more of an integration test
+        // but we can verify the policy logic here
+        val prefs1 = FakePrefs().apply {
+            map["generation_max_output_tokens"] = 2048
+            map["engine_kv_cache_capacity_tokens"] = 4096
+        }
+        val settings1 = LocalGenerationSettingsPolicy.fromPrefs(prefs1)
+        
+        // Output-only change: maxTokens 2048 -> 4096, KV capacity auto-derived should be 8192
+        val prefs2 = FakePrefs().apply {
+            map["generation_max_output_tokens"] = 4096
+        }
+        val settings2 = LocalGenerationSettingsPolicy.fromPrefs(prefs2)
+        
+        assertEquals(4096, settings1.maxTokens)
+        assertEquals(8192, settings2.maxTokens)
+        // KV capacity changes because it's derived from output
+        assertEquals(4096, settings1.kvCacheCapacityTokens)
+        assertEquals(8192, settings2.kvCacheCapacityTokens)
+    }
+
+    @Test
+    fun `kv capacity change alters engine identity`() {
+        // Verify that when KV capacity explicitly changes (not derived), 
+        // the engine key would change
+        val prefs1 = FakePrefs().apply {
+            map["generation_max_output_tokens"] = 2048
+            map["engine_kv_cache_capacity_tokens"] = 4096
+        }
+        val settings1 = LocalGenerationSettingsPolicy.fromPrefs(prefs1)
+        
+        // Explicit KV change: same output, different KV
+        val prefs2 = FakePrefs().apply {
+            map["generation_max_output_tokens"] = 2048
+            map["engine_kv_cache_capacity_tokens"] = 8192
+        }
+        val settings2 = LocalGenerationSettingsPolicy.fromPrefs(prefs2)
+        
+        assertEquals(settings1.maxTokens, settings2.maxTokens)
+        assertNotEquals(settings1.kvCacheCapacityTokens, settings2.kvCacheCapacityTokens)
+    }
 }

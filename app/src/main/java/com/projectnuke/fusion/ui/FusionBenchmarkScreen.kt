@@ -256,6 +256,7 @@ internal data class BenchmarkSnapshot(
     val modelPath: String?,
     val settings: GenerationSettings,
     val requestedMaxTokens: Int,
+    val requestedKvCapacity: Int,
     val safeMaxTokensCap: Int?,
     val reasoningEnabled: Boolean,
     val webSearchEnabled: Boolean
@@ -379,6 +380,10 @@ try {
                 if (snapshot.safeMaxTokensCap != null && snapshot.requestedMaxTokens != snapshot.settings.maxTokens) {
                     appendLine("설정값: maxTokens=${snapshot.requestedMaxTokens}")
                     appendLine("적용값: maxTokens=${snapshot.settings.maxTokens}")
+                }
+                if (snapshot.requestedKvCapacity != snapshot.settings.kvCacheCapacityTokens) {
+                    appendLine("설정값: KV캐시=${snapshot.requestedKvCapacity} tokens")
+                    appendLine("적용값: KV캐시=${snapshot.settings.kvCacheCapacityTokens} tokens (저메모리 조정)")
                 }
                 appendLine("모델 설정을 다시 적용했습니다.")
                 appendLine("모델 설정 재적용 시간: ${engineReloadMs}ms")
@@ -722,10 +727,17 @@ private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.Share
     val rawSettings = loadBenchmarkSettingsFromPrefs(prefs)
     val safeCap = benchmarkSafeMaxTokensCap(context)
     val recommendedMaxTokens = FusionMemoryManager.recommendedBenchmarkMaxTokens(context, rawSettings.maxTokens)
+    val isLowMemoryAdjustment = recommendedMaxTokens != rawSettings.maxTokens
+    val effectiveKvCapacity = if (isLowMemoryAdjustment) {
+        LocalGenerationSettingsPolicy.lowMemoryKvCapacity()
+    } else {
+        rawSettings.kvCacheCapacityTokens
+    }
     val resolvedModelPath = resolveBenchmarkModelPath(context, modelName, selectedPath)
-    val effectiveSettings = if (recommendedMaxTokens != rawSettings.maxTokens) {
+    val effectiveSettings = if (isLowMemoryAdjustment) {
         rawSettings.copy(
             maxTokens = recommendedMaxTokens,
+            kvCacheCapacityTokens = effectiveKvCapacity,
             speculativeDecodingEnabled = resolvedModelPath?.let { path ->
                 MtpPolicyProduction.resolveEffectiveMtpSetting(
                     modelPath = path,
@@ -734,18 +746,22 @@ private fun loadBenchmarkSnapshot(context: Context, prefs: android.content.Share
             } ?: false
         )
     } else {
-        rawSettings.copy(speculativeDecodingEnabled = resolvedModelPath?.let { path ->
-            MtpPolicyProduction.resolveEffectiveMtpSetting(
-                modelPath = path,
-                settings = rawSettings
-            )
-        } ?: false)
+        rawSettings.copy(
+            kvCacheCapacityTokens = effectiveKvCapacity,
+            speculativeDecodingEnabled = resolvedModelPath?.let { path ->
+                MtpPolicyProduction.resolveEffectiveMtpSetting(
+                    modelPath = path,
+                    settings = rawSettings
+                )
+            } ?: false
+        )
     }
     return BenchmarkSnapshot(
         modelName = modelName,
         modelPath = resolveBenchmarkModelPath(context, modelName, selectedPath),
         settings = effectiveSettings,
         requestedMaxTokens = rawSettings.maxTokens,
+        requestedKvCapacity = rawSettings.kvCacheCapacityTokens,
         safeMaxTokensCap = safeCap,
         reasoningEnabled = false,
         webSearchEnabled = false

@@ -31,6 +31,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.projectnuke.fusion.data.BenchmarkResultEntity
+import com.projectnuke.fusion.model.LocalGenerationSettingsPolicy
 import com.projectnuke.fusion.modelzoo.FusionModelCatalog
 import com.projectnuke.fusion.modelzoo.FusionModelMemoryPreflight
 import com.projectnuke.fusion.util.FusionMemoryManager
