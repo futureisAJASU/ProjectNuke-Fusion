@@ -102,7 +102,10 @@ fun buildAppliedRuntimeLine(
     if (actualBackend == null) return null
     var result = "적용: $actualBackend · MTP ${mtpStatus.toKoreanMtpStatus()}"
     if (mtpRequested && fallbackEventCodes != null && fallbackEventCodes.isNotBlank()) {
-        result += " · 폴백: $fallbackEventCodes"
+        val fallbackDisplay = FallbackCauseFormatter.renderStoredCodesForDisplay(fallbackEventCodes)
+        if (fallbackDisplay.isNotBlank()) {
+            result += " · 폴백: $fallbackDisplay"
+        }
     }
     return result
 }

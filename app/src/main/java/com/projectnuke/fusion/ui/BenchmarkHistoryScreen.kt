@@ -485,7 +485,10 @@ private fun BenchmarkResultEntity.toCopyText(): String {
         appendLine("Actual backend: ${selectedTextBackend ?: "unknown"}")
         appendLine("MTP toggle: ${if (mtpRequested) "on" else "off"}")
         appendLine("MTP runtime status: $mtpStatus")
-        if (!fallbackEventCodes.isNullOrBlank()) appendLine("Fallback events: $fallbackEventCodes")
+        if (!fallbackEventCodes.isNullOrBlank()) {
+            val rendered = FallbackCauseFormatter.renderStoredCodesForDisplay(fallbackEventCodes)
+            appendLine("폴백: $rendered")
+        }
         if (samplerBackend.isNotBlank() && samplerBackend != "UNKNOWN") appendLine("Sampler backend: $samplerBackend")
         if (!selectedVisionBackend.isNullOrBlank()) appendLine("Selected vision backend: $selectedVisionBackend")
         appendLine("Initialized with MTP: $initializedWithMtp")

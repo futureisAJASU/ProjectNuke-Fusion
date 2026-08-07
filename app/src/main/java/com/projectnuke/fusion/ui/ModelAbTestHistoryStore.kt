@@ -303,7 +303,10 @@ fun StoredAbTestSession.toMarkdown(): String = buildString {
 fun StoredAbTestResult.settingsSummary(): String {
     var result = "가속기=$accelerator · maxTokens=$maxTokens · temp=$temperature · topK=$topK · topP=$topP · MTP=${if (mtpEnabled) "켜짐" else "꺼짐"} · Reasoning=${if (reasoningEnabled) "켜짐" else "꺼짐"} · 메모리=${if (memoryEnabled) "사용" else "사용 안 함"}"
     if (!fallbackEventCodes.isNullOrBlank()) {
-        result += " · 폴백: $fallbackEventCodes"
+        val rendered = FallbackCauseFormatter.renderStoredCodesForDisplay(fallbackEventCodes)
+        if (rendered.isNotBlank()) {
+            result += " · 폴백: $rendered"
+        }
     }
     return result
 }
