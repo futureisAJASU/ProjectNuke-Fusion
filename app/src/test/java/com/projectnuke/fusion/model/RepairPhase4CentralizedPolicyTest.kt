@@ -134,27 +134,30 @@ class RepairPhase4CentralizedPolicyTest {
     }
 
     @Test
-    fun `output only change does not recreate engine profile`() {
-        // Test that when only maxTokens changes (but KV derived from it stays the same ratio),
-        // the engine key doesn't change - this is more of an integration test
-        // but we can verify the policy logic here
+    fun `output only change with constant KV does not change engine profile`() {
+        // Test that when only maxTokens changes but KV capacity stays constant,
+        // the RequestedEngineProfile doesn't change (since KV is part of profile identity)
         val prefs1 = FakePrefs().apply {
             map["generation_max_output_tokens"] = 2048
-            map["engine_kv_cache_capacity_tokens"] = 4096
+            map["engine_kv_cache_capacity_tokens"] = 8192
         }
         val settings1 = LocalGenerationSettingsPolicy.fromPrefs(prefs1)
         
-        // Output-only change: maxTokens 2048 -> 4096, KV auto-derived 4096 -> 8192
+        // Output-only change: maxTokens 2048 -> 4096, KV explicitly kept at 8192
         val prefs2 = FakePrefs().apply {
             map["generation_max_output_tokens"] = 4096
+            map["engine_kv_cache_capacity_tokens"] = 8192
         }
         val settings2 = LocalGenerationSettingsPolicy.fromPrefs(prefs2)
         
         assertEquals(2048, settings1.maxTokens)
         assertEquals(4096, settings2.maxTokens)
-        // KV capacity changes because it's derived from output
-        assertEquals(4096, settings1.kvCacheCapacityTokens)
+        // KV capacity stays the same because it's explicitly set
+        assertEquals(8192, settings1.kvCacheCapacityTokens)
         assertEquals(8192, settings2.kvCacheCapacityTokens)
+        // RequestedEngineProfile should be identical since KV is the same
+        assertEquals(settings1.toRequestedEngineProfile("model.litertlm", enableVisionBackend = false),
+            settings2.toRequestedEngineProfile("model.litertlm", enableVisionBackend = false))
     }
 
     @Test

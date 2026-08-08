@@ -668,4 +668,44 @@ class RepairPhase4AcquisitionCoordinatorTest {
         assertNotEquals(outcome2.selection!!.engine, outcome3.selection!!.engine)
         assertEquals(listOf("GPU" to true, "GPU" to false, "GPU" to true), calls)
     }
+
+    // ── Phase 7: terminal exhaustion ────────────────────────────────────────────
+
+    @Test
+    fun `terminal exhaustion produces ALL_CANDIDATES_EXHAUSTED not ALL_CANDIDATES_SKIPPED_RECENT_FAILURE`() {
+        // When all candidates fail through initialization (not cooldown), we should get EXHAUSTED
+        val coordinator = createCoordinator(
+            factory = { backend, mtp, _ ->
+                EngineCandidateAttempt.InitializationFailed(RuntimeException("$backend init failed"))
+            }
+        )
+
+        val outcome = coordinator.acquire(defaultProfile, null)
+
+        assertNull(outcome.selection)
+        assertNotNull(outcome.failure)
+        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_EXHAUSTED })
+        // Should NOT have ALL_CANDIDATES_SKIPPED_RECENT_FAILURE since these are fresh failures
+        assertFalse(outcome.fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE })
+    }
+
+    @Test
+    fun `flag settlement failure for all candidates produces terminal exhaustion`() {
+        // When all candidates fail flag settlement (not factory), we should get EXHAUSTED
+        val coordinator = createCoordinator(
+            flag = { false }, // Fail flag settlement for all candidates
+            factory = { backend, mtp, _ ->
+                EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+            }
+        )
+
+        val outcome = coordinator.acquire(defaultProfile, null)
+
+        assertNull(outcome.selection)
+        assertNotNull(outcome.failure)
+        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.ALL_CANDIDATES_EXHAUSTED })
+        // Should have SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED and SPECULATIVE_DISABLE_FLAG_SETTLEMENT_FAILED
+        // Default profile AUTO has 3 candidates: GPU+MTP, GPU, CPU -> 3 flag settlement failures
+        assertEquals(3, outcome.fallbackEvents.count { it.reason == FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED || it.reason == FallbackReason.SPECULATIVE_DISABLE_FLAG_SETTLEMENT_FAILED })
+    }
 }

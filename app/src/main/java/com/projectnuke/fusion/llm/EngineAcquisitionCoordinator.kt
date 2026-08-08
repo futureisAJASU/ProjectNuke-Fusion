@@ -251,11 +251,16 @@ internal class EngineAcquisitionCoordinator<T>(
         }
 
         // Add terminal all-candidates-exhausted event when candidates were attempted
+        // or all candidates failed terminal failures (flag settlement, capability probe, factory)
         var finalEvents = allEvents
-        val candidatesAttempted = selection.fallbackEvents.any {
-            it.reason == FallbackReason.BACKEND_ENGINE_INIT_FAILED || it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED
+        val candidatesReachedTerminal = selection.fallbackEvents.any {
+            it.reason == FallbackReason.BACKEND_ENGINE_INIT_FAILED ||
+            it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED ||
+            it.reason == FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED ||
+            it.reason == FallbackReason.SPECULATIVE_DISABLE_FLAG_SETTLEMENT_FAILED ||
+            it.reason == FallbackReason.MTP_UNSUPPORTED
         }
-        if (selection.selection == null && selection.failure != null && candidatesAttempted) {
+        if (selection.selection == null && selection.failure != null && candidatesReachedTerminal) {
             finalEvents = allEvents + RuntimeFallbackEvent(
                 reason = FallbackReason.ALL_CANDIDATES_EXHAUSTED
             )
