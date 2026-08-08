@@ -87,10 +87,10 @@ class AppDatabaseMigrationTest {
         // Phase 3: Run Migration3To4
         val appContext = ApplicationProvider.getApplicationContext<Context>()
         db.close()
-        helper.runMigrationsAndValidate("fusion-test-db", 4, true, AppDatabase.Migration3To4)
+        val migratedDb = helper.runMigrationsAndValidate("fusion-test-db", 4, true, AppDatabase.Migration3To4)
 
         // Phase 4: Verify v4 schema
-        val cursorV4 = db.query("PRAGMA table_info(benchmark_results)")
+        val cursorV4 = migratedDb.query("PRAGMA table_info(benchmark_results)")
         val v4Columns = mutableSetOf<String>()
         while (cursorV4.moveToNext()) {
             v4Columns.add(cursorV4.getString(1))
@@ -112,6 +112,9 @@ class AppDatabaseMigrationTest {
         assertTrue("v4 should have nativePrefillTokenCount", v4Columns.contains("nativePrefillTokenCount"))
         assertTrue("v4 should have nativeDecodeTokenCount", v4Columns.contains("nativeDecodeTokenCount"))
         assertTrue("v4 should have nativeInitTimeSeconds", v4Columns.contains("nativeInitTimeSeconds"))
+
+        // Close migratedDb before opening production AppDatabase
+        migratedDb.close()
 
         // Phase 5: Open migrated database through production AppDatabase
         val appDb = Room.databaseBuilder(
