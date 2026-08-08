@@ -137,7 +137,10 @@ class ChatViewModelLifecycleAndDraftTest {
         val vm = ChatViewModel()
         vm.update(1L) { it.copy(activeRequestId = "A", isGenerating = true) }
         vm.finishRequestState(1L, "A")
-        assertFalse(vm.states.value.containsKey(1L))
+        // State is not removed but finished (preserves lastRuntimeDiagnostics)
+        val state = vm.state(1L)
+        assertNull(state.activeRequestId)
+        assertFalse(state.isGenerating)
 
         vm.update(1L) { it.copy(activeRequestId = "B", isGenerating = true) }
         vm.finishRequestState(1L, "A")

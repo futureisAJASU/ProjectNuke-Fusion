@@ -7,6 +7,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.createSavedStateHandle
 import android.content.Context
+import com.projectnuke.fusion.llm.*
+import com.projectnuke.fusion.model.AcceleratorMode
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
@@ -19,6 +21,26 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.util.concurrent.ConcurrentHashMap
 
+data class RuntimeDiagnostics(
+    val requestedConfig: RequestedConfig,
+    val attemptedBackend: String?,
+    val selectedBackend: String?,
+    val mtpRequested: Boolean,
+    val mtpRuntimeStatus: MtpRuntimeStatus,
+    val fallbackReason: String?,
+    val attemptSnapshot: RuntimeAttemptSnapshot?,
+    val failureSnapshot: RuntimeFailureSnapshot?,
+)
+
+data class RequestedConfig(
+    val modelId: String,
+    val accelerator: AcceleratorMode,
+    val kvCacheCapacityTokens: Int,
+    val mtpRequested: Boolean,
+    val enableVisionBackend: Boolean,
+    val speculativeDecodingEnabled: Boolean,
+)
+
 data class ConversationGenerationState(
     val isGenerating: Boolean = false,
     val activeRequestId: String? = null,
@@ -28,7 +50,20 @@ data class ConversationGenerationState(
     val regeneratingMessageId: Long? = null,
     val extractingMemoryCandidates: Boolean = false,
     val actualWebSearchUsed: Boolean = false,
-)
+    /** Last runtime diagnostics preserved after request finalization (success or failure). */
+    val lastRuntimeDiagnostics: RuntimeDiagnostics? = null,
+) {
+    /** Returns a copy preserving lastRuntimeDiagnostics while clearing transient streaming fields. */
+    fun finished(): ConversationGenerationState = copy(
+        isGenerating = false,
+        activeRequestId = null,
+        streamingText = null,
+        streamingMetricsLine = null,
+        generationStatus = null,
+        regeneratingMessageId = null,
+        extractingMemoryCandidates = false,
+    )
+}
 
 data class PendingAttachmentIdentity(
     val name: String,
@@ -120,7 +155,7 @@ class ChatViewModel(
         _states.update { current ->
             val existing = current[conversationId] ?: return@update current
             if (existing.activeRequestId != requestId) return@update current
-            current - conversationId
+            current + (conversationId to existing.finished())
         }
     }
 

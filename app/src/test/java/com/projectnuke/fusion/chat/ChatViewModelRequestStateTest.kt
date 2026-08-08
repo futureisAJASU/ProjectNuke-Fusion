@@ -45,6 +45,7 @@ class ChatViewModelRequestStateTest {
 
         vm.finishRequestState(convId, "A")
         val state = vm.state(convId)
+        // State is not completely cleared - it preserves lastRuntimeDiagnostics and actualWebSearchUsed
         assertNull(state.activeRequestId)
         assertFalse(state.isGenerating)
         assertNull(state.streamingText)
@@ -52,7 +53,7 @@ class ChatViewModelRequestStateTest {
         assertNull(state.generationStatus)
         assertNull(state.regeneratingMessageId)
         assertFalse(state.extractingMemoryCandidates)
-        assertFalse(state.actualWebSearchUsed)
+        assertTrue(state.actualWebSearchUsed) // Preserved after finishRequestState
     }
 
     @Test
@@ -180,7 +181,7 @@ class ChatViewModelRequestStateTest {
             assertNull(state.generationStatus)
             assertNull(state.regeneratingMessageId)
             assertFalse(state.extractingMemoryCandidates)
-            assertFalse(state.actualWebSearchUsed)
+            assertTrue(state.actualWebSearchUsed) // Preserved after cancelGeneration
         } finally {
             holdGate.complete(Unit)
             scope.cancel()
