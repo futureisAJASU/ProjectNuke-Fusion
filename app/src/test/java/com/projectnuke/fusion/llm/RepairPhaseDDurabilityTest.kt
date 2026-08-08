@@ -86,7 +86,45 @@ class RepairPhaseDDurabilityTest {
 
     /** Minimal ContextWrapper for unit tests (no App needed). */
     private class TestContext : android.content.ContextWrapper(null) {
+        private val prefs = InMemoryPrefs()
+
         override fun getApplicationContext(): android.content.Context = this
+
+        override fun getSharedPreferences(name: String, mode: Int): android.content.SharedPreferences = prefs
+    }
+
+    /** In-memory SharedPreferences so the developer-log store works in JVM tests. */
+    private class InMemoryPrefs : android.content.SharedPreferences {
+        private val map = mutableMapOf<String, Any?>()
+
+        override fun getAll(): MutableMap<String, *> = map
+        override fun getString(key: String, defValue: String?): String? = map[key] as? String ?: defValue
+        override fun getStringSet(key: String, defValues: MutableSet<String>?): MutableSet<String>? = null
+        override fun getInt(key: String, defValue: Int): Int = map[key] as? Int ?: defValue
+        override fun getLong(key: String, defValue: Long): Long = map[key] as? Long ?: defValue
+        override fun getFloat(key: String, defValue: Float): Float = map[key] as? Float ?: defValue
+        override fun getBoolean(key: String, defValue: Boolean): Boolean = map[key] as? Boolean ?: defValue
+        override fun contains(key: String): Boolean = map.containsKey(key)
+        override fun edit(): android.content.SharedPreferences.Editor = InMemoryEditor()
+        override fun registerOnSharedPreferenceChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) {}
+        override fun unregisterOnSharedPreferenceChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener) {}
+
+        private inner class InMemoryEditor : android.content.SharedPreferences.Editor {
+            private val pending = mutableMapOf<String, Any?>()
+            override fun putString(key: String, value: String?): android.content.SharedPreferences.Editor { pending[key] = value; return this }
+            override fun putStringSet(key: String, values: MutableSet<String>?): android.content.SharedPreferences.Editor { pending[key] = values; return this }
+            override fun putInt(key: String, value: Int): android.content.SharedPreferences.Editor { pending[key] = value; return this }
+            override fun putLong(key: String, value: Long): android.content.SharedPreferences.Editor { pending[key] = value; return this }
+            override fun putFloat(key: String, value: Float): android.content.SharedPreferences.Editor { pending[key] = value; return this }
+            override fun putBoolean(key: String, value: Boolean): android.content.SharedPreferences.Editor { pending[key] = value; return this }
+            override fun remove(key: String): android.content.SharedPreferences.Editor { pending[key] = null; return this }
+            override fun clear(): android.content.SharedPreferences.Editor { pending.clear(); return this }
+            override fun commit(): Boolean { apply(); return true }
+            override fun apply() {
+                map.clear()
+                map.putAll(pending)
+            }
+        }
     }
 
     // ── Initial durability state ─────────────────────────────────────────

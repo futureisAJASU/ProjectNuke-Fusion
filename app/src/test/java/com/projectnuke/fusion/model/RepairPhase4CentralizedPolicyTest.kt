@@ -3,7 +3,7 @@ package com.projectnuke.fusion.model
 import android.content.SharedPreferences
 import android.content.SharedPreferences.Editor
 import android.content.SharedPreferences.OnSharedPreferenceChangeListener
-import org.junit.Assert.assertEquals
+import org.junit.Assert.*
 import org.junit.Test
 
 class RepairPhase4CentralizedPolicyTest {
@@ -118,7 +118,7 @@ class RepairPhase4CentralizedPolicyTest {
         }
         val settings = LocalGenerationSettingsPolicy.fromPrefs(prefs)
         assertEquals(4000, settings.maxTokens)
-        assertEquals(8192, settings.kvCacheCapacityTokens) // 2x heuristic
+        assertEquals(8000, settings.kvCacheCapacityTokens) // 2x heuristic
     }
 
     @Test
@@ -144,14 +144,14 @@ class RepairPhase4CentralizedPolicyTest {
         }
         val settings1 = LocalGenerationSettingsPolicy.fromPrefs(prefs1)
         
-        // Output-only change: maxTokens 2048 -> 4096, KV capacity auto-derived should be 8192
+        // Output-only change: maxTokens 2048 -> 4096, KV auto-derived 4096 -> 8192
         val prefs2 = FakePrefs().apply {
             map["generation_max_output_tokens"] = 4096
         }
         val settings2 = LocalGenerationSettingsPolicy.fromPrefs(prefs2)
         
-        assertEquals(4096, settings1.maxTokens)
-        assertEquals(8192, settings2.maxTokens)
+        assertEquals(2048, settings1.maxTokens)
+        assertEquals(4096, settings2.maxTokens)
         // KV capacity changes because it's derived from output
         assertEquals(4096, settings1.kvCacheCapacityTokens)
         assertEquals(8192, settings2.kvCacheCapacityTokens)

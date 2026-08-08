@@ -53,6 +53,7 @@ class RepairPhase2BenchmarkFailureSnapshotTest {
                 accelerator = com.projectnuke.fusion.model.AcceleratorMode.GPU
             ),
             requestedMaxTokens = 4096,
+            requestedKvCapacity = 4096,
             safeMaxTokensCap = 4096,
             reasoningEnabled = false,
             webSearchEnabled = false
@@ -170,6 +171,7 @@ val failure = RuntimeFailureSnapshot(
                     accelerator = AcceleratorMode.GPU
                 ),
                 requestedMaxTokens = 4096,
+                requestedKvCapacity = 4096,
                 safeMaxTokensCap = 4096,
                 reasoningEnabled = false,
                 webSearchEnabled = false

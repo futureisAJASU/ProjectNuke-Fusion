@@ -60,6 +60,7 @@ class BenchmarkPersistenceRoundTripTest {
             speculativeDecodingEnabled = true
         ),
         requestedMaxTokens = maxTokens,
+        requestedKvCapacity = maxTokens,
         safeMaxTokensCap = null,
         reasoningEnabled = false,
         webSearchEnabled = false

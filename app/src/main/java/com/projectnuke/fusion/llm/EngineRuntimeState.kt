@@ -53,8 +53,8 @@ internal data class EngineRuntimeKey(
  * Replaces the scattered engine/backend/status fields so reuse decisions and
  * status reporting read from a single consistent snapshot.
  */
-internal data class LoadedRuntimeState(
-    val engine: Engine,
+internal data class LoadedRuntimeState<T>(
+    val engine: T,
     val key: EngineRuntimeKey,
     val mtpStatus: MtpRuntimeStatus,
     val runtimeSelection: EngineSelectionRuntime,

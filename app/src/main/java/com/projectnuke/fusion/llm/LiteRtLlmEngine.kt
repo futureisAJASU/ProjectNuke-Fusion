@@ -19,6 +19,7 @@ import com.projectnuke.fusion.model.ChatMessage
 import com.projectnuke.fusion.model.ConversationOptions
 import com.projectnuke.fusion.model.RequestedEngineProfile
 import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
+import com.projectnuke.fusion.ui.FusionDeveloperLogStore
 import com.projectnuke.fusion.util.AttachmentStorageManager
 import com.projectnuke.fusion.util.ManagedModelPathPolicy
 import kotlinx.coroutines.CancellationException
@@ -67,7 +68,7 @@ class LiteRtLlmEngine(
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) : LlmEngine {
 
-    private var loadedState: LoadedRuntimeState? = null
+    private var loadedState: LoadedRuntimeState<Engine>? = null
     private val mtpFailureMemory = MtpFailureMemory(failureMemoryStorage, clock)
     @Volatile
     var lastMtpStatus: MtpRuntimeStatus = MtpRuntimeStatus.OFF
@@ -125,7 +126,7 @@ class LiteRtLlmEngine(
                 Log.e("FusionEngine", "Selected model path is missing or unmanaged: ${File(profile.modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
-                    message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                    message = "?택??모델 ?일??찾을 ???습?다. 모델???시 ?택??주세??"
                 )
             }
 
@@ -137,30 +138,30 @@ class LiteRtLlmEngine(
             } catch (e: EngineSelectionFailedException) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.",
+                    message = "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??",
                     attemptSnapshot = e.attemptSnapshot
                 )
             } catch (e: OutOfMemoryError) {
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "메모리가 부족하여 모델을 불러올 수 없습니다."
+                    message = "메모리? 부족하??모델??불러?????습?다."
                 )
             } catch (e: VirtualMachineError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없습니다."
+                    message = "?????류?모델??불러?????습?다."
                 )
             } catch (e: LinkageError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없습니다."
+                    message = "?????류?모델??불러?????습?다."
                 )
             } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM engine init failed", e)
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                    message = "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??"
                 )
             }
             logGenerationSettings(
@@ -236,7 +237,7 @@ class LiteRtLlmEngine(
                 Log.e("FusionEngine", "Selected multimodal model path is missing or unmanaged: ${File(profile.modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
-                    message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
+                    message = "?택??모델 ?일??찾을 ???습?다. 모델???시 ?택??주세??"
                 )
             }
 
@@ -246,7 +247,7 @@ class LiteRtLlmEngine(
             if (managedImagePaths.size != imagePaths.size) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.IMAGE_NOT_FOUND,
-                    message = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다."
+                    message = "??지 ?력 처리 ?패: ??지 ?일??찾을 ???습?다."
                 )
             }
 
@@ -258,36 +259,36 @@ class LiteRtLlmEngine(
             } catch (e: EngineSelectionFailedException) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.",
+                    message = "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??",
                     attemptSnapshot = e.attemptSnapshot
                 )
             } catch (e: OutOfMemoryError) {
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "메모리가 부족하여 모델을 불러올 수 없습니다."
+                    message = "메모리? 부족하??모델??불러?????습?다."
                 )
             } catch (e: VirtualMachineError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없습니다."
+                    message = "?????류?모델??불러?????습?다."
                 )
             } catch (e: LinkageError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "런타임 오류로 모델을 불러올 수 없습니다."
+                    message = "?????류?모델??불러?????습?다."
                 )
             } catch (e: Exception) {
                 if (isVisionBackendUnsupported(e)) {
                     return@withContext GenerationOutcome.Failure(
                         kind = FailureKind.MODEL_MULTIMODAL_UNSUPPORTED,
-                        message = "이 모델은 이미지 입력을 지원하지 않습니다."
+                        message = "??모델? ??지 ?력??지?하지 ?습?다."
                     )
                 }
                 Log.e("FusionEngine", "LiteRT-LM multimodal engine init failed", e)
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요."
+                    message = "??지 ?력 처리 ?패: 모델 ?정???인?????시 ?도??주세??"
                 )
             }
             logGenerationSettings(
@@ -383,11 +384,11 @@ class LiteRtLlmEngine(
             else -> FailureKind.GENERATION_INTERRUPTED
         }
         val message = when (kind) {
-            FailureKind.MODEL_MULTIMODAL_UNSUPPORTED -> "이 모델은 이미지 입력을 지원하지 않습니다."
-            FailureKind.MODEL_LOAD_FAILED -> "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
-            FailureKind.GENERATION_IO -> "모델 응답 중 입출력 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-            FailureKind.GENERATION_INTERRUPTED -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
-            else -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            FailureKind.MODEL_MULTIMODAL_UNSUPPORTED -> "??모델? ??지 ?력??지?하지 ?습?다."
+            FailureKind.MODEL_LOAD_FAILED -> "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??"
+            FailureKind.GENERATION_IO -> "모델 ?답 ??출???류가 발생?습?다. ?시 ???시 ?도??주세??"
+            FailureKind.GENERATION_INTERRUPTED -> "모델 ?답???료?? 못했?니?? ?시 ???시 ?도??주세??"
+            else -> "모델 ?답???료?? 못했?니?? ?시 ???시 ?도??주세??"
         }
         // Build the immutable generation-after-acquisition failure snapshot
         // from the currently loaded engine state. Callers will read this
@@ -454,6 +455,8 @@ class LiteRtLlmEngine(
         )
 
         val outcome = coordinator.acquire(profile, loadedState)
+        val outcomeFingerprint = outcome.fingerprint ?: ModelFingerprint.of(profile.modelPath)
+        val outcomeCapabilityResult = outcome.mtpCapabilityResult
 
         // Update runtime state based on outcome
         val selectionResult = outcome.selection
@@ -465,25 +468,25 @@ class LiteRtLlmEngine(
             
             lastMtpStatus = resolveMtpRuntimeStatus(
                 mtpRequested = profile.mtpRequested,
-                mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported,
+                mtpSupported = outcomeFingerprint.mtpSupported,
                 selectedMtpEnabled = selectedMtpEnabled,
                 mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
-                mtpCapabilityResult = null, // Coordinator doesn't expose probe result directly in SelectionResult
+                mtpCapabilityResult = outcomeCapabilityResult,
                 mtpSkippedByMemory = outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
-                mtpAttempted = profile.mtpRequested && ModelFingerprint.of(profile.modelPath).mtpSupported
+                mtpAttempted = outcomeCapabilityResult != null || outcome.fallbackEvents.any { it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED } || selectedMtpEnabled
             )
             
             val fallbackReason = resolveMtpFallbackReason(
                 mtpRequested = profile.mtpRequested,
-                mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported,
+                mtpSupported = outcomeFingerprint.mtpSupported,
                 selectedMtpEnabled = selectedMtpEnabled,
                 mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
-                mtpCapabilityResult = null,
+                mtpCapabilityResult = outcomeCapabilityResult,
                 mtpSkippedByMemory = outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
-                mtpAttempted = profile.mtpRequested && ModelFingerprint.of(profile.modelPath).mtpSupported
+                mtpAttempted = outcomeCapabilityResult != null || outcome.fallbackEvents.any { it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED } || selectedMtpEnabled
             )
             
-            val initializedWithMtp = profile.mtpRequested && ModelFingerprint.of(profile.modelPath).mtpSupported && selectedMtpEnabled && mtpFlagAppliedForMtp
+            val initializedWithMtp = profile.mtpRequested && outcomeFingerprint.mtpSupported && selectedMtpEnabled && mtpFlagAppliedForMtp
             
             val runtimeSelection = EngineSelectionRuntime(
                 requestedAccelerator = profile.accelerator.name,
@@ -498,7 +501,7 @@ class LiteRtLlmEngine(
             loadedState = LoadedRuntimeState(
                 engine = resolvedEngine,
                 key = EngineRuntimeKey(
-                    fingerprint = ModelFingerprint.of(profile.modelPath),
+                    fingerprint = outcomeFingerprint,
                     accelerator = profile.accelerator,
                     kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
                     enableVisionBackend = profile.enableVisionBackend,
@@ -524,11 +527,11 @@ class LiteRtLlmEngine(
                         requestedAccelerator = profile.accelerator,
                         fallbackEvents = outcome.fallbackEvents,
                         modelFingerprint = ModelFingerprintSummary(
-                            canonicalPath = ModelFingerprint.of(profile.modelPath).canonicalPath,
-                            fileSize = ModelFingerprint.of(profile.modelPath).fileSize,
-                            modifiedAt = ModelFingerprint.of(profile.modelPath).modifiedAt,
-                            validationVersion = ModelFingerprint.of(profile.modelPath).validationVersion,
-                            mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported
+                            canonicalPath = outcomeFingerprint.canonicalPath,
+                            fileSize = outcomeFingerprint.fileSize,
+                            modifiedAt = outcomeFingerprint.modifiedAt,
+                            validationVersion = outcomeFingerprint.validationVersion,
+                            mtpSupported = outcomeFingerprint.mtpSupported
                         ),
                         mtpRequested = profile.mtpRequested
                     )
@@ -537,11 +540,11 @@ class LiteRtLlmEngine(
                 requestedAccelerator = profile.accelerator,
                 fallbackEvents = outcome.fallbackEvents,
                 modelFingerprint = ModelFingerprintSummary(
-                    canonicalPath = ModelFingerprint.of(profile.modelPath).canonicalPath,
-                    fileSize = ModelFingerprint.of(profile.modelPath).fileSize,
-                    modifiedAt = ModelFingerprint.of(profile.modelPath).modifiedAt,
-                    validationVersion = ModelFingerprint.of(profile.modelPath).validationVersion,
-                    mtpSupported = ModelFingerprint.of(profile.modelPath).mtpSupported
+                    canonicalPath = outcomeFingerprint.canonicalPath,
+                    fileSize = outcomeFingerprint.fileSize,
+                    modifiedAt = outcomeFingerprint.modifiedAt,
+                    validationVersion = outcomeFingerprint.validationVersion,
+                    mtpSupported = outcomeFingerprint.mtpSupported
                 ),
                 mtpRequested = profile.mtpRequested
             )
@@ -835,7 +838,7 @@ public data class EngineSelectionRuntime(
  * (set explicitly in [LiteRtLlmEngine.getOrCreateEngine] before the throw). This
  * resolver is reached only after a usable Engine initialized, so any "MTP was
  * requested but a non-MTP engine succeeded" path returns
- * [MtpRuntimeStatus.FALLBACK_DISABLED] — including the flag-settlement-failed
+ * [MtpRuntimeStatus.FALLBACK_DISABLED] ??including the flag-settlement-failed
  * path previously encoded as FAILED. The flag-settle-failed event carries the
  * [FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED] reason.
  */
@@ -884,10 +887,10 @@ internal fun buildSystemInstruction(messages: List<ChatMessage>): String {
         .joinToString("\n\n") { it.content }
 
     return buildString {
-        appendLine("당신은 기기 내에서 실행되는 AI 비서 Fusion입니다.")
-        appendLine("한국어로 자연스럽게 답변하며 일관되게 존댓말을 사용합니다.")
-        appendLine("모르는 내용은 모른다고 명확히 밝힙니다.")
-        appendLine("추론이나 추정은 그 사실을 명확히 구분합니다.")
+        appendLine("?신? 기기 ?에???행?는 AI 비서 Fusion?니??")
+        appendLine("?국?로 ?연?럽????며 ???게 존댓말을 ?용?니??")
+        appendLine("모르???용? 모른?고 명확??밝힙?다.")
+        appendLine("추론?나 추정? ??실??명확??구분?니??")
 
         if (systemMessages.isNotBlank()) {
             appendLine()
@@ -960,6 +963,8 @@ internal data class EngineSelectionResult<T>(
     val mtpFlagAppliedForMtp: Boolean,
     val backendName: String,
     val visionBackend: String?,
+    val fingerprint: ModelFingerprint? = null,
+    val mtpCapabilityResult: Boolean? = null
 )
 
 /**
@@ -971,7 +976,9 @@ internal data class EngineSelectionResult<T>(
 internal data class EngineSelectionOutcome<T>(
     val selection: EngineSelectionResult<T>?,
     val failure: Throwable?,
-    val fallbackEvents: List<RuntimeFallbackEvent> = emptyList()
+    val fallbackEvents: List<RuntimeFallbackEvent> = emptyList(),
+    val fingerprint: ModelFingerprint? = null,
+    val mtpCapabilityResult: Boolean? = null
 )
 
 internal fun <T> selectFirstWorkingEngine(
@@ -1148,11 +1155,11 @@ internal fun buildEngineCandidateLadder(
  * The all-skipped reuse decision is now inlined in `getOrCreateEngine` and
  * compares the loaded Engine's [EngineRuntimeKey] against the *originally
  * planned* candidates (not the failure-memory-filtered ladder), so a live,
- * successfully initialized Engine is treated as alive — failure memory can
+ * successfully initialized Engine is treated as alive ??failure memory can
  * only skip *new* initialization attempts, not already-live engines.
  */
 internal fun canReuseLoadedEngine(
-    loadedState: LoadedRuntimeState?,
+    loadedState: LoadedRuntimeState<*>?,
     requestedFingerprint: ModelFingerprint,
     requestedAccelerator: AcceleratorMode,
     requestedKvCacheCapacityTokens: Int,
@@ -1206,6 +1213,48 @@ internal data class FailureModelFingerprint(
 }
 
 /**
+ * Port abstraction over [MtpFailureMemory] so unit tests can inject a
+ * deterministic fake without subclassing the final class.
+ */
+internal interface MtpFailureMemoryPort {
+    fun shouldSkipMtp(
+        modelPath: String,
+        backendName: String,
+        mtpEnabled: Boolean,
+        validationVersion: Int,
+        kvCacheCapacityTokens: Int,
+        enableVisionBackend: Boolean,
+        fileSize: Long,
+        modifiedAt: Long,
+        mtpSupported: Boolean
+    ): String?
+
+    fun shouldSkipBackend(
+        modelPath: String,
+        backendName: String,
+        validationVersion: Int,
+        kvCacheCapacityTokens: Int,
+        enableVisionBackend: Boolean,
+        fileSize: Long,
+        modifiedAt: Long,
+        mtpSupported: Boolean
+    ): String?
+
+    fun recordFailure(
+        modelPath: String,
+        backendName: String,
+        mtpEnabled: Boolean,
+        validationVersion: Int,
+        kvCacheCapacityTokens: Int,
+        enableVisionBackend: Boolean,
+        fileSize: Long,
+        modifiedAt: Long,
+        mtpSupported: Boolean,
+        fallbackReason: String
+    )
+}
+
+/**
  * Tracks MTP initialization failures to prevent repeated failed rebuilds.
  * Keyed by model fingerprint, actual backend, package capability
  * version, and engine settings. Entries are persisted through [storage].
@@ -1213,7 +1262,7 @@ internal data class FailureModelFingerprint(
 internal class MtpFailureMemory(
     private val storage: MtpFailureMemoryStorage = NoopMtpFailureMemoryStorage,
     private val clock: () -> Long = { System.currentTimeMillis() }
-) {
+) : MtpFailureMemoryPort {
     private data class FailureKey(
         val modelFingerprint: FailureModelFingerprint,
         val backendName: String,
@@ -1274,7 +1323,7 @@ internal class MtpFailureMemory(
         // Phase D: storage.load() may throw (e.g., disk full, I/O error,
         // corrupt SharedPreferences). Catch and record the durability
         // failure so Engine construction does not crash. In-memory state
-        // starts empty in that case — cooldown cannot restore from disk
+        // starts empty in that case ??cooldown cannot restore from disk
         // but new failures persist in memory within the current session.
         try {
             storage.load().forEach { (serializedKey, serializedValue) ->
@@ -1286,7 +1335,7 @@ internal class MtpFailureMemory(
         } catch (t: Throwable) {
             lastDurabilityResult = false
             lastDurabilityException = t
-            Log.w("FusionLiteRT", "MtpFailureMemory storage.load() threw — continuing with empty in-memory state", t)
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.load() threw ??continuing with empty in-memory state", t)
         }
     }
 
@@ -1294,7 +1343,7 @@ internal class MtpFailureMemory(
      * Checks if an MTP attempt should be skipped due to recent failure.
      * Returns the fallback reason if MTP should be skipped, null otherwise.
      */
-    fun shouldSkipMtp(
+    override fun shouldSkipMtp(
         modelPath: String,
         backendName: String,
         mtpEnabled: Boolean,
@@ -1336,7 +1385,7 @@ internal class MtpFailureMemory(
      * Checks if a plain backend (non-MTP) attempt should be skipped due to recent failure.
      * Returns the fallback reason if the backend should be skipped, null otherwise.
      */
-    fun shouldSkipBackend(
+    override fun shouldSkipBackend(
         modelPath: String,
         backendName: String,
         validationVersion: Int,
@@ -1375,7 +1424,7 @@ internal class MtpFailureMemory(
     /**
      * Records an MTP failure for the given key.
      */
-    fun recordFailure(
+    override fun recordFailure(
         modelPath: String,
         backendName: String,
         mtpEnabled: Boolean,
@@ -1445,7 +1494,7 @@ internal class MtpFailureMemory(
         } catch (t: Throwable) {
             lastDurabilityResult = false
             lastDurabilityException = t
-            Log.w("FusionLiteRT", "MtpFailureMemory storage.clear() threw — in-memory state still cleared", t)
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.clear() threw ??in-memory state still cleared", t)
         }
     }
 
@@ -1510,7 +1559,7 @@ internal class MtpFailureMemory(
         } catch (t: Throwable) {
             lastDurabilityResult = false
             lastDurabilityException = t
-            Log.w("FusionLiteRT", "MtpFailureMemory storage.save() threw — in-memory state still usable", t)
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.save() threw ??in-memory state still usable", t)
         }
     }
 }
@@ -1543,7 +1592,7 @@ internal fun combineFallbackEvents(
         if (!isDuplicateFallback(prevPrev, event)) {
             result.add(event)
         }
-        // Otherwise this is the 3rd+ consecutive duplicate → skip
+        // Otherwise this is the 3rd+ consecutive duplicate ??skip
     }
     return result
 }
