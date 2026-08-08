@@ -497,4 +497,175 @@ class RepairPhase4AcquisitionCoordinatorTest {
         assertNotEquals(engine1, outcome2.selection!!.engine)
         assertEquals(2, factoryCalls)
     }
+
+    // ── Phase 2: candidate-aware fallback reuse ───────────────────────────────
+
+    @Test
+    fun `runtime capability false with existing plain GPU reuses loaded engine`() {
+        // First acquisition: GPU+MTP rejected by capability probe, plain GPU created
+        var factoryCalls = 0
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        val coordinator = createCoordinator(
+            probe = { false },
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                factoryCalls++
+                EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+            }
+        )
+
+        val outcome1 = coordinator.acquire(defaultProfile, null)
+        assertEquals(false, outcome1.selection!!.selectedMtpEnabled)
+        assertEquals("GPU", outcome1.selection!!.backendName)
+        assertEquals(1, factoryCalls)
+        assertEquals(listOf("GPU" to false), calls) // Only plain GPU factory called
+
+        // Second identical acquisition: GPU+MTP rejected again, plain GPU reused
+        val state = loadedState(
+            outcome1.selection!!.engine,
+            backend = outcome1.selection!!.backendName,
+            mtpEnabled = outcome1.selection!!.selectedMtpEnabled
+        )
+        val outcome2 = coordinator.acquire(defaultProfile, state)
+
+        assertEquals(false, outcome2.selection!!.selectedMtpEnabled)
+        assertEquals("GPU", outcome2.selection!!.backendName)
+        assertEquals(outcome1.selection!!.engine, outcome2.selection!!.engine)
+        assertEquals(1, factoryCalls) // Factory NOT called again for plain GPU
+        assertEquals(listOf("GPU" to false), calls)
+    }
+
+    @Test
+    fun `higher priority flag settlement failure with existing lower candidate reuses loaded engine`() {
+        // Higher candidate (GPU+MTP) fails flag settlement, lower candidate (plain GPU) exists and is reused
+        var factoryCalls = 0
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        val coordinator = createCoordinator(
+            flag = { mtpEnabled -> !mtpEnabled }, // Fail only for MTP-enabled
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                factoryCalls++
+                EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+            }
+        )
+
+        val outcome1 = coordinator.acquire(defaultProfile, null)
+        assertEquals(false, outcome1.selection!!.selectedMtpEnabled)
+        assertEquals("GPU", outcome1.selection!!.backendName)
+        assertEquals(1, factoryCalls)
+        assertEquals(listOf("GPU" to false), calls) // Only plain GPU factory called
+        assertTrue(outcome1.fallbackEvents.any { it.reason == FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED })
+
+        // Second acquisition: same profile, GPU+MTP fails flag settlement again, plain GPU reused
+        val state = loadedState(
+            outcome1.selection!!.engine,
+            backend = outcome1.selection!!.backendName,
+            mtpEnabled = outcome1.selection!!.selectedMtpEnabled
+        )
+        val outcome2 = coordinator.acquire(defaultProfile, state)
+
+        assertEquals(false, outcome2.selection!!.selectedMtpEnabled)
+        assertEquals("GPU", outcome2.selection!!.backendName)
+        assertEquals(outcome1.selection!!.engine, outcome2.selection!!.engine)
+        assertEquals(1, factoryCalls) // Factory NOT called again
+        assertEquals(listOf("GPU" to false), calls)
+        assertTrue(outcome2.fallbackEvents.any { it.reason == FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED })
+    }
+
+    @Test
+    fun `MTP cooldown with loaded plain candidate reuses loaded engine`() {
+        val now = AtomicLong(0L)
+        val memory = MtpFailureMemory(storage = RecordingStorage(), clock = { now.get() })
+        var factoryCalls = 0
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        val coordinator = createCoordinator(
+            memory = memory,
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                factoryCalls++
+                if (mtp) {
+                    EngineCandidateAttempt.InitializationFailed(RuntimeException("MTP init failed"))
+                } else {
+                    EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+                }
+            }
+        )
+
+        // First acquisition: GPU+MTP fails init, plain GPU created
+        val outcome1 = coordinator.acquire(defaultProfile, null)
+        assertEquals(false, outcome1.selection!!.selectedMtpEnabled)
+        assertEquals("GPU", outcome1.selection!!.backendName)
+        assertEquals(2, factoryCalls) // GPU+MTP attempted (failed) + plain GPU created
+        assertEquals(listOf("GPU" to true, "GPU" to false), calls)
+        assertTrue(outcome1.fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED })
+
+        // Second acquisition within cooldown: GPU+MTP skipped by cooldown, plain GPU reused
+        now.set(30_000L) // Within cooldown
+        val state = loadedState(
+            outcome1.selection!!.engine,
+            backend = outcome1.selection!!.backendName,
+            mtpEnabled = outcome1.selection!!.selectedMtpEnabled
+        )
+        val outcome2 = coordinator.acquire(defaultProfile, state)
+
+        assertEquals(false, outcome2.selection!!.selectedMtpEnabled)
+        assertEquals("GPU", outcome2.selection!!.backendName)
+        assertEquals(outcome1.selection!!.engine, outcome2.selection!!.engine)
+        assertEquals(2, factoryCalls) // Factory NOT called again for plain GPU
+        assertEquals(listOf("GPU" to true, "GPU" to false), calls)
+        assertTrue(outcome2.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE })
+    }
+
+    @Test
+    fun `higher priority candidate becomes eligible again after cooldown expiry`() {
+        val now = AtomicLong(0L)
+        val memory = MtpFailureMemory(storage = RecordingStorage(), clock = { now.get() })
+        var factoryCalls = 0
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        var mtpShouldFail = true
+        val coordinator = createCoordinator(
+            memory = memory,
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                factoryCalls++
+                if (mtp && mtpShouldFail) {
+                    EngineCandidateAttempt.InitializationFailed(RuntimeException("MTP init failed"))
+                } else {
+                    EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+                }
+            }
+        )
+
+        // First acquisition: GPU+MTP fails init, plain GPU created
+        val outcome1 = coordinator.acquire(defaultProfile, null)
+        assertEquals(false, outcome1.selection!!.selectedMtpEnabled) // Falls back to plain GPU
+        assertEquals("GPU", outcome1.selection!!.backendName)
+        assertEquals(2, factoryCalls) // GPU+MTP failed + plain GPU succeeded
+        assertEquals(listOf("GPU" to true, "GPU" to false), calls)
+
+        // Within cooldown: MTP skipped, plain GPU reused
+        now.set(30_000L)
+        val state = loadedState(
+            outcome1.selection!!.engine,
+            backend = outcome1.selection!!.backendName,
+            mtpEnabled = outcome1.selection!!.selectedMtpEnabled
+        )
+        val outcome2 = coordinator.acquire(defaultProfile, state)
+        assertEquals(false, outcome2.selection!!.selectedMtpEnabled)
+        assertEquals("GPU", outcome2.selection!!.backendName)
+        assertEquals(outcome1.selection!!.engine, outcome2.selection!!.engine)
+        assertEquals(2, factoryCalls) // Factory NOT called again
+        assertEquals(listOf("GPU" to true, "GPU" to false), calls)
+        assertTrue(outcome2.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE })
+
+        // After cooldown expiry: GPU+MTP attempted again and succeeds
+        mtpShouldFail = false
+        now.set(MtpFailureMemory.COOLDOWN_MS + 1)
+        val outcome3 = coordinator.acquire(defaultProfile, state)
+        assertEquals(true, outcome3.selection!!.selectedMtpEnabled) // GPU+MTP attempted and succeeds
+        assertEquals("GPU", outcome3.selection!!.backendName)
+        assertEquals(3, factoryCalls) // New GPU+MTP engine created (MTP success)
+        assertNotEquals(outcome2.selection!!.engine, outcome3.selection!!.engine)
+        assertEquals(listOf("GPU" to true, "GPU" to false, "GPU" to true), calls)
+    }
 }

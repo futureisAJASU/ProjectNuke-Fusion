@@ -98,17 +98,12 @@ internal class EngineAcquisitionCoordinator<T>(
         // notify the engine so durability transitions can be recorded
         onPersistenceCompleted()
 
-        // All candidates skipped by failure memory — try exact-match reuse
         val ladder = availableCandidates
-        val preferredBackendName = ladder.firstOrNull()?.backend ?: run {
-            // All candidates were skipped by failure memory. The only escape is
-            // an exact-matchEMPTY reuse: a currently live, successfully
-            // initialized Engine whose stored EngineRuntimeKey corresponds to
-            // a candidate still in the *original* planned candidates. A different
-            // model / profile / backend / MTP / vision / KV Engine must never be
-            // reused, and the loaded engine must never be defeated by the same
-            // failure-memory skip that triggered this branch (because failure
-            // memory can only veto *new* init attempts, not already-live success).
+
+        // If all candidates were skipped by failure memory, try exact-match reuse
+        // against the original planned candidates. Failure memory can only veto
+        // *new* init attempts, not already-live successful engines.
+        if (ladder.isEmpty()) {
             val currentLoadedState = loadedState
             if (currentLoadedState != null) {
                 val loadedKey = currentLoadedState.key
@@ -165,36 +160,7 @@ internal class EngineAcquisitionCoordinator<T>(
             )
         }
 
-        // Cached engine exact-match reuse
-        val requestedKey = EngineRuntimeKey(
-            fingerprint = fingerprint,
-            accelerator = profile.accelerator,
-            kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-            enableVisionBackend = profile.enableVisionBackend,
-            mtpEnabled = ladder.firstOrNull()?.mtpEnabled ?: false,
-            selectedBackend = preferredBackendName
-        )
-
-        val currentState = loadedState
-        if (currentState != null && currentState.key == requestedKey) {
-            return EngineSelectionOutcome(
-                selection = EngineSelectionResult(
-                    engine = currentState.engine,
-                    selectedMtpEnabled = currentState.key.mtpEnabled,
-                    mtpFlagAppliedForMtp = currentState.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST,
-                    backendName = currentState.key.selectedBackend,
-                    visionBackend = if (profile.enableVisionBackend) currentState.key.selectedBackend else null,
-                    fingerprint = fingerprint,
-                    mtpCapabilityResult = null
-                ),
-                failure = null,
-                fallbackEvents = recordedFallbackEvents,
-                fingerprint = fingerprint,
-                mtpCapabilityResult = null
-            )
-        }
-
-        // Delegate to the selector
+        // Delegate to the selector with loaded-state reuse check at each candidate
         var mtpFactoryCalled = false
         val selection = selectFirstWorkingEngine(
             ladder = ladder,
@@ -215,7 +181,12 @@ internal class EngineAcquisitionCoordinator<T>(
                 } else {
                     engineFactory(backend, mtp, visionCpu)
                 }
-            }
+            },
+            loadedState = loadedState,
+            fingerprint = fingerprint,
+            accelerator = profile.accelerator,
+            kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+            enableVisionBackendProfile = profile.enableVisionBackend
         )
         val mtpCapabilityProbeCalled = selection.fallbackEvents.any {
             it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_UNSUPPORTED

@@ -1028,13 +1028,47 @@ internal fun <T> selectFirstWorkingEngine(
     ladder: List<EngineCandidate>,
     enableVisionBackend: Boolean,
     configureFlag: (Boolean) -> Boolean,
-    tryCreate: (backendName: String, mtpEnabled: Boolean, visionBackendIsCpu: Boolean) -> EngineCandidateAttempt<T>
+    tryCreate: (backendName: String, mtpEnabled: Boolean, visionBackendIsCpu: Boolean) -> EngineCandidateAttempt<T>,
+    loadedState: LoadedRuntimeState<T>? = null,
+    fingerprint: ModelFingerprint? = null,
+    accelerator: AcceleratorMode? = null,
+    kvCacheCapacityTokens: Int? = null,
+    enableVisionBackendProfile: Boolean? = null
 ): EngineSelectionOutcome<T> {
+    // If loadedState reuse check is requested, all parameters must be provided
+    val reuseEnabled = loadedState != null && fingerprint != null && accelerator != null && kvCacheCapacityTokens != null && enableVisionBackendProfile != null
     var mtpFlagAppliedForMtp = false
     var lastFailure: Throwable? = null
     val fallbackEvents = mutableListOf<RuntimeFallbackEvent>()
     var pendingGpuPlainFailure = false
     for (candidate in ladder) {
+        // Check for exact loaded-engine reuse at this candidate level
+        if (reuseEnabled) {
+            val candidateKey = EngineRuntimeKey(
+                fingerprint = fingerprint!!,
+                accelerator = accelerator!!,
+                kvCacheCapacityTokens = kvCacheCapacityTokens!!,
+                enableVisionBackend = enableVisionBackendProfile!!,
+                mtpEnabled = candidate.mtpEnabled,
+                selectedBackend = candidate.backend
+            )
+            if (loadedState!!.key == candidateKey) {
+                return EngineSelectionOutcome(
+                    selection = EngineSelectionResult(
+                        engine = loadedState!!.engine,
+                        selectedMtpEnabled = candidate.mtpEnabled,
+                        mtpFlagAppliedForMtp = loadedState!!.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST,
+                        backendName = candidate.backend,
+                        visionBackend = if (enableVisionBackendProfile!!) candidate.backend else null,
+                        fingerprint = fingerprint!!,
+                        mtpCapabilityResult = null
+                    ),
+                    failure = null,
+                    fallbackEvents = fallbackEvents
+                )
+            }
+        }
+
         val flagApplied = configureFlag(candidate.mtpEnabled)
         if (!flagApplied) {
             fallbackEvents += RuntimeFallbackEvent(
@@ -1066,7 +1100,9 @@ internal fun <T> selectFirstWorkingEngine(
                         selectedMtpEnabled = candidate.mtpEnabled,
                         mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                         backendName = candidate.backend,
-                        visionBackend = if (enableVisionBackend) candidate.backend else null
+                        visionBackend = if (enableVisionBackend) candidate.backend else null,
+                        fingerprint = fingerprint,
+                        mtpCapabilityResult = null
                     ),
                     failure = null,
                     fallbackEvents = fallbackEvents
