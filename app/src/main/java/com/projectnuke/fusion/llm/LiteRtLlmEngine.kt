@@ -517,13 +517,16 @@ class LiteRtLlmEngine(
                 fallbackReason = outcome.fallbackEvents.firstOrNull()?.reason?.name ?: fallbackReason
             )
 
-            // Phase 2: Request-local events live in currentRequestFallbackEvents
+            // Phase 2 + Phase 3: Request-local events live in currentRequestFallbackEvents
             // Stable acquisition events go into LoadedRuntimeState.fallbackEvents
-            // When reusing an engine, stable events are preserved, request-local are replaced
+            // When reusing an engine, stable events AND actual vision backend are preserved
+            // Close replaced native Engines exactly once
             val currentLoadedState = loadedState
             val isFreshEngine = currentLoadedState == null || currentLoadedState.engine != resolvedEngine
             if (isFreshEngine) {
                 currentRequestFallbackEvents = requestLocalEvents
+                // Close the old engine if we're replacing it
+                currentLoadedState?.engine?.close()
                 loadedState = LoadedRuntimeState(
                     engine = resolvedEngine,
                     key = EngineRuntimeKey(
@@ -541,13 +544,13 @@ class LiteRtLlmEngine(
                     fallbackEvents = stableAcquisitionEvents
                 )
             } else {
-                // Reusing existing engine: preserve stable events, update request-local
+                // Reusing existing engine: preserve stable events AND actual vision backend
                 currentRequestFallbackEvents = requestLocalEvents
                 loadedState = currentLoadedState.copy(
                     mtpStatus = lastMtpStatus,
                     runtimeSelection = runtimeSelection,
-                    actualTextBackend = actualTextBackend,
-                    actualVisionBackend = selectionResult.visionBackend
+                    actualTextBackend = actualTextBackend
+                    // actualVisionBackend preserved from loaded state (Phase 3)
                     // fallbackEvents (stable) unchanged
                 )
             }
