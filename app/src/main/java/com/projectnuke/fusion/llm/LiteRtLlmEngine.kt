@@ -126,7 +126,7 @@ class LiteRtLlmEngine(
                 Log.e("FusionEngine", "Selected model path is missing or unmanaged: ${File(profile.modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
-                    message = "?택??모델 ?일??찾을 ???습?다. 모델???시 ?택??주세??"
+                    message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
                 )
             }
 
@@ -138,30 +138,30 @@ class LiteRtLlmEngine(
             } catch (e: EngineSelectionFailedException) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??",
+                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.",
                     attemptSnapshot = e.attemptSnapshot
                 )
             } catch (e: OutOfMemoryError) {
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "메모리? 부족하??모델??불러?????습?다."
+                    message = "메모리가 부족하여 모델을 불러올 수 없습니다."
                 )
             } catch (e: VirtualMachineError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "?????류?모델??불러?????습?다."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: LinkageError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "?????류?모델??불러?????습?다."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: Exception) {
                 Log.e("FusionEngine", "LiteRT-LM engine init failed", e)
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??"
+                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
                 )
             }
             logGenerationSettings(
@@ -237,7 +237,7 @@ class LiteRtLlmEngine(
                 Log.e("FusionEngine", "Selected multimodal model path is missing or unmanaged: ${File(profile.modelPath).name}")
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_NOT_FOUND,
-                    message = "?택??모델 ?일??찾을 ???습?다. 모델???시 ?택??주세??"
+                    message = "선택한 모델 파일을 찾을 수 없습니다. 모델을 다시 선택해 주세요."
                 )
             }
 
@@ -247,7 +247,7 @@ class LiteRtLlmEngine(
             if (managedImagePaths.size != imagePaths.size) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.IMAGE_NOT_FOUND,
-                    message = "??지 ?력 처리 ?패: ??지 ?일??찾을 ???습?다."
+                    message = "이미지 입력 처리 실패: 이미지 파일을 찾을 수 없습니다."
                 )
             }
 
@@ -259,36 +259,36 @@ class LiteRtLlmEngine(
             } catch (e: EngineSelectionFailedException) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??",
+                    message = "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요.",
                     attemptSnapshot = e.attemptSnapshot
                 )
             } catch (e: OutOfMemoryError) {
                 lastMtpStatus = MtpRuntimeStatus.OFF
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "메모리? 부족하??모델??불러?????습?다."
+                    message = "메모리가 부족하여 모델을 불러올 수 없습니다."
                 )
             } catch (e: VirtualMachineError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "?????류?모델??불러?????습?다."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: LinkageError) {
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "?????류?모델??불러?????습?다."
+                    message = "런타임 오류로 모델을 불러올 수 없습니다."
                 )
             } catch (e: Exception) {
                 if (isVisionBackendUnsupported(e)) {
                     return@withContext GenerationOutcome.Failure(
                         kind = FailureKind.MODEL_MULTIMODAL_UNSUPPORTED,
-                        message = "??모델? ??지 ?력??지?하지 ?습?다."
+                        message = "이 모델은 이미지 입력을 지원하지 않습니다."
                     )
                 }
                 Log.e("FusionEngine", "LiteRT-LM multimodal engine init failed", e)
                 return@withContext GenerationOutcome.Failure(
                     kind = FailureKind.MODEL_LOAD_FAILED,
-                    message = "??지 ?력 처리 ?패: 모델 ?정???인?????시 ?도??주세??"
+                    message = "이미지 입력 처리 실패: 모델 설정을 확인한 뒤 다시 시도해 주세요."
                 )
             }
             logGenerationSettings(
@@ -384,11 +384,11 @@ class LiteRtLlmEngine(
             else -> FailureKind.GENERATION_INTERRUPTED
         }
         val message = when (kind) {
-            FailureKind.MODEL_MULTIMODAL_UNSUPPORTED -> "??모델? ??지 ?력??지?하지 ?습?다."
-            FailureKind.MODEL_LOAD_FAILED -> "모델??불러?????습?다. 모델 ?정???인?????시 ?도??주세??"
-            FailureKind.GENERATION_IO -> "모델 ?답 ??출???류가 발생?습?다. ?시 ???시 ?도??주세??"
-            FailureKind.GENERATION_INTERRUPTED -> "모델 ?답???료?? 못했?니?? ?시 ???시 ?도??주세??"
-            else -> "모델 ?답???료?? 못했?니?? ?시 ???시 ?도??주세??"
+            FailureKind.MODEL_MULTIMODAL_UNSUPPORTED -> "이 모델은 이미지 입력을 지원하지 않습니다."
+            FailureKind.MODEL_LOAD_FAILED -> "모델을 불러올 수 없습니다. 모델 설정을 확인한 뒤 다시 시도해 주세요."
+            FailureKind.GENERATION_IO -> "모델 응답 중 입출력 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+            FailureKind.GENERATION_INTERRUPTED -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
+            else -> "모델 응답을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
         }
         // Build the immutable generation-after-acquisition failure snapshot
         // from the currently loaded engine state. Callers will read this
@@ -838,7 +838,7 @@ public data class EngineSelectionRuntime(
  * (set explicitly in [LiteRtLlmEngine.getOrCreateEngine] before the throw). This
  * resolver is reached only after a usable Engine initialized, so any "MTP was
  * requested but a non-MTP engine succeeded" path returns
- * [MtpRuntimeStatus.FALLBACK_DISABLED] ??including the flag-settlement-failed
+ * [MtpRuntimeStatus.FALLBACK_DISABLED] — including the flag-settlement-failed
  * path previously encoded as FAILED. The flag-settle-failed event carries the
  * [FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED] reason.
  */
@@ -887,10 +887,10 @@ internal fun buildSystemInstruction(messages: List<ChatMessage>): String {
         .joinToString("\n\n") { it.content }
 
     return buildString {
-        appendLine("?신? 기기 ?에???행?는 AI 비서 Fusion?니??")
-        appendLine("?국?로 ?연?럽????며 ???게 존댓말을 ?용?니??")
-        appendLine("모르???용? 모른?고 명확??밝힙?다.")
-        appendLine("추론?나 추정? ??실??명확??구분?니??")
+        appendLine("당신은 기기 내에서 실행되는 AI 비서 Fusion입니다.")
+        appendLine("한국어로 자연스럽게 답변하며 일관되게 존댓말을 사용합니다.")
+        appendLine("모르는 내용은 모른다고 명확히 밝힙니다.")
+        appendLine("추론이나 추정은 그 사실을 명확히 구분합니다.")
 
         if (systemMessages.isNotBlank()) {
             appendLine()
@@ -1155,7 +1155,7 @@ internal fun buildEngineCandidateLadder(
  * The all-skipped reuse decision is now inlined in `getOrCreateEngine` and
  * compares the loaded Engine's [EngineRuntimeKey] against the *originally
  * planned* candidates (not the failure-memory-filtered ladder), so a live,
- * successfully initialized Engine is treated as alive ??failure memory can
+ * successfully initialized Engine is treated as alive — failure memory can
  * only skip *new* initialization attempts, not already-live engines.
  */
 internal fun canReuseLoadedEngine(
@@ -1323,7 +1323,7 @@ internal class MtpFailureMemory(
         // Phase D: storage.load() may throw (e.g., disk full, I/O error,
         // corrupt SharedPreferences). Catch and record the durability
         // failure so Engine construction does not crash. In-memory state
-        // starts empty in that case ??cooldown cannot restore from disk
+        // starts empty in that case — cooldown cannot restore from disk
         // but new failures persist in memory within the current session.
         try {
             storage.load().forEach { (serializedKey, serializedValue) ->
@@ -1335,7 +1335,7 @@ internal class MtpFailureMemory(
         } catch (t: Throwable) {
             lastDurabilityResult = false
             lastDurabilityException = t
-            Log.w("FusionLiteRT", "MtpFailureMemory storage.load() threw ??continuing with empty in-memory state", t)
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.load() threw — continuing with empty in-memory state", t)
         }
     }
 
@@ -1494,7 +1494,7 @@ internal class MtpFailureMemory(
         } catch (t: Throwable) {
             lastDurabilityResult = false
             lastDurabilityException = t
-            Log.w("FusionLiteRT", "MtpFailureMemory storage.clear() threw ??in-memory state still cleared", t)
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.clear() threw — in-memory state still cleared", t)
         }
     }
 
@@ -1559,7 +1559,7 @@ internal class MtpFailureMemory(
         } catch (t: Throwable) {
             lastDurabilityResult = false
             lastDurabilityException = t
-            Log.w("FusionLiteRT", "MtpFailureMemory storage.save() threw ??in-memory state still usable", t)
+            Log.w("FusionLiteRT", "MtpFailureMemory storage.save() threw — in-memory state still usable", t)
         }
     }
 }
@@ -1592,7 +1592,7 @@ internal fun combineFallbackEvents(
         if (!isDuplicateFallback(prevPrev, event)) {
             result.add(event)
         }
-        // Otherwise this is the 3rd+ consecutive duplicate ??skip
+        // Otherwise this is the 3rd+ consecutive duplicate — skip
     }
     return result
 }
