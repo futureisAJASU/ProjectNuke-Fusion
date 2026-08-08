@@ -1285,8 +1285,22 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 is GenerationOutcome.Cancelled -> return@start
                                 GenerationOutcome.Empty -> return@start
                                 is GenerationOutcome.Failure -> {
-                                    if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && currentConversationId == request.conversationId) {
-                                        Toast.makeText(context, outcome.message, Toast.LENGTH_SHORT).show()
+                                    val runtimeFields = outcomeRuntimeFields(outcome, engine)
+                                    val metrics = buildFusionMetricsLine(
+                                        modelName = shortModelName(request.selectedModelId.orEmpty()),
+                                        acceleratorName = buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true),
+                                        generatedText = "",
+                                        totalGenerationMs = SystemClock.elapsedRealtime() - started,
+                                        firstTokenLatencyMs = firstToken.get().takeIf { it >= 0L },
+                                        settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, actualWebSearchUsed, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)),
+                                        nativeStats = null,
+                                        appliedRuntimeLine = buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes)
+                                    )
+                                    if (chatViewModel.registry.isActive(request.conversationId, request.requestId)) {
+                                        chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "오류 발생") }
+                                        if (currentConversationId == request.conversationId) {
+                                            Toast.makeText(context, outcome.message, Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                     return@start
                                 }
@@ -1472,8 +1486,22 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                 is GenerationOutcome.Cancelled -> return@start
                                 GenerationOutcome.Empty -> return@start
                                 is GenerationOutcome.Failure -> {
-                                    if (chatViewModel.registry.isActive(request.conversationId, request.requestId) && currentConversationId == request.conversationId) {
-                                        Toast.makeText(context, outcome.message, Toast.LENGTH_SHORT).show()
+                                    val runtimeFields = outcomeRuntimeFields(outcome, engine)
+                                    val metrics = buildFusionMetricsLine(
+                                        modelName = shortModelName(request.selectedModelId.orEmpty()),
+                                        acceleratorName = buildAcceleratorLabel(request.settings.accelerator.name, request.settings.speculativeDecodingEnabled == true),
+                                        generatedText = "",
+                                        totalGenerationMs = SystemClock.elapsedRealtime() - started,
+                                        firstTokenLatencyMs = firstToken.get().takeIf { it >= 0L },
+                                        settingsLine = buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(request.selectedModelId.orEmpty(), modelPath, request.settings, request.reasoningEnabled, false, runtimeFields.mtpStatus, runtimeFields.actualBackend, runtimeFields.actualVisionBackend)),
+                                        nativeStats = null,
+                                        appliedRuntimeLine = buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, request.settings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes)
+                                    )
+                                    if (chatViewModel.registry.isActive(request.conversationId, request.requestId)) {
+                                        chatViewModel.updateRequestState(request.conversationId, request.requestId, true) { it.copy(streamingMetricsLine = metrics, generationStatus = "오류 발생") }
+                                        if (currentConversationId == request.conversationId) {
+                                            Toast.makeText(context, outcome.message, Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                     return@start
                                 }
