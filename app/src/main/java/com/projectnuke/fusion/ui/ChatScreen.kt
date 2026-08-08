@@ -808,7 +808,7 @@ fun ChatScreen(
                 PrefWebSearchEnabled -> {
                     webSearchEnabled = prefs.getBoolean(PrefWebSearchEnabled, webSearchEnabled)
                 }
-                PrefMaxTokens, PrefTopK, PrefTopP, PrefTemperature, PrefReasoningBudget, PrefAccelerator, PrefSpeculativeDecoding -> {
+                PrefMaxTokens, PrefKvCacheCapacityTokens, PrefTopK, PrefTopP, PrefTemperature, PrefReasoningBudget, PrefAccelerator, PrefSpeculativeDecoding -> {
                     generationSettings = loadSavedGenerationSettings(prefs)
                 }
             }

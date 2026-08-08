@@ -94,6 +94,9 @@ internal class EngineAcquisitionCoordinator<T>(
             }
             true
         }
+        // shouldSkipMtp/shouldSkipBackend may have expired entries and persisted;
+        // notify the engine so durability transitions can be recorded
+        onPersistenceCompleted()
 
         // All candidates skipped by failure memory — try exact-match reuse
         val ladder = availableCandidates
