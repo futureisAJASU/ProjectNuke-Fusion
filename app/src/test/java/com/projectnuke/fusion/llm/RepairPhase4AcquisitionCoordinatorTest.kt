@@ -123,14 +123,16 @@ class RepairPhase4AcquisitionCoordinatorTest {
         backend: String,
         mtpEnabled: Boolean,
         fingerprint: ModelFingerprint = fakeFingerprint,
-        accelerator: AcceleratorMode = defaultProfile.accelerator
+        accelerator: AcceleratorMode = defaultProfile.accelerator,
+        kvCacheCapacityTokens: Int = defaultProfile.kvCacheCapacityTokens,
+        enableVisionBackend: Boolean = defaultProfile.enableVisionBackend
     ) = LoadedRuntimeState(
         engine = engine,
         key = EngineRuntimeKey(
             fingerprint = fingerprint,
             accelerator = accelerator,
-            kvCacheCapacityTokens = defaultProfile.kvCacheCapacityTokens,
-            enableVisionBackend = defaultProfile.enableVisionBackend,
+            kvCacheCapacityTokens = kvCacheCapacityTokens,
+            enableVisionBackend = enableVisionBackend,
             mtpEnabled = mtpEnabled,
             selectedBackend = backend
         ),
@@ -179,7 +181,7 @@ class RepairPhase4AcquisitionCoordinatorTest {
     }
 
     @Test
-    fun `runtime capability rejection skips MTP without init attempts`() {
+    fun `runtime capability rejection probe returns false results in CapabilityRejected`() {
         val calls = mutableListOf<Pair<String, Boolean>>()
         val coordinator = createCoordinator(
             probe = { false },
@@ -196,6 +198,68 @@ class RepairPhase4AcquisitionCoordinatorTest {
         assertEquals(1, outcome.fallbackEvents.count { it.reason == FallbackReason.MTP_UNSUPPORTED })
         assertFalse(outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED })
         assertEquals(false, outcome.mtpCapabilityResult)
+    }
+
+    @Test
+    fun `runtime capability confirmed probe returns true results in MTP engine initialized`() {
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        val coordinator = createCoordinator(
+            probe = { true },
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+            }
+        )
+
+        val outcome = coordinator.acquire(defaultProfile, null)
+
+        assertEquals(true, outcome.selection!!.selectedMtpEnabled)
+        assertTrue(calls.any { it.second }) // GPU+MTP was called
+        assertEquals(true, outcome.mtpCapabilityResult)
+    }
+
+    @Test
+    fun `runtime capability unknown probe returns null and successful MTP init`() {
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        val coordinator = createCoordinator(
+            probe = { null },
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+            }
+        )
+
+        val outcome = coordinator.acquire(defaultProfile, null)
+
+        assertEquals(true, outcome.selection!!.selectedMtpEnabled)
+        assertTrue(calls.any { it.second }) // GPU+MTP was called and succeeded
+        // Probe was null, but MTP factory was called AND MTP was selected -> capability inferred as true
+        assertEquals(true, outcome.mtpCapabilityResult)
+    }
+
+    @Test
+    fun `runtime capability unknown probe returns null and failed MTP init falls back`() {
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        val coordinator = createCoordinator(
+            probe = { null },
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                if (mtp) {
+                    EngineCandidateAttempt.InitializationFailed(RuntimeException("MTP init failed"))
+                } else {
+                    EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+                }
+            }
+        )
+
+        val outcome = coordinator.acquire(defaultProfile, null)
+
+        assertEquals(false, outcome.selection!!.selectedMtpEnabled)
+        assertTrue(calls.any { it.second }) // GPU+MTP was attempted
+        assertTrue(calls.any { it.first == "GPU" && !it.second }) // plain GPU called
+        // Probe was null, but MTP factory was called AND MTP_ENGINE_INIT_FAILED event recorded -> capability inferred as true
+        assertEquals(true, outcome.mtpCapabilityResult)
+        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED })
     }
 
     @Test
@@ -267,27 +331,39 @@ class RepairPhase4AcquisitionCoordinatorTest {
     }
 
     @Test
-    fun `MTP failure with plain GPU skipped by failure memory selects CPU`() {
+    fun `GPU+MTP attempted and fails, plain GPU skipped by failure memory, CPU plain succeeds`() {
         val memory = FakeMtpFailureMemory().apply {
             shouldSkipBackendResult = FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE
             skipBackendName = "GPU"
         }
 
-        var gpuCalls = 0
+        val calls = mutableListOf<Pair<String, Boolean>>()
         val coordinator = createCoordinator(
             memory = memory,
-            factory = { backend, _, _ ->
-                if (backend == "GPU") gpuCalls++
-                EngineCandidateAttempt.Success(FakeEngineHandle(backend))
+            factory = { backend, mtp, _ ->
+                calls += backend to mtp
+                if (mtp) {
+                    EngineCandidateAttempt.InitializationFailed(RuntimeException("MTP init failed"))
+                } else {
+                    EngineCandidateAttempt.Success(FakeEngineHandle("$backend-mtp=$mtp"))
+                }
             }
         )
 
-        val profile = defaultProfile.copy(mtpRequested = false)
-        val outcome = coordinator.acquire(profile, null)
+        val outcome = coordinator.acquire(defaultProfile, null)
 
         assertNotNull(outcome.selection)
         assertEquals("CPU", outcome.selection!!.backendName)
-        assertEquals(0, gpuCalls)
+        assertFalse(outcome.selection!!.selectedMtpEnabled)
+
+        // MTP factory call = 1 (GPU+MTP attempted and failed)
+        // Plain GPU factory call = 0 (skipped by failure memory)
+        // CPU factory call = 1 (succeeded)
+        assertEquals(listOf("GPU" to true, "CPU" to false), calls)
+
+        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED })
+        assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE && it.attemptedTextBackend == RuntimeBackend.GPU })
+        assertFalse(outcome.fallbackEvents.any { it.reason == FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED })
     }
 
     @Test
@@ -357,7 +433,7 @@ class RepairPhase4AcquisitionCoordinatorTest {
     }
 
     @Test
-    fun `output only change does not recreate engine`() {
+    fun `output only change (maxOutputToken) does not recreate engine`() {
         var factoryCalls = 0
         val coordinator = createCoordinator(
             factory = { backend, _, _ ->
@@ -366,25 +442,35 @@ class RepairPhase4AcquisitionCoordinatorTest {
             }
         )
 
-        val profile1 = defaultProfile.copy(kvCacheCapacityTokens = 2048)
-        val outcome1 = coordinator.acquire(profile1, null)
-        val engine1 = outcome1.selection!!.engine
+        // Request A: generation output = 2048, KV capacity = 8192
+        val profileA = defaultProfile.copy(kvCacheCapacityTokens = 8192)
+        val outcomeA = coordinator.acquire(profileA, null)
+        val engineA = outcomeA.selection!!.engine
+        val backendA = outcomeA.selection!!.backendName
+        val mtpA = outcomeA.selection!!.selectedMtpEnabled
 
         val state = loadedState(
-            engine1,
-            backend = outcome1.selection!!.backendName,
-            mtpEnabled = outcome1.selection!!.selectedMtpEnabled
+            engineA,
+            backend = backendA,
+            mtpEnabled = mtpA,
+            kvCacheCapacityTokens = profileA.kvCacheCapacityTokens,
+            enableVisionBackend = profileA.enableVisionBackend
         )
 
-        val profile2 = profile1.copy()
-        val outcome2 = coordinator.acquire(profile2, state)
+        // Request B: generation output = 4096, KV capacity = 8192 (same KV, different output)
+        // Note: maxOutputToken is in ConversationOptions, not RequestedEngineProfile
+        // The profile should be identical
+        val profileB = profileA.copy()
+        val outcomeB = coordinator.acquire(profileB, state)
 
-        assertEquals(engine1, outcome2.selection!!.engine)
+        assertEquals(engineA, outcomeB.selection!!.engine)
+        assertEquals(backendA, outcomeB.selection!!.backendName)
+        assertEquals(mtpA, outcomeB.selection!!.selectedMtpEnabled)
         assertEquals(1, factoryCalls)
     }
 
     @Test
-    fun `kv capacity change alters engine identity`() {
+    fun `KV capacity change alters engine identity`() {
         var factoryCalls = 0
         val coordinator = createCoordinator(
             factory = { backend, _, _ ->
@@ -393,14 +479,16 @@ class RepairPhase4AcquisitionCoordinatorTest {
             }
         )
 
-        val profile1 = defaultProfile.copy(kvCacheCapacityTokens = 2048)
+        val profile1 = defaultProfile.copy(kvCacheCapacityTokens = 8192)
         val outcome1 = coordinator.acquire(profile1, null)
         val engine1 = outcome1.selection!!.engine
 
         val state = loadedState(
             engine1,
             backend = outcome1.selection!!.backendName,
-            mtpEnabled = outcome1.selection!!.selectedMtpEnabled
+            mtpEnabled = outcome1.selection!!.selectedMtpEnabled,
+            kvCacheCapacityTokens = profile1.kvCacheCapacityTokens,
+            enableVisionBackend = profile1.enableVisionBackend
         )
 
         val profile2 = profile1.copy(kvCacheCapacityTokens = 4096)
