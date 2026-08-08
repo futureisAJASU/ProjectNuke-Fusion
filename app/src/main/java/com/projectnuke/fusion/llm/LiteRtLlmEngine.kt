@@ -1059,7 +1059,7 @@ internal fun <T> selectFirstWorkingEngine(
                         selectedMtpEnabled = candidate.mtpEnabled,
                         mtpFlagAppliedForMtp = loadedState!!.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST,
                         backendName = candidate.backend,
-                        visionBackend = if (enableVisionBackendProfile!!) candidate.backend else null,
+                        visionBackend = loadedState!!.actualVisionBackend,
                         fingerprint = fingerprint!!,
                         mtpCapabilityResult = null
                     ),

@@ -123,7 +123,7 @@ internal class EngineAcquisitionCoordinator<T>(
                             selectedMtpEnabled = currentLoadedState.key.mtpEnabled,
                             mtpFlagAppliedForMtp = currentLoadedState.mtpStatus == MtpRuntimeStatus.INITIALIZED_WITH_MTP_REQUEST,
                             backendName = loadedKey.selectedBackend,
-                            visionBackend = if (profile.enableVisionBackend) loadedKey.selectedBackend else null,
+                            visionBackend = currentLoadedState.actualVisionBackend,
                             fingerprint = fingerprint,
                             mtpCapabilityResult = null
                         ),
@@ -162,6 +162,7 @@ internal class EngineAcquisitionCoordinator<T>(
 
         // Delegate to the selector with loaded-state reuse check at each candidate
         var mtpFactoryCalled = false
+        var mtpProbeResult: Boolean? = null
         val selection = selectFirstWorkingEngine(
             ladder = ladder,
             enableVisionBackend = profile.enableVisionBackend,
@@ -170,6 +171,7 @@ internal class EngineAcquisitionCoordinator<T>(
                 if (mtp) {
                     mtpFactoryCalled = true
                     val probeResult = mtpCapabilityProbe(profile.modelPath)
+                    mtpProbeResult = probeResult
                     if (probeResult == false) {
                         EngineCandidateAttempt.CapabilityRejected(
                             backendName = backend,
@@ -188,15 +190,12 @@ internal class EngineAcquisitionCoordinator<T>(
             kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
             enableVisionBackendProfile = profile.enableVisionBackend
         )
-        val mtpCapabilityProbeCalled = selection.fallbackEvents.any {
-            it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_UNSUPPORTED
-        } || selection.selection?.selectedMtpEnabled == true || (mtpFactoryCalled && selection.fallbackEvents.any {
-            it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED
-        })
+        // Preserve probe result truthfully: true → true, false → false, null → null
+        // Do NOT infer capability from MTP initialization success
         val mtpCapabilityResult = when {
             !mtpRequested || !mtpSupported -> null
-            selection.fallbackEvents.any { it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_UNSUPPORTED } -> false
-            mtpFactoryCalled && mtpCapabilityProbeCalled -> true
+            mtpProbeResult == false -> false
+            mtpProbeResult == true -> true
             else -> null
         }
 

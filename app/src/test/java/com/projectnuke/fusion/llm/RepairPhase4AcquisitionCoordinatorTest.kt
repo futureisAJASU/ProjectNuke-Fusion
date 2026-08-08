@@ -233,8 +233,8 @@ class RepairPhase4AcquisitionCoordinatorTest {
 
         assertEquals(true, outcome.selection!!.selectedMtpEnabled)
         assertTrue(calls.any { it.second }) // GPU+MTP was called and succeeded
-        // Probe was null, but MTP factory was called AND MTP was selected -> capability inferred as true
-        assertEquals(true, outcome.mtpCapabilityResult)
+        // Probe was null, capability result must be null (not inferred from init success)
+        assertEquals(null, outcome.mtpCapabilityResult)
     }
 
     @Test
@@ -257,8 +257,8 @@ class RepairPhase4AcquisitionCoordinatorTest {
         assertEquals(false, outcome.selection!!.selectedMtpEnabled)
         assertTrue(calls.any { it.second }) // GPU+MTP was attempted
         assertTrue(calls.any { it.first == "GPU" && !it.second }) // plain GPU called
-        // Probe was null, but MTP factory was called AND MTP_ENGINE_INIT_FAILED event recorded -> capability inferred as true
-        assertEquals(true, outcome.mtpCapabilityResult)
+        // Probe was null, capability result must be null (not inferred from init failure)
+        assertEquals(null, outcome.mtpCapabilityResult)
         assertTrue(outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED })
     }
 
