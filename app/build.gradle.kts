@@ -51,6 +51,12 @@ android {
     ksp {
         arg("room.schemaLocation", "$projectDir/schemas")
     }
+    // Room schema assets for instrumentation tests (MigrationTestHelper)
+    sourceSets.configureEach {
+        if (name == "androidTest") {
+            assets.srcDir("$projectDir/schemas")
+        }
+    }
 }
 
 dependencies {
