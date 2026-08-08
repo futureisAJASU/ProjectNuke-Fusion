@@ -169,8 +169,9 @@ class LiteRtLlmEngine(
                 options = options
             )
 
-            val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
-            val adaptedMessages = promptAdapter.buildMessages(messages)
+            val prepared = FusionPromptAdapters.prepareMessagesForModel(messages)
+            val promptAdapter = FusionPromptAdapters.forFamily(prepared.modelFamily)
+            val adaptedMessages = promptAdapter.buildMessages(prepared.messages)
             val systemText = buildSystemInstruction(adaptedMessages)
             val promptText = buildPrompt(adaptedMessages)
 
@@ -296,8 +297,9 @@ class LiteRtLlmEngine(
                 options = options
             )
 
-            val promptAdapter = FusionPromptAdapters.inferFromMessages(messages)
-            val adaptedMessages = promptAdapter.buildMessages(messages)
+            val prepared = FusionPromptAdapters.prepareMessagesForModel(messages)
+            val promptAdapter = FusionPromptAdapters.forFamily(prepared.modelFamily)
+            val adaptedMessages = promptAdapter.buildMessages(prepared.messages)
             val systemText = buildSystemInstruction(adaptedMessages)
             val promptText = buildPrompt(adaptedMessages)
 

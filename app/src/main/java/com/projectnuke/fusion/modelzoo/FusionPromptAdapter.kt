@@ -9,6 +9,11 @@ interface FusionPromptAdapter {
     fun sanitizeOutput(raw: String): String
 }
 
+data class PreparedMessages(
+    val messages: List<ChatMessage>,
+    val modelFamily: ModelFamily
+)
+
 object GemmaPromptAdapter : FusionPromptAdapter {
     override val family = ModelFamily.GEMMA
     override fun buildMessages(messages: List<ChatMessage>): List<ChatMessage> = messages
@@ -92,6 +97,32 @@ object FusionPromptAdapters {
         ModelFamily.KIMI -> KimiPromptAdapter
     }
 
+    /**
+     * Prepares messages for the model by extracting internal metadata and stripping
+     * all Fusion-internal marker messages. This ensures runtime configuration never
+     * alters the semantic model prompt.
+     */
+    fun prepareMessagesForModel(messages: List<ChatMessage>): PreparedMessages {
+        // Extract model family from FUSION_MODEL_FAMILY marker for adapter selection
+        val familyMarker = messages.firstOrNull { it.role == "system" && it.content.startsWith("FUSION_MODEL_FAMILY=") }
+            ?.content
+            ?.substringAfter("=")
+            ?.trim()
+        val family = runCatching { ModelFamily.valueOf(familyMarker.orEmpty()) }.getOrDefault(ModelFamily.GEMMA)
+
+        // Strip all Fusion-internal marker messages
+        val cleanedMessages = messages.filter { msg ->
+            !(msg.role == "system" && (
+                msg.content.startsWith("FUSION_GENERATION_SETTINGS") ||
+                msg.content.startsWith("FUSION_SELECTED_MODEL_PATH=") ||
+                msg.content.startsWith("FUSION_MODEL_FAMILY=")
+            ))
+        }
+
+        return PreparedMessages(cleanedMessages, family)
+    }
+
+    @Deprecated("Use prepareMessagesForModel instead. This reads markers that should be stripped before model prompt construction.", ReplaceWith("forFamily(prepareMessagesForModel(messages).modelFamily)"))
     fun inferFromMessages(messages: List<ChatMessage>): FusionPromptAdapter {
         val marker = messages.firstOrNull { it.role == "system" && it.content.startsWith("FUSION_MODEL_FAMILY=") }
             ?.content

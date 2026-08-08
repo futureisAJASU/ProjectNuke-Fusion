@@ -5,6 +5,8 @@ import com.projectnuke.fusion.model.ConversationOptions
 import com.projectnuke.fusion.model.GenerationSettings
 import com.projectnuke.fusion.model.toConversationOptions
 import com.projectnuke.fusion.model.toRequestedEngineProfile
+import com.projectnuke.fusion.modelzoo.FusionPromptAdapters
+import com.projectnuke.fusion.modelzoo.ModelFamily
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,7 +22,7 @@ import org.junit.Test
  */
 class LiteRtPromptIdentityTest {
 
-    private val messages = listOf(
+    private val cleanMessages = listOf(
         ChatMessage(role = "system", content = "사용자가 지정한 시스템 지시사항입니다."),
         ChatMessage(role = "user", content = "안녕하세요"),
         ChatMessage(role = "assistant", content = "안녕하세요! 무엇을 도와드릴까요?"),
@@ -42,10 +44,10 @@ class LiteRtPromptIdentityTest {
 
         assertNotEquals(onSettings, offSettings)
 
-        val systemOn = buildSystemInstruction(messages)
-        val systemOff = buildSystemInstruction(messages)
-        val promptOn = buildPrompt(messages)
-        val promptOff = buildPrompt(messages)
+        val systemOn = buildSystemInstruction(cleanMessages)
+        val systemOff = buildSystemInstruction(cleanMessages)
+        val promptOn = buildPrompt(cleanMessages)
+        val promptOff = buildPrompt(cleanMessages)
 
         assertArrayEquals(systemOn.toByteArray(), systemOff.toByteArray())
         assertArrayEquals(promptOn.toByteArray(), promptOff.toByteArray())
@@ -69,18 +71,18 @@ class LiteRtPromptIdentityTest {
         assertNotEquals(lowTemp, highTemp)
 
         assertArrayEquals(
-            buildSystemInstruction(messages).toByteArray(),
-            buildSystemInstruction(messages).toByteArray()
+            buildSystemInstruction(cleanMessages).toByteArray(),
+            buildSystemInstruction(cleanMessages).toByteArray()
         )
         assertArrayEquals(
-            buildPrompt(messages).toByteArray(),
-            buildPrompt(messages).toByteArray()
+            buildPrompt(cleanMessages).toByteArray(),
+            buildPrompt(cleanMessages).toByteArray()
         )
     }
 
     @Test
     fun `prompt never contains runtime settings text`() {
-        val fullPrompt = buildSystemInstruction(messages) + "\n" + buildPrompt(messages)
+        val fullPrompt = buildSystemInstruction(cleanMessages) + "\n" + buildPrompt(cleanMessages)
         val forbiddenTokens = listOf(
             "GENERATION_SETTINGS",
             "speculativeDecoding",
@@ -104,7 +106,7 @@ class LiteRtPromptIdentityTest {
 
     @Test
     fun `system instruction contains formal Korean and no corrupted substitutions`() {
-        val systemInstruction = buildSystemInstruction(messages)
+        val systemInstruction = buildSystemInstruction(cleanMessages)
 
         // Expected Korean phrases from the restored system instruction
         assertTrue("system instruction must contain '당신은 기기 내에서 실행되는 AI 비서 Fusion입니다.'",
@@ -141,6 +143,174 @@ class LiteRtPromptIdentityTest {
                 expectedMessage, getFailureMessage(kind))
             assertFalse("failure message for $kind must not contain corrupted '?' substitutions",
                 expectedMessage.contains("??") || expectedMessage.contains("?시 ?") || expectedMessage.contains("?답??"))
+        }
+    }
+
+    @Test
+    fun `internal FUSION_* markers are stripped before model prompt construction`() {
+        // Construct messages equivalent to actual ChatScreen local-generation input
+        val messagesWithMarkers = buildList<ChatMessage> {
+            add(ChatMessage(role = "system", content = """
+                FUSION_GENERATION_SETTINGS
+                maxTokens=4096
+                topK=40
+                topP=0.9
+                temperature=0.7
+                accelerator=GPU
+                reasoningBudgetTokens=512
+                speculativeDecoding=true
+                """.trimIndent()))
+            add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=/data/user/0/com.projectnuke.fusion/files/models/gemma-4-E2B-it.litertlm"))
+            add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=GEMMA"))
+            add(ChatMessage(role = "system", content = "사용자가 지정한 시스템 지시사항입니다."))
+            add(ChatMessage(role = "user", content = "안녕하세요"))
+        }
+
+        val prepared = FusionPromptAdapters.prepareMessagesForModel(messagesWithMarkers)
+
+        // Verify model family is extracted for adapter selection
+        assertEquals(ModelFamily.GEMMA, prepared.modelFamily)
+
+        // Verify all FUSION_* markers are stripped
+        val forbiddenPrefixes = listOf(
+            "FUSION_GENERATION_SETTINGS",
+            "FUSION_SELECTED_MODEL_PATH=",
+            "FUSION_MODEL_FAMILY="
+        )
+        prepared.messages.forEach { msg ->
+            forbiddenPrefixes.forEach { prefix ->
+                assertFalse("Message must not contain '$prefix': ${msg.content}", msg.content.startsWith(prefix))
+            }
+        }
+
+        // Verify actual conversation content is preserved
+        val systemContent = prepared.messages.filter { it.role == "system" }.joinToString("\n\n") { it.content }
+        assertTrue("User system instruction must be preserved", systemContent.contains("사용자가 지정한 시스템 지시사항입니다."))
+        val userMessages = prepared.messages.filter { it.role == "user" }
+        assertEquals(1, userMessages.size)
+        assertEquals("안녕하세요", userMessages[0].content)
+    }
+
+    @Test
+    fun `prompt identity with real FUSION markers MTP on vs MTP off produces identical semantic prompt`() {
+        // Configuration A: MTP requested, GPU, temperature X, output limit A
+        val messagesA = buildList<ChatMessage> {
+            add(ChatMessage(role = "system", content = """
+                FUSION_GENERATION_SETTINGS
+                maxTokens=4096
+                topK=40
+                topP=0.9
+                temperature=0.7
+                accelerator=GPU
+                reasoningBudgetTokens=512
+                speculativeDecoding=true
+                """.trimIndent()))
+            add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=/data/user/0/com.projectnuke.fusion/files/models/gemma-4-E2B-it.litertlm"))
+            add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=GEMMA"))
+            add(ChatMessage(role = "system", content = "사용자가 지정한 시스템 지시사항입니다."))
+            add(ChatMessage(role = "user", content = "안녕하세요"))
+            add(ChatMessage(role = "assistant", content = "안녕하세요! 무엇을 도와드릴까요?"))
+            add(ChatMessage(role = "user", content = "오늘 날씨를 알려주세요"))
+        }
+
+        // Configuration B: MTP disabled, CPU, temperature Y, output limit B
+        val messagesB = buildList<ChatMessage> {
+            add(ChatMessage(role = "system", content = """
+                FUSION_GENERATION_SETTINGS
+                maxTokens=1024
+                topK=1
+                topP=0.1
+                temperature=0.1
+                accelerator=CPU
+                reasoningBudgetTokens=0
+                speculativeDecoding=false
+                """.trimIndent()))
+            add(ChatMessage(role = "system", content = "FUSION_SELECTED_MODEL_PATH=/data/user/0/com.projectnuke.fusion/files/models/gemma-4-E2B-it.litertlm"))
+            add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=GEMMA"))
+            add(ChatMessage(role = "system", content = "사용자가 지정한 시스템 지시사항입니다."))
+            add(ChatMessage(role = "user", content = "안녕하세요"))
+            add(ChatMessage(role = "assistant", content = "안녕하세요! 무엇을 도와드릴까요?"))
+            add(ChatMessage(role = "user", content = "오늘 날씨를 알려주세요"))
+        }
+
+        // Prepare both - this is what the engine does before building prompt
+        val preparedA = FusionPromptAdapters.prepareMessagesForModel(messagesA)
+        val preparedB = FusionPromptAdapters.prepareMessagesForModel(messagesB)
+
+        // Build final prompts using the actual engine functions
+        val adapter = FusionPromptAdapters.forFamily(ModelFamily.GEMMA)
+        val adaptedA = adapter.buildMessages(preparedA.messages)
+        val adaptedB = adapter.buildMessages(preparedB.messages)
+
+        val systemInstructionA = buildSystemInstruction(adaptedA)
+        val systemInstructionB = buildSystemInstruction(adaptedB)
+        val promptA = buildPrompt(adaptedA)
+        val promptB = buildPrompt(adaptedB)
+
+        // Assert semantic system instruction is identical
+        assertArrayEquals(
+            "System instruction must be identical regardless of runtime config",
+            systemInstructionA.toByteArray(),
+            systemInstructionB.toByteArray()
+        )
+
+        // Assert user/model prompt content is identical
+        assertArrayEquals(
+            "User prompt must be identical regardless of runtime config",
+            promptA.toByteArray(),
+            promptB.toByteArray()
+        )
+
+        // Assert no FUSION_* markers exist in final prompts
+        val fullPromptA = systemInstructionA + "\n" + promptA
+        val fullPromptB = systemInstructionB + "\n" + promptB
+        val forbiddenTokens = listOf(
+            "FUSION_GENERATION_SETTINGS",
+            "FUSION_SELECTED_MODEL_PATH",
+            "FUSION_MODEL_FAMILY",
+            "speculativeDecoding",
+            "maxTokens",
+            "topK",
+            "topP",
+            "temperature",
+            "accelerator",
+            "reasoningBudgetTokens",
+            "/data/user/0/com.projectnuke.fusion/files/models/",
+            ".litertlm"
+        )
+        forbiddenTokens.forEach { token ->
+            assertFalse("Prompt A must not contain '$token'", fullPromptA.contains(token))
+            assertFalse("Prompt B must not contain '$token'", fullPromptB.contains(token))
+        }
+
+        // Assert model family adapter selection still works
+        assertEquals(ModelFamily.GEMMA, preparedA.modelFamily)
+        assertEquals(ModelFamily.GEMMA, preparedB.modelFamily)
+    }
+
+    @Test
+    fun `model family adapter selection works after marker extraction`() {
+        val families = listOf(
+            ModelFamily.GEMMA,
+            ModelFamily.QWEN,
+            ModelFamily.DEEPSEEK,
+            ModelFamily.LLAMA,
+            ModelFamily.MISTRAL,
+            ModelFamily.PHI,
+            ModelFamily.KIMI
+        )
+
+        families.forEach { family ->
+            val messages = buildList<ChatMessage> {
+                add(ChatMessage(role = "system", content = "FUSION_MODEL_FAMILY=${family.name}"))
+                add(ChatMessage(role = "user", content = "테스트"))
+            }
+
+            val prepared = FusionPromptAdapters.prepareMessagesForModel(messages)
+            assertEquals("Model family $family must be extracted correctly", family, prepared.modelFamily)
+
+            val adapter = FusionPromptAdapters.forFamily(prepared.modelFamily)
+            assertEquals("Adapter for $family must match", family, adapter.family)
         }
     }
 
