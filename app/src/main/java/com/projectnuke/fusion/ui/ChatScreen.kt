@@ -3325,13 +3325,14 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                                              "",
                                              0L,
                                              null,
-                                             buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = false, mtpStatus = runtimeFields.mtpStatus, actualBackend = runtimeFields.actualBackend, actualVisionBackend = runtimeFields.actualVisionBackend)),
-                                             rawOutcome.stats,
-                                             buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, requestSettings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes)
+                                              buildEffectiveSettingsLine(buildEffectiveRuntimeSettings(modelName = snapshot.selectedModelId!!, modelPath = activeModelPath!!, settings = requestSettings, reasoningEnabled = snapshot.reasoningEnabled, webSearchEnabled = false, mtpStatus = runtimeFields.mtpStatus, actualBackend = runtimeFields.actualBackend, actualVisionBackend = runtimeFields.actualVisionBackend)),
+                                              null,
+                                              buildAppliedRuntimeLine(runtimeFields.actualBackend, runtimeFields.mtpStatus, requestSettings.speculativeDecodingEnabled == true, runtimeFields.fallbackEventCodes)
                                          ),
-                                         generationStatus = "오류 발생"
-                                     )
-                                     return@start
+                                          generationStatus = "오류 발생"
+                                      )
+                                      }
+                                      return@start
                                  }
                                             }
 
@@ -3415,7 +3416,7 @@ if (!isStyleRegeneration && generationMode != ChatGenerationMode.EXTERNAL_AI_API
                     }
                 )
             }
-            }
+        }
         },
         content = { innerPadding ->
         Box(
