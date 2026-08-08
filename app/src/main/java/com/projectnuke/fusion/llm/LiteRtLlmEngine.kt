@@ -458,6 +458,26 @@ class LiteRtLlmEngine(
         val outcomeFingerprint = outcome.fingerprint ?: ModelFingerprint.of(profile.modelPath)
         val outcomeCapabilityResult = outcome.mtpCapabilityResult
 
+        // Phase 2: Separate stable acquisition events from request-local events
+        // Coordinator returns all events in outcome.fallbackEvents; we must split them.
+        val (stableAcquisitionEvents, requestLocalEvents) = outcome.fallbackEvents.partition { event ->
+            // Stable events: from actual engine initialization attempts
+            when (event.reason) {
+                FallbackReason.MTP_ENGINE_INIT_FAILED,
+                FallbackReason.BACKEND_ENGINE_INIT_FAILED,
+                FallbackReason.GPU_VISION_BACKEND_FAILED_CPU_VISION_SELECTED,
+                FallbackReason.GPU_TEXT_ENGINE_FAILED_CPU_SELECTED,
+                FallbackReason.SPECULATIVE_ENABLE_FLAG_SETTLEMENT_FAILED,
+                FallbackReason.SPECULATIVE_DISABLE_FLAG_SETTLEMENT_FAILED,
+                FallbackReason.MTP_UNSUPPORTED,
+                FallbackReason.ALL_CANDIDATES_EXHAUSTED -> true
+                // Request-local (cooldown/skip) events:
+                FallbackReason.MTP_SKIPPED_RECENT_FAILURE,
+                FallbackReason.BACKEND_SKIPPED_RECENT_FAILURE,
+                FallbackReason.ALL_CANDIDATES_SKIPPED_RECENT_FAILURE -> false
+            }
+        }
+
         // Update runtime state based on outcome
         val selectionResult = outcome.selection
         if (selectionResult != null) {
@@ -472,7 +492,7 @@ class LiteRtLlmEngine(
                 selectedMtpEnabled = selectedMtpEnabled,
                 mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                 mtpCapabilityResult = outcomeCapabilityResult,
-                mtpSkippedByMemory = outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
+                mtpSkippedByMemory = requestLocalEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
                 mtpAttempted = outcomeCapabilityResult != null || outcome.fallbackEvents.any { it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED } || selectedMtpEnabled
             )
             
@@ -482,7 +502,7 @@ class LiteRtLlmEngine(
                 selectedMtpEnabled = selectedMtpEnabled,
                 mtpFlagAppliedForMtp = mtpFlagAppliedForMtp,
                 mtpCapabilityResult = outcomeCapabilityResult,
-                mtpSkippedByMemory = outcome.fallbackEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
+                mtpSkippedByMemory = requestLocalEvents.any { it.reason == FallbackReason.MTP_SKIPPED_RECENT_FAILURE },
                 mtpAttempted = outcomeCapabilityResult != null || outcome.fallbackEvents.any { it.attemptedMtpEnabled == true && it.reason == FallbackReason.MTP_ENGINE_INIT_FAILED } || selectedMtpEnabled
             )
             
@@ -497,26 +517,44 @@ class LiteRtLlmEngine(
                 fallbackReason = outcome.fallbackEvents.firstOrNull()?.reason?.name ?: fallbackReason
             )
 
-            currentRequestFallbackEvents = emptyList()
-            loadedState = LoadedRuntimeState(
-                engine = resolvedEngine,
-                key = EngineRuntimeKey(
-                    fingerprint = outcomeFingerprint,
-                    accelerator = profile.accelerator,
-                    kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
-                    enableVisionBackend = profile.enableVisionBackend,
-                    mtpEnabled = selectedMtpEnabled,
-                    selectedBackend = actualTextBackend
-                ),
-                mtpStatus = lastMtpStatus,
-                runtimeSelection = runtimeSelection,
-                actualTextBackend = actualTextBackend,
-                actualVisionBackend = selectionResult.visionBackend,
-                fallbackEvents = outcome.fallbackEvents
-            )
+            // Phase 2: Request-local events live in currentRequestFallbackEvents
+            // Stable acquisition events go into LoadedRuntimeState.fallbackEvents
+            // When reusing an engine, stable events are preserved, request-local are replaced
+            val currentLoadedState = loadedState
+            val isFreshEngine = currentLoadedState == null || currentLoadedState.engine != resolvedEngine
+            if (isFreshEngine) {
+                currentRequestFallbackEvents = requestLocalEvents
+                loadedState = LoadedRuntimeState(
+                    engine = resolvedEngine,
+                    key = EngineRuntimeKey(
+                        fingerprint = outcomeFingerprint,
+                        accelerator = profile.accelerator,
+                        kvCacheCapacityTokens = profile.kvCacheCapacityTokens,
+                        enableVisionBackend = profile.enableVisionBackend,
+                        mtpEnabled = selectedMtpEnabled,
+                        selectedBackend = actualTextBackend
+                    ),
+                    mtpStatus = lastMtpStatus,
+                    runtimeSelection = runtimeSelection,
+                    actualTextBackend = actualTextBackend,
+                    actualVisionBackend = selectionResult.visionBackend,
+                    fallbackEvents = stableAcquisitionEvents
+                )
+            } else {
+                // Reusing existing engine: preserve stable events, update request-local
+                currentRequestFallbackEvents = requestLocalEvents
+                loadedState = currentLoadedState.copy(
+                    mtpStatus = lastMtpStatus,
+                    runtimeSelection = runtimeSelection,
+                    actualTextBackend = actualTextBackend,
+                    actualVisionBackend = selectionResult.visionBackend
+                    // fallbackEvents (stable) unchanged
+                )
+            }
             return resolvedEngine
         } else {
-            // Failure path
+            // Failure path: no engine acquired
+            currentRequestFallbackEvents = requestLocalEvents
             settleSpeculativeDecodingFlag(false)
             lastMtpStatus = MtpRuntimeStatus.FAILED
             val attemptSnapshot = outcome.failure?.let { failure ->
