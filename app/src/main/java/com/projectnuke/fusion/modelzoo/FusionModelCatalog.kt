@@ -3,6 +3,7 @@ package com.projectnuke.fusion.modelzoo
 import android.content.Context
 import android.util.AtomicFile
 import com.projectnuke.fusion.model.AcceleratorMode
+import com.projectnuke.fusion.model.LocalGenerationSettingsPolicy
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
